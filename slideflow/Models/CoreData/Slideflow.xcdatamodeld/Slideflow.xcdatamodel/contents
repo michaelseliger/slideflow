@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23231" systemVersion="25A5312d" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+    <entity name="DirectoryConfig" representedClassName="DirectoryConfig" syncable="YES">
+        <attribute name="addedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="directoryId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="isActive" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="lastScanDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="path" attributeType="String"/>
+        <attribute name="securityBookmark" optional="YES" attributeType="Binary"/>
+        <attribute name="slideCount" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="presentations" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="SourcePresentation" inverseName="directory" inverseEntity="SourcePresentation"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="path"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="IndexedSlide" representedClassName="IndexedSlide" syncable="YES">
+        <attribute name="extractedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="hasImages" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="hasMedia" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="searchRank" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
+        <attribute name="slideId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="slideLayout" optional="YES" attributeType="String"/>
+        <attribute name="slideNumber" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="textContent" attributeType="String"/>
+        <attribute name="thumbnailHeight" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="thumbnailPath" attributeType="String"/>
+        <attribute name="thumbnailWidth" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="sourcePresentation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="SourcePresentation" inverseName="slides" inverseEntity="SourcePresentation"/>
+        <relationship name="workspaceSlides" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="WorkspaceSlide" inverseName="slide" inverseEntity="WorkspaceSlide"/>
+    </entity>
+    <entity name="SourcePresentation" representedClassName="SourcePresentation" syncable="YES">
+        <attribute name="errorMessage" optional="YES" attributeType="String"/>
+        <attribute name="fileCreatedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="fileModifiedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="filename" attributeType="String"/>
+        <attribute name="filePath" attributeType="String"/>
+        <attribute name="fileSize" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="indexedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="indexingStatus" attributeType="String" defaultValueString="pending"/>
+        <attribute name="pdfCachePath" optional="YES" attributeType="String"/>
+        <attribute name="presentationId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="securityBookmark" optional="YES" attributeType="Binary"/>
+        <attribute name="totalSlideCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="directory" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="DirectoryConfig" inverseName="presentations" inverseEntity="DirectoryConfig"/>
+        <relationship name="slides" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="IndexedSlide" inverseName="sourcePresentation" inverseEntity="IndexedSlide"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="filePath"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="Workspace" representedClassName="Workspace" syncable="YES">
+        <attribute name="createdDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="isActive" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="modifiedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="slideCount" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="workspaceId" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="workspaceSlides" optional="YES" toMany="YES" deletionRule="Cascade" ordered="YES" destinationEntity="WorkspaceSlide" inverseName="workspace" inverseEntity="WorkspaceSlide"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="name"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="WorkspaceSlide" representedClassName="WorkspaceSlide" syncable="YES">
+        <attribute name="addedDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="notes" optional="YES" attributeType="String"/>
+        <attribute name="orderIndex" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="workspaceSlideId" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="slide" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="IndexedSlide" inverseName="workspaceSlides" inverseEntity="IndexedSlide"/>
+        <relationship name="workspace" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="Workspace" inverseName="workspaceSlides" inverseEntity="Workspace"/>
+    </entity>
+</model>

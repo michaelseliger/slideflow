@@ -1,0 +1,7 @@
+// Aspose Slides Cloud API Credentials
+// Get free API key: https://dashboard.aspose.cloud/applications
+// Copy this file to Config.xcconfig and fill in your credentials
+// Config.xcconfig is gitignored to protect your secrets
+
+ASPOSE_CLIENT_ID = your_client_id_here
+ASPOSE_CLIENT_SECRET = your_client_secret_here

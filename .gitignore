@@ -1,0 +1,30 @@
+# Xcode
+*.xcuserstate
+*.xcuserdatad
+DerivedData/
+.build/
+*.swiftpm/
+Packages/
+*.xcworkspace/xcuserdata/
+
+# Sensitive config
+Config.xcconfig
+
+# Test data
+*.pptx
+*.pdf
+
+# Thumbnails cache
+Thumbnails/
+
+# Universal
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+
+# Logs
+*.log
+.env*
