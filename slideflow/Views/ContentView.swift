@@ -34,6 +34,76 @@ struct ContentView: View {
     }
 }
 
+/// Card component for individual decks
+struct DeckCard: View {
+    let workspace: Workspace
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        ModernCard {
+            VStack(alignment: .leading, spacing: 16) {
+                // Header: Icon + Name + Delete button
+                HStack(spacing: 12) {
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.brandPrimary)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(workspace.name)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.textPrimary)
+
+                        Text("Modified \(workspace.modifiedDate, style: .relative)")
+                            .font(.caption)
+                            .foregroundColor(.textSecondary)
+                    }
+
+                    Spacer()
+
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.8))
+                            .font(.system(size: 16))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete deck")
+                }
+
+                Divider()
+
+                // Stats: Slide count
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.on.doc.fill")
+                        .foregroundColor(.brandPrimary.opacity(0.7))
+                        .font(.system(size: 14))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(workspace.slideCount)")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.textPrimary)
+
+                        Text("slides")
+                            .font(.caption)
+                            .foregroundColor(.textSecondary)
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .onTapGesture {
+            onSelect()
+        }
+        .overlay(
+            isSelected ?
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.brandPrimary, lineWidth: 2)
+                : nil
+        )
+    }
+}
+
 /// Modern split view for creating presentations
 struct SearchAndWorkspaceView: View {
     @Environment(\.managedObjectContext) private var viewContext
@@ -44,6 +114,8 @@ struct SearchAndWorkspaceView: View {
 
     @State private var selectedWorkspace: Workspace?
     @State private var showingCreateWorkspace = false
+    @State private var selectedDeckToDelete: Workspace?
+    @State private var showingDeleteConfirmation = false
 
     var body: some View {
         HSplitView {
@@ -61,12 +133,12 @@ struct SearchAndWorkspaceView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(24)
-                .background(
-                    LinearGradient(
-                        colors: [Color.brandPrimary.opacity(0.08), Color.brandPrimary.opacity(0.02)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+                .background(Color.backgroundCard)
+                .overlay(
+                    Rectangle()
+                        .fill(Color.borderLight)
+                        .frame(height: 1),
+                    alignment: .bottom
                 )
 
                 SearchView()
@@ -94,44 +166,38 @@ struct SearchAndWorkspaceView: View {
                             showingCreateWorkspace = true
                         }
                     }
-
-                    // Workspace picker
-                    if !workspaces.isEmpty {
-                        HStack(spacing: 12) {
-                            Image(systemName: "folder.fill")
-                                .foregroundColor(.brandPrimary)
-                                .font(.system(size: 16))
-
-                            Picker("", selection: $selectedWorkspace) {
-                                Text("Select a deck...").tag(nil as Workspace?)
-                                ForEach(workspaces) { workspace in
-                                    HStack {
-                                        Text(workspace.name)
-                                        Spacer()
-                                        Badge(
-                                            text: "\(workspace.slideCount) slides",
-                                            color: .brandPrimary
-                                        )
-                                    }
-                                    .tag(workspace as Workspace?)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity)
-                        }
-                        .padding(12)
-                        .background(Color.backgroundSubtle)
-                        .cornerRadius(10)
-                    }
                 }
                 .padding(24)
-                .background(Color.white)
+                .background(Color.backgroundCard)
                 .overlay(
                     Rectangle()
                         .fill(Color.borderLight)
                         .frame(height: 1),
                     alignment: .bottom
                 )
+
+                // Deck cards
+                if !workspaces.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            ForEach(workspaces) { workspace in
+                                DeckCard(
+                                    workspace: workspace,
+                                    isSelected: selectedWorkspace == workspace,
+                                    onSelect: {
+                                        selectedWorkspace = workspace
+                                    },
+                                    onDelete: {
+                                        selectedDeckToDelete = workspace
+                                        showingDeleteConfirmation = true
+                                    }
+                                )
+                            }
+                        }
+                        .padding(24)
+                    }
+                    .background(Color.backgroundPrimary)
+                }
 
                 // Workspace content
                 if let workspace = selectedWorkspace {
@@ -154,10 +220,34 @@ struct SearchAndWorkspaceView: View {
         .sheet(isPresented: $showingCreateWorkspace) {
             CreateWorkspaceView(isPresented: $showingCreateWorkspace)
         }
+        .alert("Delete Deck", isPresented: $showingDeleteConfirmation, presenting: selectedDeckToDelete) { deck in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                deleteDeck(deck)
+            }
+        } message: { deck in
+            Text("Are you sure you want to delete '\(deck.name)'? This will remove all slides from the deck.")
+        }
         .onAppear {
             if selectedWorkspace == nil && !workspaces.isEmpty {
                 selectedWorkspace = workspaces.first
             }
+        }
+    }
+
+    private func deleteDeck(_ workspace: Workspace) {
+        // If deleting the selected workspace, clear selection
+        if selectedWorkspace == workspace {
+            selectedWorkspace = nil
+        }
+
+        // Delete the workspace
+        viewContext.delete(workspace)
+
+        do {
+            try viewContext.save()
+        } catch {
+            print("Error deleting workspace: \(error)")
         }
     }
 }

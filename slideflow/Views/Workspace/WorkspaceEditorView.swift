@@ -39,9 +39,13 @@ struct WorkspaceEditorView: View {
                 .disabled(workspace.slideCount == 0)
             }
             .padding()
-            .background(Color.secondary.opacity(0.1))
-
-            Divider()
+            .background(Color.backgroundCard)
+            .overlay(
+                Rectangle()
+                    .fill(Color.borderLight)
+                    .frame(height: 1),
+                alignment: .bottom
+            )
 
             // Slides
             if workspaceSlides.isEmpty {
@@ -195,22 +199,35 @@ struct WorkspaceEditorView: View {
 
 struct EmptyWorkspaceView: View {
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "square.and.arrow.down")
-                .font(.system(size: 48))
-                .foregroundColor(.blue)
+        VStack(spacing: 20) {
+            // Dashed border visual
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(
+                    style: StrokeStyle(lineWidth: 2, dash: [10, 5])
+                )
+                .foregroundColor(Color.brandPrimary.opacity(0.3))
+                .frame(width: 300, height: 200)
+                .overlay(
+                    VStack(spacing: 16) {
+                        Image(systemName: "square.and.arrow.down.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.brandPrimary.opacity(0.6))
 
-            Text("Drop slides here")
-                .font(.headline)
-                .foregroundColor(.primary)
+                        VStack(spacing: 8) {
+                            Text("Drop Slides Here")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(.primary)
 
-            Text("Drag slides from search results and drop them here")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                            Text("Drag slides from the left to build your presentation")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 250)
+                        }
+                    }
+                )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.blue.opacity(0.05))
+        .background(Color.backgroundPrimary)
     }
 }

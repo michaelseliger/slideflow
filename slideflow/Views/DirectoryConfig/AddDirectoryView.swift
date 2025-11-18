@@ -17,52 +17,98 @@ struct AddDirectoryView: View {
     @State private var isIndexing = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Add Directory")
-                .font(.headline)
+        VStack(spacing: 24) {
+            // Icon and title
+            VStack(spacing: 8) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 48))
+                    .foregroundColor(.brandPrimary)
 
-            if let path = selectedPath.isEmpty ? nil : selectedPath {
-                HStack {
-                    Image(systemName: "folder")
-                    Text(path)
-                        .font(.body)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .padding()
-                .background(Color.secondary.opacity(0.1))
-                .cornerRadius(8)
+                Text("Add Slide Directory")
+                    .font(.title2.bold())
+
+                Text("Choose a folder containing PowerPoint presentations")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
 
-            Button("Choose Directory...") {
+            // Selected path display
+            if !selectedPath.isEmpty {
+                ModernCard {
+                    HStack(spacing: 12) {
+                        Image(systemName: "folder.fill")
+                            .foregroundColor(.brandPrimary)
+                            .font(.system(size: 20))
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Selected Location")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.secondary)
+
+                            Text(selectedPath)
+                                .font(.body)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            // Choose button
+            PrimaryButton("Choose Directory...", icon: "folder") {
                 selectDirectory()
             }
             .disabled(isIndexing)
 
+            // Error message
             if let error = errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                    Text(error)
+                        .font(.caption)
+                }
+                .foregroundColor(.red)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(8)
             }
 
-            HStack {
-                Button("Cancel") {
+            Divider()
+
+            // Actions
+            HStack(spacing: 12) {
+                SecondaryButton("Cancel") {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
-                Button("Add") {
-                    addDirectory()
+                if isIndexing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Indexing...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    PrimaryButton("Add & Index", icon: "arrow.down.doc") {
+                        addDirectory()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(selectedPath.isEmpty)
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selectedPath.isEmpty || isIndexing)
             }
-            .padding(.top)
         }
-        .padding()
-        .frame(width: 500, height: 250)
+        .padding(32)
+        .frame(width: 540)
+        .background(Color.backgroundCard)
     }
 
     private func selectDirectory() {

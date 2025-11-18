@@ -12,13 +12,15 @@ struct SearchResultsView: View {
     let slides: [IndexedSlide]
     @State private var selectedSlide: IndexedSlide?
 
+    // Use flexible 2-column layout for better space usage
     private let columns = [
-        GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 16)
+        GridItem(.flexible(minimum: 200, maximum: 350), spacing: 20),
+        GridItem(.flexible(minimum: 200, maximum: 350), spacing: 20)
     ]
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 16) {
+            LazyVGrid(columns: columns, spacing: 20) {
                 ForEach(slides) { slide in
                     SlideCard(slide: slide)
                         .onTapGesture {
@@ -30,7 +32,7 @@ struct SearchResultsView: View {
                         }
                 }
             }
-            .padding()
+            .padding(24)
         }
         .sheet(item: $selectedSlide) { slide in
             SlidePreviewView(slide: slide)
@@ -53,19 +55,19 @@ struct SlideCard: View {
                         .aspectRatio(contentMode: .fit)
                 } else if isLoading {
                     Rectangle()
-                        .fill(Color.secondary.opacity(0.2))
+                        .fill(Color.backgroundSubtle)
                         .overlay {
                             ProgressView()
                         }
                 } else {
                     // Fallback: Show text preview
                     Rectangle()
-                        .fill(Color.blue.opacity(0.1))
+                        .fill(Color.brandPrimary.opacity(0.08))
                         .overlay {
                             VStack {
                                 Image(systemName: "doc.text")
                                     .font(.system(size: 32))
-                                    .foregroundColor(.blue)
+                                    .foregroundColor(.brandPrimary)
                                 Text("Slide \(slide.slideNumber)")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
@@ -75,8 +77,12 @@ struct SlideCard: View {
             }
             .frame(height: 150)
             .frame(maxWidth: .infinity)
-            .background(Color.secondary.opacity(0.1))
+            .background(Color.backgroundCard)
             .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.borderLight, lineWidth: 0.5)
+            )
 
             // Slide info
             VStack(alignment: .leading, spacing: 4) {
@@ -97,9 +103,14 @@ struct SlideCard: View {
                 }
             }
         }
-        .padding(8)
-        .background(Color.secondary.opacity(0.05))
-        .cornerRadius(8)
+        .padding(12)
+        .background(Color.backgroundCard)
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.borderLight, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.02), radius: 4, x: 0, y: 2)
         .onAppear {
             loadThumbnail()
         }

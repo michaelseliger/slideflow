@@ -20,7 +20,7 @@ class ThumbnailGenerator {
 
     init() {}
 
-    /// Generate thumbnail for entire PPTX file using Quick Look
+    /// Generate thumbnail for a specific slide by extracting it to a temporary PPTX
     func generateThumbnailForSlide(presentationPath: String, slideNumber: Int) async -> Result<String, ThumbnailGeneratorError> {
         let fileURL = URL(fileURLWithPath: presentationPath)
 
@@ -28,7 +28,52 @@ class ThumbnailGenerator {
             return .failure(.fileNotFound)
         }
 
-        // Use Quick Look to generate thumbnail
+        // Create temp directory for single-slide extraction
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent("SlideflowThumbnails/\(UUID().uuidString)")
+        let singleSlideURL = tempDir.appendingPathComponent("slide\(slideNumber).pptx")
+
+        do {
+            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+            // Extract just this slide to a new PPTX file
+            let extractResult = await extractSingleSlide(from: presentationPath, slideNumber: slideNumber, to: singleSlideURL.path)
+
+            guard case .success = extractResult else {
+                // Fallback: generate thumbnail from entire presentation (will show first slide)
+                print("⚠️ Could not extract slide \(slideNumber), using full presentation thumbnail")
+                return await generateThumbnailFromFile(fileURL: fileURL, slideNumber: slideNumber)
+            }
+
+            // Generate thumbnail from the single-slide PPTX
+            let result = await generateThumbnailFromFile(fileURL: singleSlideURL, slideNumber: slideNumber)
+
+            // Cleanup temp file
+            try? fileManager.removeItem(at: tempDir)
+
+            return result
+        } catch {
+            return .failure(.saveFailed(underlying: error))
+        }
+    }
+
+    /// Extract a single slide to a new PPTX file using PPTXMerger
+    private func extractSingleSlide(from sourcePath: String, slideNumber: Int, to outputPath: String) async -> Result<Void, ThumbnailGeneratorError> {
+        let merger = PPTXMerger()
+
+        // Use PPTXMerger to create a new PPTX with just this slide
+        let slideSpecs: [(sourcePath: String, slideNumbers: [Int])] = [(sourcePath: sourcePath, slideNumbers: [slideNumber])]
+        let result = await merger.mergeSlides(specs: slideSpecs, to: outputPath)
+
+        switch result {
+        case .success:
+            return .success(())
+        case .failure:
+            return .failure(.thumbnailGenerationFailed)
+        }
+    }
+
+    /// Generate thumbnail from a PPTX file using QuickLook
+    private func generateThumbnailFromFile(fileURL: URL, slideNumber: Int) async -> Result<String, ThumbnailGeneratorError> {
         let size = CGSize(width: 400, height: 300)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         let request = QLThumbnailGenerator.Request(
@@ -71,7 +116,7 @@ class ThumbnailGenerator {
                     }
 
                     try pngData.write(to: thumbnailPath)
-                    print("✅ Thumbnail saved: \(thumbnailPath.path)")
+                    print("✅ Thumbnail for slide \(slideNumber) saved: \(thumbnailPath.path)")
                     continuation.resume(returning: .success(thumbnailPath.path))
                 } catch {
                     print("❌ Failed to save thumbnail: \(error.localizedDescription)")

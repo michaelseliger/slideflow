@@ -2,66 +2,135 @@
 //  ColorScheme.swift
 //  Slideflow
 //
-//  Modern color palette for marketers
+//  Adaptive color system for light and dark mode
 //
 
 import SwiftUI
+import AppKit
 
 extension Color {
-    // MARK: - Primary Brand Colors
+    // MARK: - Adaptive Brand Colors
 
-    /// Main brand color - vibrant purple
-    static let brandPrimary = Color(red: 0.46, green: 0.29, blue: 0.89) // #7549E3
+    /// Main brand color - vibrant purple (adapts to light/dark mode)
+    static var brandPrimary: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+                // Lighter, more vibrant purple for dark mode
+                return NSColor(red: 0.60, green: 0.40, blue: 0.95, alpha: 1.0)
+            } else {
+                // Original purple for light mode
+                return NSColor(red: 0.46, green: 0.29, blue: 0.89, alpha: 1.0)
+            }
+        })
+    }
 
-    /// Secondary brand color - soft coral
-    static let brandSecondary = Color(red: 1.0, green: 0.45, blue: 0.45) // #FF7373
+    /// Secondary brand color - soft coral (adapts to light/dark mode)
+    static var brandSecondary: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+                // Softer coral for dark mode
+                return NSColor(red: 1.0, green: 0.55, blue: 0.55, alpha: 1.0)
+            } else {
+                // Original coral for light mode
+                return NSColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
+            }
+        })
+    }
 
-    /// Accent color - warm orange
-    static let brandAccent = Color(red: 1.0, green: 0.62, blue: 0.29) // #FF9E4A
+    /// Accent color - warm orange (adapts to light/dark mode)
+    static var brandAccent: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+                // Brighter orange for dark mode
+                return NSColor(red: 1.0, green: 0.68, blue: 0.40, alpha: 1.0)
+            } else {
+                // Original orange for light mode
+                return NSColor(red: 1.0, green: 0.62, blue: 0.29, alpha: 1.0)
+            }
+        })
+    }
 
-    /// Success color - fresh green
-    static let brandSuccess = Color(red: 0.24, green: 0.82, blue: 0.55) // #3DD18C
+    /// Success color - fresh green (adapts to light/dark mode)
+    static var brandSuccess: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+                // Brighter green for dark mode
+                return NSColor(red: 0.30, green: 0.88, blue: 0.60, alpha: 1.0)
+            } else {
+                // Original green for light mode
+                return NSColor(red: 0.24, green: 0.82, blue: 0.55, alpha: 1.0)
+            }
+        })
+    }
 
-    // MARK: - Neutral Colors
+    // MARK: - Semantic System Colors (Auto-adapt)
 
-    /// Background - soft off-white
-    static let backgroundPrimary = Color(red: 0.98, green: 0.98, blue: 0.99) // #FAFAFC
+    /// Primary background - window background (auto-adapts)
+    static var backgroundPrimary: Color {
+        Color(nsColor: .windowBackgroundColor)
+    }
 
-    /// Card background - pure white
-    static let backgroundCard = Color.white
+    /// Card/Control background (auto-adapts)
+    static var backgroundCard: Color {
+        Color(nsColor: .controlBackgroundColor)
+    }
 
-    /// Subtle background - light gray
-    static let backgroundSubtle = Color(red: 0.95, green: 0.96, blue: 0.98) // #F3F4FA
+    /// Subtle background for secondary elements (auto-adapts)
+    static var backgroundSubtle: Color {
+        Color(nsColor: .quaternaryLabelColor).opacity(0.3)
+    }
 
-    /// Border color - light purple tint
-    static let borderLight = Color(red: 0.91, green: 0.91, blue: 0.95) // #E8E8F2
+    /// Under page background (auto-adapts)
+    static var backgroundUnderPage: Color {
+        Color(nsColor: .underPageBackgroundColor)
+    }
 
-    // MARK: - Text Colors
+    /// Border/separator color (auto-adapts)
+    static var borderLight: Color {
+        Color(nsColor: .separatorColor)
+    }
 
-    /// Primary text - dark charcoal
-    static let textPrimary = Color(red: 0.15, green: 0.16, blue: 0.21) // #262935
+    // MARK: - Semantic Text Colors (Auto-adapt)
 
-    /// Secondary text - medium gray
-    static let textSecondary = Color(red: 0.51, green: 0.54, blue: 0.62) // #828A9E
+    /// Primary text color (auto-adapts)
+    static var textPrimary: Color {
+        Color(nsColor: .labelColor)
+    }
 
-    /// Tertiary text - light gray
-    static let textTertiary = Color(red: 0.69, green: 0.72, blue: 0.79) // #B0B7C9
+    /// Secondary text color (auto-adapts)
+    static var textSecondary: Color {
+        Color(nsColor: .secondaryLabelColor)
+    }
+
+    /// Tertiary text color (auto-adapts)
+    static var textTertiary: Color {
+        Color(nsColor: .tertiaryLabelColor)
+    }
+
+    /// Quaternary text color for de-emphasized content (auto-adapts)
+    static var textQuaternary: Color {
+        Color(nsColor: .quaternaryLabelColor)
+    }
 }
 
 // MARK: - Gradient Helpers
 
 extension LinearGradient {
-    /// Purple to pink gradient
-    static let brandGradient = LinearGradient(
-        colors: [Color.brandPrimary, Color.brandSecondary],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    /// Purple to pink gradient (adapts to mode via brand colors)
+    static var brandGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color.brandPrimary, Color.brandSecondary],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
 
-    /// Warm sunset gradient
-    static let accentGradient = LinearGradient(
-        colors: [Color.brandAccent, Color.brandSecondary],
-        startPoint: .leading,
-        endPoint: .trailing
-    )
+    /// Warm sunset gradient (adapts to mode via brand colors)
+    static var accentGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color.brandAccent, Color.brandSecondary],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
 }

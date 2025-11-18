@@ -113,39 +113,72 @@ struct CreateWorkspaceView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Create New Workspace")
-                .font(.headline)
+        VStack(spacing: 24) {
+            // Icon and title
+            VStack(spacing: 8) {
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.brandPrimary)
 
-            TextField("Workspace Name", text: $workspaceName)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit {
-                    createWorkspace()
-                }
+                Text("Create New Deck")
+                    .font(.title2.bold())
 
-            if let error = errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
+                Text("Build beautiful presentations by combining slides")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
 
-            HStack {
-                Button("Cancel") {
+            // Input field
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Deck Name")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+
+                TextField("e.g., Marketing Q1 Presentation", text: $workspaceName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body)
+                    .onSubmit {
+                        createWorkspace()
+                    }
+            }
+
+            if let error = errorMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                    Text(error)
+                        .font(.caption)
+                }
+                .foregroundColor(.red)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(8)
+            }
+
+            Divider()
+
+            // Actions
+            HStack(spacing: 12) {
+                SecondaryButton("Cancel") {
                     isPresented = false
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
-                Button("Create") {
+                PrimaryButton("Create Deck", icon: "plus.circle.fill") {
                     createWorkspace()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(workspaceName.isEmpty)
             }
         }
-        .padding()
-        .frame(width: 400, height: 200)
+        .padding(32)
+        .frame(width: 480)
+        .background(Color.backgroundCard)
     }
 
     private func createWorkspace() {

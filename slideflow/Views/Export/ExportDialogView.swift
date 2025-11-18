@@ -23,66 +23,115 @@ struct ExportDialogView: View {
     private let exporter = PowerPointExporter()
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Export Workspace")
-                .font(.headline)
-
+        VStack(spacing: 24) {
             if !exportSuccess {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Workspace: \(workspace.name)")
-                        .font(.subheadline)
+                // Icon and title
+                VStack(spacing: 8) {
+                    Image(systemName: "square.and.arrow.up.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.brandPrimary)
 
-                    Text("\(workspace.slideCount) slides will be exported")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Text("Export Presentation")
+                        .font(.title2.bold())
 
-                    if let path = selectedPath {
-                        HStack {
-                            Image(systemName: "doc.fill")
-                            Text(path)
-                                .font(.caption)
-                                .lineLimit(1)
-                        }
-                        .padding(8)
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(4)
-                    }
-
-                    Button("Choose Location...") {
-                        selectOutputLocation()
-                    }
-                    .disabled(isExporting)
-
-                    if workspace.slideCount > 100 {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle")
-                                .foregroundColor(.orange)
-                            Text("Large workspace - export may take several minutes")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                    }
-                }
-
-                if isExporting {
-                    VStack(spacing: 8) {
-                        ProgressView(value: exportProgress, total: 1.0)
-
-                        Text("Exporting... \(Int(exportProgress * 100))%")
-                            .font(.caption)
+                    HStack(spacing: 4) {
+                        Text("\(workspace.slideCount) slides")
+                            .font(.subheadline)
                             .foregroundColor(.secondary)
+                        Text("from")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text("\"\(workspace.name)\"")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.primary)
                     }
-                    .padding()
                 }
 
+                // Export location
+                if let path = selectedPath {
+                    ModernCard {
+                        HStack(spacing: 12) {
+                            Image(systemName: "doc.fill")
+                                .foregroundColor(.brandPrimary)
+                                .font(.system(size: 20))
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Export Location")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.secondary)
+
+                                Text(path)
+                                    .font(.body)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                // Choose location button
+                PrimaryButton("Choose Location...", icon: "folder") {
+                    selectOutputLocation()
+                }
+                .disabled(isExporting)
+
+                // Large workspace warning
+                if workspace.slideCount > 100 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.fill")
+                            .font(.caption)
+                        Text("Large deck - export may take several minutes")
+                            .font(.caption)
+                    }
+                    .foregroundColor(.orange)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.08))
+                    .cornerRadius(8)
+                }
+
+                // Progress indicator
+                if isExporting {
+                    VStack(spacing: 12) {
+                        ProgressView(value: exportProgress, total: 1.0)
+                            .tint(.brandPrimary)
+
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Exporting... \(Int(exportProgress * 100))%")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(16)
+                    .background(Color.backgroundSubtle)
+                    .cornerRadius(10)
+                }
+
+                // Error message
                 if let error = errorMessage {
-                    Text(error)
-                        .foregroundColor(.red)
-                        .font(.caption)
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                        Text(error)
+                            .font(.caption)
+                    }
+                    .foregroundColor(.red)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .cornerRadius(8)
                 }
 
-                HStack {
-                    Button("Cancel") {
+                Divider()
+
+                // Actions
+                HStack(spacing: 12) {
+                    SecondaryButton("Cancel") {
                         dismiss()
                     }
                     .keyboardShortcut(.cancelAction)
@@ -90,36 +139,49 @@ struct ExportDialogView: View {
 
                     Spacer()
 
-                    Button("Export") {
+                    PrimaryButton("Export Presentation", icon: "square.and.arrow.up") {
                         performExport()
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(selectedPath == nil || isExporting)
                 }
             } else {
-                VStack(spacing: 16) {
+                // Success state
+                VStack(spacing: 20) {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundColor(.green)
+                        .font(.system(size: 64))
+                        .foregroundColor(.brandSuccess)
 
-                    Text("Export Successful")
-                        .font(.headline)
+                    VStack(spacing: 8) {
+                        Text("Export Successful!")
+                            .font(.title2.bold())
 
-                    if let filePath = exportedFilePath {
-                        Button("Show in Finder") {
-                            showInFinder(path: filePath)
-                        }
+                        Text("Your presentation has been created")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                     }
 
-                    Button("Done") {
+                    if let filePath = exportedFilePath {
+                        SecondaryButton("Show in Finder", icon: "folder") {
+                            showInFinder(path: filePath)
+                        }
+                        .padding(.top, 8)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    PrimaryButton("Done", icon: "checkmark") {
                         dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
                 }
+                .padding(.vertical, 20)
             }
         }
-        .padding()
-        .frame(width: 500, height: exportSuccess ? 300 : 400)
+        .padding(32)
+        .frame(width: 560)
+        .background(Color.backgroundCard)
     }
 
     private func selectOutputLocation() {

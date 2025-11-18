@@ -21,8 +21,12 @@ struct ModernCard<Content: View>: View {
             .padding(20)
             .background(Color.backgroundCard)
             .cornerRadius(16)
-            .shadow(color: Color.black.opacity(0.04), radius: 8, x: 0, y: 2)
-            .shadow(color: Color.black.opacity(0.02), radius: 2, x: 0, y: 1)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.borderLight, lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 8, x: 0, y: 2)
+            .shadow(color: Color.black.opacity(0.01), radius: 2, x: 0, y: 1)
     }
 }
 
