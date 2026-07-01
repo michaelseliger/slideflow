@@ -1,0 +1,278 @@
+//! Tauri command surface — the bridge between the React frontend and
+//! `slideflow-core`. Every command is thin: it locks the [`Library`], calls a
+//! core method, maps the error to a `String`, and returns serde-serializable
+//! model types straight across the IPC boundary.
+//!
+//! Long-running work (scanning, composing, rendering) runs on a blocking
+//! thread so the async runtime and the webview never stall.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use slideflow_core::index::Library;
+use slideflow_core::model::{
+    ComposeReport, DeckRecord, RootRecord, SearchFilters, SearchHit, SlidePick, SlideRecord,
+};
+use slideflow_core::pptx::composer::{compose, ComposeOptions};
+use slideflow_core::pptx::PresentationFile;
+use slideflow_core::render::{render_slide_svg, RenderOptions};
+
+/// Shared, Tauri-managed application state.
+///
+/// Two connections to the same WAL-mode database: `library` serves search,
+/// browse, and small writes; `scan_library` is dedicated to long-running
+/// scans. Scans commit per deck, so searches on `library` stay live (and see
+/// freshly indexed decks) while a scan is in flight instead of queueing
+/// behind one mutex for its whole duration.
+pub struct AppState {
+    /// Interactive connection: search/browse/thumbs/roots.
+    pub library: Mutex<Library>,
+    /// Scan-only connection, held for the duration of a scan.
+    pub scan_library: Mutex<Library>,
+    /// `app_cache_dir/thumbs` — where rendered slide SVGs are cached.
+    pub thumbs_dir: PathBuf,
+    /// Guards against two concurrent scans stepping on each other.
+    pub scanning: AtomicBool,
+}
+
+impl AppState {
+    pub fn new(library: Library, scan_library: Library, thumbs_dir: PathBuf) -> Self {
+        AppState {
+            library: Mutex::new(library),
+            scan_library: Mutex::new(scan_library),
+            thumbs_dir,
+            scanning: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Convenience: map any `Display` error into the `String` Tauri sends to JS.
+fn e<E: std::fmt::Display>(err: E) -> String {
+    err.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Roots / folders
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_roots(state: State<'_, AppState>) -> Result<Vec<RootRecord>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.roots().map_err(e)
+}
+
+#[tauri::command]
+pub async fn add_root(state: State<'_, AppState>, path: String) -> Result<RootRecord, String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.add_root(Path::new(&path)).map_err(e)
+}
+
+#[tauri::command]
+pub async fn remove_root(state: State<'_, AppState>, root_id: i64) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.remove_root(root_id).map_err(e)
+}
+
+// ---------------------------------------------------------------------------
+// Scanning (background thread, event-driven)
+// ---------------------------------------------------------------------------
+
+/// Kick off an incremental rescan of all roots on a background thread.
+///
+/// Progress is streamed to the frontend as `scan:event` events carrying a
+/// [`slideflow_core::model::ScanEvent`] payload. Re-entrancy is prevented by an
+/// [`AtomicBool`]; a second call while a scan runs returns `Ok(false)`.
+#[tauri::command]
+pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    // Claim the scanning flag; bail out (not an error) if one is already running.
+    if state
+        .scanning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(false);
+    }
+
+    let app_for_thread = app.clone();
+    std::thread::spawn(move || {
+        let state = app_for_thread.state::<AppState>();
+        let result = {
+            let mut lib = match state.scan_library.lock() {
+                Ok(lib) => lib,
+                Err(_) => {
+                    state.scanning.store(false, Ordering::SeqCst);
+                    let _ = app_for_thread.emit("scan:error", "library lock poisoned");
+                    return;
+                }
+            };
+            let app_emit = app_for_thread.clone();
+            lib.scan(&mut |event| {
+                let _ = app_emit.emit("scan:event", &event);
+            })
+        };
+        state.scanning.store(false, Ordering::SeqCst);
+        if let Err(err) = result {
+            let _ = app_for_thread.emit("scan:error", err.to_string());
+        }
+    });
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn is_scanning(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.scanning.load(Ordering::SeqCst))
+}
+
+// ---------------------------------------------------------------------------
+// Search / browse
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn search(
+    state: State<'_, AppState>,
+    query: String,
+    filters: SearchFilters,
+) -> Result<Vec<SearchHit>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.search(&query, &filters).map_err(e)
+}
+
+#[tauri::command]
+pub async fn get_decks(state: State<'_, AppState>) -> Result<Vec<DeckRecord>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.decks().map_err(e)
+}
+
+#[tauri::command]
+pub async fn get_deck_slides(
+    state: State<'_, AppState>,
+    deck_id: i64,
+) -> Result<Vec<SlideRecord>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.slides_for_deck(deck_id).map_err(e)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering (SVG thumbnails, cached on disk)
+// ---------------------------------------------------------------------------
+
+/// Render (or serve from cache) the SVG preview for a slide.
+///
+/// The SVG is cached at `thumbs_dir/<slide_id>.svg` and the path persisted onto
+/// the slide row via `set_thumb_path`, so repeat views are a plain file read.
+#[tauri::command]
+pub async fn get_slide_svg(state: State<'_, AppState>, slide_id: i64) -> Result<String, String> {
+    let cache_path = state.thumbs_dir.join(format!("{slide_id}.svg"));
+
+    // Fast path: serve the cached file if present and non-empty.
+    if let Ok(bytes) = fs::read(&cache_path) {
+        if !bytes.is_empty() {
+            return String::from_utf8(bytes).map_err(e);
+        }
+    }
+
+    // Slow path: look up the slide + owning deck, open the deck, render.
+    let (deck_path, slide_index) = {
+        let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+        let slide = lib.slide(slide_id).map_err(e)?;
+        let deck = lib.deck(slide.deck_id).map_err(e)?;
+        (deck.path, slide.slide_index as usize)
+    };
+
+    let pf = PresentationFile::open(Path::new(&deck_path)).map_err(e)?;
+    let svg = render_slide_svg(&pf, slide_index, &RenderOptions::default()).map_err(e)?;
+
+    // Cache to disk (best-effort) and persist the path.
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::write(&cache_path, svg.as_bytes()).is_ok() {
+        if let Ok(mut lib) = state.library.lock() {
+            let _ = lib.set_thumb_path(slide_id, &cache_path.to_string_lossy());
+        }
+    }
+
+    Ok(svg)
+}
+
+// ---------------------------------------------------------------------------
+// Compose / export
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeArgs {
+    pub picks: Vec<SlidePick>,
+    pub output_path: String,
+    pub title: String,
+    pub include_notes: bool,
+}
+
+#[tauri::command]
+pub async fn compose_deck(args: ComposeArgs) -> Result<ComposeReport, String> {
+    // Composition is pure filesystem/CPU work with no `Library` dependency, so
+    // run it on a blocking thread and don't touch the mutex at all.
+    let ComposeArgs {
+        picks,
+        output_path,
+        title,
+        include_notes,
+    } = args;
+    tauri::async_runtime::spawn_blocking(move || {
+        let opts = ComposeOptions {
+            title,
+            include_notes,
+        };
+        compose(&picks, Path::new(&output_path), &opts).map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stats {
+    pub deck_count: i64,
+    pub slide_count: i64,
+}
+
+#[tauri::command]
+pub async fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    let (deck_count, slide_count) = lib.stats().map_err(e)?;
+    Ok(Stats {
+        deck_count,
+        slide_count,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// System integration
+// ---------------------------------------------------------------------------
+
+/// Reveal a file (or folder) in the OS file browser (Finder on macOS).
+#[tauri::command]
+pub async fn reveal_in_finder(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(e)
+}
+
+/// Open a file with its default application.
+#[tauri::command]
+pub async fn open_file(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(e)
+}

@@ -1,0 +1,36 @@
+[package]
+name = "slideflow-desktop"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Slideflow — search your slides, compose new decks with original fidelity."
+default-run = "slideflow-desktop"
+
+# Keep this crate independent of the root Cargo workspace so `cargo test` in the
+# root (CI/Linux) never needs GTK/WebKit. The empty table opts us out.
+[workspace]
+
+[lib]
+name = "slideflow_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "slideflow-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+slideflow-core = { path = "../../../crates/slideflow-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

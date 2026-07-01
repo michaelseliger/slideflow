@@ -1,0 +1,172 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * Theme tokens. Light is the default; `.dark` on <html> flips them.
+ * Colors are stored as raw "R G B" triplets so Tailwind's
+ * `rgb(var(--x) / <alpha>)` can apply opacity.
+ * ------------------------------------------------------------------ */
+:root {
+  --accent-rgb: 10 132 255; /* #0A84FF calm blue */
+  --canvas-rgb: 246 246 247; /* app base */
+  --surface-rgb: 255 255 255; /* opaque grid / inspector */
+  --elevated-rgb: 255 255 255; /* cards, popovers */
+  --hairline-rgb: 0 0 0; /* used at low alpha */
+  --ink-rgb: 28 28 30; /* primary text */
+  --subtle-rgb: 110 110 115; /* secondary text */
+
+  /* Vibrancy materials (sidebar / tray / titlebar) — approximated with a
+     translucent tint + backdrop blur since a webview has no NSVisualEffectView.
+     A native build can layer a real vibrancy view behind these. */
+  --material: 242 242 244;
+  --material-alpha: 0.72;
+}
+
+.dark {
+  --accent-rgb: 10 132 255;
+  --canvas-rgb: 20 20 20; /* #141414 base */
+  --surface-rgb: 30 30 30; /* #1e1e1e panels */
+  --elevated-rgb: 38 38 40;
+  --hairline-rgb: 255 255 255;
+  --ink-rgb: 236 236 238;
+  --subtle-rgb: 152 152 158;
+
+  --material: 34 34 36;
+  --material-alpha: 0.66;
+}
+
+/* Honor the OS accent color when the platform exposes it. */
+@supports (color: AccentColor) {
+  :root {
+    /* Kept commented: AccentColor isn't decomposable to an RGB triplet for the
+       alpha math, so we stick with the calibrated blue above for consistency. */
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: theme("fontFamily.sans");
+  font-size: 13px;
+  color: rgb(var(--ink-rgb));
+  background: rgb(var(--canvas-rgb));
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* No text selection on chrome; content areas opt back in. */
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable {
+  user-select: text;
+}
+
+/* Tabular numerals for counts everywhere they matter. */
+.tabnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Native-feeling material surfaces. */
+.material {
+  background: rgb(var(--material) / var(--material-alpha));
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* Hairline separators (0.5px @2x). */
+.hairline-b {
+  box-shadow: inset 0 -0.5px 0 rgb(var(--hairline-rgb) / 0.12);
+}
+.hairline-t {
+  box-shadow: inset 0 0.5px 0 rgb(var(--hairline-rgb) / 0.12);
+}
+.hairline-r {
+  box-shadow: inset -0.5px 0 0 rgb(var(--hairline-rgb) / 0.1);
+}
+.hairline-l {
+  box-shadow: inset 0.5px 0 0 rgb(var(--hairline-rgb) / 0.1);
+}
+
+/* Draggable window chrome (Tauri). Interactive controls opt out with
+   `[data-tauri-drag-region="false"]` via the `.no-drag` helper. */
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Search snippet highlight. */
+mark {
+  background: rgb(var(--accent-rgb) / 0.22);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+/* Accent ring used for selection (never a full color wash). */
+.ring-accent {
+  box-shadow:
+    0 0 0 2px rgb(var(--canvas-rgb)),
+    0 0 0 4px rgb(var(--accent-rgb));
+}
+
+/* Focus-visible ring for keyboard users. */
+:focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb) / 0.7);
+  outline-offset: 2px;
+}
+
+/* Slim macOS-style scrollbars. */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-rgb) / 0.22);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink-rgb) / 0.35);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Skeleton shimmer for hydrating thumbnails. */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    100deg,
+    rgb(var(--ink-rgb) / 0.05) 30%,
+    rgb(var(--ink-rgb) / 0.1) 50%,
+    rgb(var(--ink-rgb) / 0.05) 70%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    animation: none;
+  }
+  * {
+    scroll-behavior: auto !important;
+  }
+}
