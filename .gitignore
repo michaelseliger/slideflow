@@ -21,3 +21,6 @@ Thumbs.db
 # Logs
 *.log
 .env*
+
+# Claude agent worktrees (session-local)
+.claude/worktrees/
