@@ -1,21 +1,14 @@
-# Xcode
-*.xcuserstate
-*.xcuserdatad
-DerivedData/
-.build/
-*.swiftpm/
-Packages/
-*.xcworkspace/xcuserdata/
+# Rust
+target/
 
-# Sensitive config
-Config.xcconfig
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
 
-# Test data
+# Test data / generated artifacts
 *.pptx
 *.pdf
-
-# Thumbnails cache
-Thumbnails/
 
 # Universal
 .DS_Store
