@@ -10,6 +10,8 @@ dist/
 # Test data / generated artifacts
 *.pptx
 *.pdf
+# ...except the curated example corpus used by tests and docs
+!examples/pptx/**/*.pptx
 
 # Universal
 .DS_Store

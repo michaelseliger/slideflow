@@ -42,7 +42,10 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
-use crate::model::{DeckRecord, RootRecord, ScanEvent, SearchFilters, SearchHit, SlideRecord};
+use crate::model::{
+    DeckRecord, ExportRecord, RootRecord, ScanEvent, ScanRecord, SearchFilters, SearchHit,
+    SearchHistoryEntry, SlideRecord, StatsOverview,
+};
 use crate::pptx::PresentationFile;
 
 const SCHEMA: &str = r#"
@@ -76,6 +79,41 @@ CREATE TABLE IF NOT EXISTS slides(
 );
 CREATE INDEX IF NOT EXISTS idx_decks_root ON decks(root_id);
 CREATE INDEX IF NOT EXISTS idx_slides_deck ON slides(deck_id);
+-- Favorites are keyed by (deck path, slide index) rather than row ids so they
+-- survive rescans (which delete + reinsert slide rows) and app restarts.
+CREATE TABLE IF NOT EXISTS slide_favorites(
+    deck_path   TEXT NOT NULL,
+    slide_index INTEGER NOT NULL,
+    added_unix  INTEGER NOT NULL,
+    PRIMARY KEY(deck_path, slide_index)
+);
+CREATE TABLE IF NOT EXISTS deck_favorites(
+    deck_path  TEXT PRIMARY KEY,
+    added_unix INTEGER NOT NULL
+);
+-- Activity history feeding the stats view.
+CREATE TABLE IF NOT EXISTS search_history(
+    id            INTEGER PRIMARY KEY,
+    query         TEXT NOT NULL,
+    result_count  INTEGER NOT NULL,
+    searched_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS export_history(
+    id            INTEGER PRIMARY KEY,
+    output_path   TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    slide_count   INTEGER NOT NULL,
+    source_decks  INTEGER NOT NULL,
+    exported_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scan_history(
+    id           INTEGER PRIMARY KEY,
+    started_unix INTEGER NOT NULL,
+    duration_ms  INTEGER NOT NULL,
+    indexed      INTEGER NOT NULL,
+    removed      INTEGER NOT NULL,
+    unchanged    INTEGER NOT NULL
+);
 -- A standalone (content-owning) FTS5 table: contentless tables cannot serve
 -- snippet(), and an external-content table would require the content table's
 -- columns to match the FTS column names (which the fixed `slides` schema does
@@ -86,11 +124,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS slides_fts USING fts5(
 );
 "#;
 
-/// Columns selected for a `DeckRecord`, in field order.
+/// Columns selected for a `DeckRecord`, in field order (11 columns; requires
+/// table alias `d`).
 const DECK_COLS: &str = "d.id, d.path, d.file_name, d.title, d.author, d.slide_count, \
-    d.modified_unix, d.size_bytes, d.slide_width_emu, d.slide_height_emu";
-/// Columns selected for a `SlideRecord`, in field order.
-const SLIDE_COLS: &str = "s.id, s.deck_id, s.slide_index, s.title, s.body_text, s.notes, s.thumb_path";
+    d.modified_unix, d.size_bytes, d.slide_width_emu, d.slide_height_emu, \
+    EXISTS(SELECT 1 FROM deck_favorites df WHERE df.deck_path = d.path)";
+/// Columns selected for a `SlideRecord`, in field order (8 columns; requires
+/// table aliases `s` AND `d` — the favorite flag is keyed by deck path).
+const SLIDE_COLS: &str = "s.id, s.deck_id, s.slide_index, s.title, s.body_text, s.notes, s.thumb_path, \
+    EXISTS(SELECT 1 FROM slide_favorites sf WHERE sf.deck_path = d.path AND sf.slide_index = s.slide_index)";
 
 /// bm25 weights: title > deck_title > body > notes.
 const BM25: &str = "bm25(slides_fts, 4.0, 1.0, 0.6, 2.0)";
@@ -171,6 +213,8 @@ impl Library {
     /// Incrementally (re)scan all roots. `progress` is called from the
     /// scanning thread; it must be cheap.
     pub fn scan(&mut self, progress: &mut dyn FnMut(ScanEvent)) -> Result<()> {
+        let scan_started = Instant::now();
+        let started_unix = now_unix();
         // Snapshot roots up front.
         let roots: Vec<(i64, String)> = {
             let mut stmt = self.conn.prepare("SELECT id, path FROM roots")?;
@@ -262,6 +306,24 @@ impl Library {
         let now = now_unix();
         self.conn.execute("UPDATE roots SET last_scan_unix=?1", params![now])?;
 
+        // Record the run for the stats view (best-effort).
+        let _ = self.conn.execute(
+            "INSERT INTO scan_history(started_unix, duration_ms, indexed, removed, unchanged) \
+             VALUES(?1,?2,?3,?4,?5)",
+            params![
+                started_unix,
+                scan_started.elapsed().as_millis() as i64,
+                indexed as i64,
+                removed as i64,
+                unchanged as i64,
+            ],
+        );
+        let _ = self.conn.execute(
+            "DELETE FROM scan_history WHERE id NOT IN \
+             (SELECT id FROM scan_history ORDER BY id DESC LIMIT 50)",
+            [],
+        );
+
         progress(ScanEvent::Finished { indexed, removed, unchanged });
         Ok(())
     }
@@ -344,10 +406,13 @@ impl Library {
                 params![deck_id, slide.index, slide.title, slide.body_text, slide.notes],
             )?;
             let sid = tx.last_insert_rowid();
+            // deck_title column carries the docProps title AND the file name so
+            // both are searchable (generators often write junk titles).
+            let deck_terms = format!("{} {}", deck.title, deck.file_name);
             tx.execute(
                 "INSERT INTO slides_fts(rowid, title, body, notes, deck_title) \
                  VALUES(?1,?2,?3,?4,?5)",
-                params![sid, slide.title, slide.body_text, slide.notes, deck.title],
+                params![sid, slide.title, slide.body_text, slide.notes, deck_terms],
             )?;
         }
         tx.commit()?;
@@ -414,9 +479,9 @@ impl Library {
         let hits = stmt
             .query_map(params_from_iter(params), |row| {
                 let slide = row_to_slide(row, 0)?;
-                let deck = row_to_deck(row, 7)?;
-                let snippet: String = row.get(17)?;
-                let rank: f64 = row.get(18)?;
+                let deck = row_to_deck(row, SLIDE_COL_COUNT)?;
+                let snippet: String = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT)?;
+                let rank: f64 = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT + 1)?;
                 Ok(SearchHit { slide, deck, snippet, score: -rank })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -447,8 +512,8 @@ impl Library {
         let hits = stmt
             .query_map(params_from_iter(params), |row| {
                 let slide = row_to_slide(row, 0)?;
-                let deck = row_to_deck(row, 7)?;
-                let body: String = row.get(17)?;
+                let deck = row_to_deck(row, SLIDE_COL_COUNT)?;
+                let body: String = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT)?;
                 let snippet = html_escape(&body.chars().take(120).collect::<String>());
                 Ok(SearchHit { slide, deck, snippet, score: 0.0 })
             })?
@@ -476,7 +541,8 @@ impl Library {
 
     pub fn slides_for_deck(&self, deck_id: i64) -> Result<Vec<SlideRecord>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {SLIDE_COLS} FROM slides s WHERE s.deck_id=?1 ORDER BY s.slide_index ASC"
+            "SELECT {SLIDE_COLS} FROM slides s JOIN decks d ON d.id = s.deck_id \
+             WHERE s.deck_id=?1 ORDER BY s.slide_index ASC"
         ))?;
         let rows = stmt
             .query_map(params![deck_id], |r| row_to_slide(r, 0))?
@@ -486,7 +552,10 @@ impl Library {
 
     pub fn slide(&self, slide_id: i64) -> Result<SlideRecord> {
         Ok(self.conn.query_row(
-            &format!("SELECT {SLIDE_COLS} FROM slides s WHERE s.id=?1"),
+            &format!(
+                "SELECT {SLIDE_COLS} FROM slides s JOIN decks d ON d.id = s.deck_id \
+                 WHERE s.id=?1"
+            ),
             params![slide_id],
             |r| row_to_slide(r, 0),
         )?)
@@ -507,6 +576,208 @@ impl Library {
         let slides: i64 = self.conn.query_row("SELECT COUNT(*) FROM slides", [], |r| r.get(0))?;
         Ok((decks, slides))
     }
+
+    // --- favorites ---------------------------------------------------------
+
+    /// Toggle the favorite flag of a slide; returns the new state.
+    pub fn toggle_slide_favorite(&mut self, slide_id: i64) -> Result<bool> {
+        let (deck_path, slide_index): (String, i64) = self.conn.query_row(
+            "SELECT d.path, s.slide_index FROM slides s JOIN decks d ON d.id = s.deck_id \
+             WHERE s.id=?1",
+            params![slide_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let removed = self.conn.execute(
+            "DELETE FROM slide_favorites WHERE deck_path=?1 AND slide_index=?2",
+            params![deck_path, slide_index],
+        )?;
+        if removed > 0 {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO slide_favorites(deck_path, slide_index, added_unix) VALUES(?1,?2,?3)",
+            params![deck_path, slide_index, now_unix()],
+        )?;
+        Ok(true)
+    }
+
+    /// Toggle the favorite flag of a deck; returns the new state.
+    pub fn toggle_deck_favorite(&mut self, deck_id: i64) -> Result<bool> {
+        let deck_path: String = self.conn.query_row(
+            "SELECT path FROM decks WHERE id=?1",
+            params![deck_id],
+            |r| r.get(0),
+        )?;
+        let removed = self
+            .conn
+            .execute("DELETE FROM deck_favorites WHERE deck_path=?1", params![deck_path])?;
+        if removed > 0 {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO deck_favorites(deck_path, added_unix) VALUES(?1,?2)",
+            params![deck_path, now_unix()],
+        )?;
+        Ok(true)
+    }
+
+    // --- activity history / stats view --------------------------------------
+
+    /// Remember a search for the stats view. Refinements of the previous entry
+    /// (one being a prefix of the other, within two minutes) replace it instead
+    /// of piling up per-keystroke variants.
+    pub fn record_search(&mut self, query: &str, result_count: i64) -> Result<()> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(());
+        }
+        let now = now_unix();
+        let last: Option<(i64, String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT id, query, searched_unix FROM search_history \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((id, prev, at)) = last {
+            let refinement = now - at <= 120
+                && (query.starts_with(prev.as_str()) || prev.starts_with(query));
+            if refinement {
+                self.conn.execute(
+                    "UPDATE search_history SET query=?2, result_count=?3, searched_unix=?4 \
+                     WHERE id=?1",
+                    params![id, query, result_count, now],
+                )?;
+                return Ok(());
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO search_history(query, result_count, searched_unix) VALUES(?1,?2,?3)",
+            params![query, result_count, now],
+        )?;
+        // Keep the table bounded.
+        self.conn.execute(
+            "DELETE FROM search_history WHERE id NOT IN \
+             (SELECT id FROM search_history ORDER BY id DESC LIMIT 200)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Remember a completed export/composition for the stats view.
+    pub fn record_export(
+        &mut self,
+        output_path: &str,
+        title: &str,
+        slide_count: i64,
+        source_decks: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO export_history(output_path, title, slide_count, source_decks, exported_unix) \
+             VALUES(?1,?2,?3,?4,?5)",
+            params![output_path, title, slide_count, source_decks, now_unix()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM export_history WHERE id NOT IN \
+             (SELECT id FROM export_history ORDER BY id DESC LIMIT 200)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Everything the stats view needs, in one call.
+    pub fn stats_overview(&self) -> Result<StatsOverview> {
+        let (deck_count, slide_count) = self.stats()?;
+        let total_bytes: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM decks",
+            [],
+            |r| r.get(0),
+        )?;
+        let favorite_slides: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM slide_favorites", [], |r| r.get(0))?;
+        let favorite_decks: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM deck_favorites", [], |r| r.get(0))?;
+
+        let last_scan = self
+            .conn
+            .query_row(
+                "SELECT started_unix, duration_ms, indexed, removed, unchanged \
+                 FROM scan_history ORDER BY id DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok(ScanRecord {
+                        started_unix: r.get(0)?,
+                        duration_ms: r.get(1)?,
+                        indexed: r.get(2)?,
+                        removed: r.get(3)?,
+                        unchanged: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        let recent_searches = {
+            let mut stmt = self.conn.prepare(
+                "SELECT query, result_count, searched_unix FROM search_history \
+                 ORDER BY id DESC LIMIT 10",
+            )?;
+            let v: Vec<SearchHistoryEntry> = stmt
+                .query_map([], |r| {
+                    Ok(SearchHistoryEntry {
+                        query: r.get(0)?,
+                        result_count: r.get(1)?,
+                        searched_unix: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            v
+        };
+
+        let recent_exports = {
+            let mut stmt = self.conn.prepare(
+                "SELECT output_path, title, slide_count, source_decks, exported_unix \
+                 FROM export_history ORDER BY id DESC LIMIT 10",
+            )?;
+            let v: Vec<ExportRecord> = stmt
+                .query_map([], |r| {
+                    Ok(ExportRecord {
+                        output_path: r.get(0)?,
+                        title: r.get(1)?,
+                        slide_count: r.get(2)?,
+                        source_decks: r.get(3)?,
+                        exported_unix: r.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            v
+        };
+
+        let largest_decks = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {DECK_COLS} FROM decks d ORDER BY d.size_bytes DESC LIMIT 5"
+            ))?;
+            let v: Vec<DeckRecord> = stmt
+                .query_map([], |r| row_to_deck(r, 0))?
+                .collect::<rusqlite::Result<_>>()?;
+            v
+        };
+
+        Ok(StatsOverview {
+            deck_count,
+            slide_count,
+            total_bytes,
+            favorite_slides,
+            favorite_decks,
+            last_scan,
+            recent_searches,
+            recent_exports,
+            largest_decks,
+        })
+    }
 }
 
 const ROOT_SELECT: &str = "SELECT r.id, r.path, \
@@ -524,6 +795,10 @@ fn row_to_root(r: &Row) -> rusqlite::Result<RootRecord> {
     })
 }
 
+/// Number of columns in [`SLIDE_COLS`] / [`DECK_COLS`] — keep in sync.
+const SLIDE_COL_COUNT: usize = 8;
+const DECK_COL_COUNT: usize = 11;
+
 fn row_to_deck(r: &Row, base: usize) -> rusqlite::Result<DeckRecord> {
     Ok(DeckRecord {
         id: r.get(base)?,
@@ -536,6 +811,7 @@ fn row_to_deck(r: &Row, base: usize) -> rusqlite::Result<DeckRecord> {
         size_bytes: r.get(base + 7)?,
         slide_width_emu: r.get(base + 8)?,
         slide_height_emu: r.get(base + 9)?,
+        favorite: r.get(base + 10)?,
     })
 }
 
@@ -548,6 +824,7 @@ fn row_to_slide(r: &Row, base: usize) -> rusqlite::Result<SlideRecord> {
         body_text: r.get(base + 4)?,
         notes: r.get(base + 5)?,
         thumb_path: r.get(base + 6)?,
+        favorite: r.get(base + 7)?,
     })
 }
 
@@ -574,6 +851,13 @@ fn push_filters(filters: &SearchFilters, clauses: &mut Vec<String>, params: &mut
     if let Some(to) = filters.modified_to {
         clauses.push("d.modified_unix <= ?".into());
         params.push(Value::Integer(to));
+    }
+    if filters.favorites_only == Some(true) {
+        clauses.push(
+            "EXISTS(SELECT 1 FROM slide_favorites sf \
+             WHERE sf.deck_path = d.path AND sf.slide_index = s.slide_index)"
+                .into(),
+        );
     }
 }
 
@@ -602,9 +886,13 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Bump to force a one-time reindex of every deck (e.g. when the extraction
+/// logic or FTS content changes) — a new version makes every stored hash stale.
+const INDEX_VERSION: u32 = 2;
+
 fn content_hash(mtime: i64, size: i64) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(format!("{mtime}:{size}").as_bytes());
+    hasher.update(format!("v{INDEX_VERSION}:{mtime}:{size}").as_bytes());
     hasher
         .finalize()
         .iter()
@@ -1037,6 +1325,72 @@ mod tests {
         let sid = lib.slides_for_deck(deck_id).unwrap()[0].id;
         lib.set_thumb_path(sid, "/cache/thumb.svg").unwrap();
         assert_eq!(lib.slide(sid).unwrap().thumb_path.as_deref(), Some("/cache/thumb.svg"));
+    }
+
+    #[test]
+    fn favorites_toggle_filter_and_survive_rescan() {
+        let (dir, mut lib) = two_deck_library();
+        let hits = lib.search("revenue", &SearchFilters::default()).unwrap();
+        let slide = &hits[0].slide;
+        assert!(!slide.favorite);
+
+        assert!(lib.toggle_slide_favorite(slide.id).unwrap());
+        assert!(lib.slide(slide.id).unwrap().favorite);
+
+        // favorites_only filter returns exactly the starred slide.
+        let filters = SearchFilters { favorites_only: Some(true), ..Default::default() };
+        let favs = lib.search("", &filters).unwrap();
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].slide.id, slide.id);
+
+        // Rescan after touching the file: slide rows are recreated, favorite
+        // sticks because it is keyed by (deck path, slide index).
+        let deck_path = dir.path().join("finance.pptx");
+        let future = UNIX_EPOCH + Duration::from_secs(now_unix() as u64 + 500);
+        OpenOptions::new().write(true).open(&deck_path).unwrap().set_modified(future).unwrap();
+        scan_silent(&mut lib);
+        let favs = lib.search("", &filters).unwrap();
+        assert_eq!(favs.len(), 1, "favorite lost across rescan");
+
+        // Deck favorite toggles and surfaces on DeckRecord.
+        let deck_id = favs[0].deck.id;
+        assert!(lib.toggle_deck_favorite(deck_id).unwrap());
+        assert!(lib.deck(deck_id).unwrap().favorite);
+        assert!(!lib.toggle_deck_favorite(deck_id).unwrap());
+
+        // Untoggle slide.
+        let sid = favs[0].slide.id;
+        assert!(!lib.toggle_slide_favorite(sid).unwrap());
+        assert!(lib.search("", &filters).unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_and_stats_overview() {
+        let (_dir, lib) = two_deck_library();
+        let mut lib = lib;
+
+        // Search history coalesces keystroke refinements.
+        lib.record_search("rev", 1).unwrap();
+        lib.record_search("revenue", 1).unwrap();
+        lib.record_search("churn", 2).unwrap();
+        lib.record_search("  ", 0).unwrap(); // ignored
+
+        lib.record_export("/tmp/out.pptx", "My Deck", 4, 2).unwrap();
+
+        let o = lib.stats_overview().unwrap();
+        assert_eq!(o.deck_count, 2);
+        assert_eq!(o.slide_count, 3);
+        assert!(o.total_bytes > 0);
+        assert!(o.last_scan.is_some(), "scan_history row from two_deck_library scan");
+        assert_eq!(
+            o.recent_searches.iter().map(|s| s.query.as_str()).collect::<Vec<_>>(),
+            vec!["churn", "revenue"],
+        );
+        assert_eq!(o.recent_exports.len(), 1);
+        assert_eq!(o.recent_exports[0].title, "My Deck");
+        assert_eq!(o.recent_exports[0].slide_count, 4);
+        assert_eq!(o.largest_decks.len(), 2);
+        assert!(o.largest_decks[0].size_bytes >= o.largest_decks[1].size_bytes);
     }
 
     #[test]

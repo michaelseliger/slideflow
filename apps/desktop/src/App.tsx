@@ -12,6 +12,7 @@ import SlideGrid from "./components/SlideGrid";
 import EmptyState from "./components/EmptyState";
 import ZeroResults from "./components/ZeroResults";
 import PeekModal from "./components/PeekModal";
+import StatsView from "./components/StatsView";
 import CommandPalette from "./components/CommandPalette";
 import ExportSheet from "./components/ExportSheet";
 import Toaster from "./components/Toaster";
@@ -43,6 +44,7 @@ export default function App() {
   const inspectorVisible = useApp((s) => s.inspectorVisible);
   const gridCols = useApp((s) => s.gridCols);
   const scanRunning = useApp((s) => s.scan.running);
+  const navType = useApp((s) => s.nav.type);
 
   // Boot: load library + first search, then subscribe to scan progress.
   useEffect(() => {
@@ -222,7 +224,9 @@ export default function App() {
 
           <div className="flex min-h-0 flex-1">
             <main className="min-w-0 flex-1 bg-canvas">
-              {showEmptyOnboarding ? (
+              {navType === "stats" ? (
+                <StatsView />
+              ) : showEmptyOnboarding ? (
                 <EmptyState />
               ) : results.length === 0 && !searching ? (
                 <ZeroResults />

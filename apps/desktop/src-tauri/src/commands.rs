@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use slideflow_core::index::Library;
 use slideflow_core::model::{
     ComposeReport, DeckRecord, RootRecord, SearchFilters, SearchHit, SlidePick, SlideRecord,
+    StatsOverview,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
@@ -215,16 +216,21 @@ pub struct ComposeArgs {
 }
 
 #[tauri::command]
-pub async fn compose_deck(args: ComposeArgs) -> Result<ComposeReport, String> {
+pub async fn compose_deck(
+    state: State<'_, AppState>,
+    args: ComposeArgs,
+) -> Result<ComposeReport, String> {
     // Composition is pure filesystem/CPU work with no `Library` dependency, so
-    // run it on a blocking thread and don't touch the mutex at all.
+    // run it on a blocking thread; the mutex is only touched afterwards to
+    // record the export for the stats view.
     let ComposeArgs {
         picks,
         output_path,
         title,
         include_notes,
     } = args;
-    tauri::async_runtime::spawn_blocking(move || {
+    let record_title = title.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
         let opts = ComposeOptions {
             title,
             include_notes,
@@ -232,7 +238,17 @@ pub async fn compose_deck(args: ComposeArgs) -> Result<ComposeReport, String> {
         compose(&picks, Path::new(&output_path), &opts).map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(e)??;
+
+    if let Ok(mut lib) = state.library.lock() {
+        let _ = lib.record_export(
+            &report.output_path,
+            &record_title,
+            report.slides_written as i64,
+            report.source_decks as i64,
+        );
+    }
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +269,48 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
         deck_count,
         slide_count,
     })
+}
+
+/// Full stats-view payload: counts, sizes, last index run, recent activity.
+#[tauri::command]
+pub async fn get_stats_overview(state: State<'_, AppState>) -> Result<StatsOverview, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.stats_overview().map_err(e)
+}
+
+/// Remember a settled search (called by the frontend after its debounce).
+#[tauri::command]
+pub async fn record_search(
+    state: State<'_, AppState>,
+    query: String,
+    result_count: i64,
+) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.record_search(&query, result_count).map_err(e)
+}
+
+// ---------------------------------------------------------------------------
+// Favorites
+// ---------------------------------------------------------------------------
+
+/// Toggle a slide's favorite star; returns the new state.
+#[tauri::command]
+pub async fn toggle_favorite_slide(
+    state: State<'_, AppState>,
+    slide_id: i64,
+) -> Result<bool, String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.toggle_slide_favorite(slide_id).map_err(e)
+}
+
+/// Toggle a deck's favorite star; returns the new state.
+#[tauri::command]
+pub async fn toggle_favorite_deck(
+    state: State<'_, AppState>,
+    deck_id: i64,
+) -> Result<bool, String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.toggle_deck_favorite(deck_id).map_err(e)
 }
 
 // ---------------------------------------------------------------------------

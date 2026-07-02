@@ -222,7 +222,8 @@ fn parse_presentation_xml(
 /// State machine: text runs (`a:t`) accumulate into the current shape's
 /// buffer; paragraph boundaries (`a:p`) and explicit breaks (`a:br`) become
 /// newlines; the shape's placeholder type (`p:ph type="..."`) decides whether
-/// it is the title.
+/// it is the title. `p:graphicFrame` counts as a text container too — that is
+/// where tables live (`a:tbl` cell text would otherwise never be indexed).
 fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
     let mut reader = Reader::from_reader(xml);
     // NB: no trim_text — spacing inside <a:t> is significant.
@@ -238,7 +239,7 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| Error::xml(part, e))? {
             Event::Start(ref e) => match local_name(e.name().as_ref()) {
-                b"sp" => {
+                b"sp" | b"graphicFrame" => {
                     shape_depth += 1;
                     if shape_depth == 1 {
                         current_text.clear();
@@ -284,7 +285,7 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
             }
             Event::End(ref e) => match local_name(e.name().as_ref()) {
                 b"t" => in_a_t = false,
-                b"sp" => {
+                b"sp" | b"graphicFrame" => {
                     if shape_depth > 0 {
                         shape_depth -= 1;
                         if shape_depth == 0 && !current_text.trim().is_empty() {
@@ -373,6 +374,35 @@ mod tests {
         let s2 = pf.slide_content(2).unwrap();
         assert_eq!(s2.title.as_deref(), Some("Roadmap"));
         assert_eq!(s2.notes.as_deref(), Some("Speak slowly"));
+    }
+
+    #[test]
+    fn table_text_in_graphic_frame_is_extracted() {
+        // Tables live in <p:graphicFrame>, not <p:sp> — their cell text must
+        // still be collected so it is searchable.
+        let xml = r#"<?xml version="1.0"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>Quarterly Table</a:t></a:r></a:p></p:txBody></p:sp>
+    <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+      <a:tr><a:tc><a:txBody><a:p><a:r><a:t>Quartal</a:t></a:r></a:p></a:txBody></a:tc>
+             <a:tc><a:txBody><a:p><a:r><a:t>Umsatz</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+      <a:tr><a:tc><a:txBody><a:p><a:r><a:t>Q1</a:t></a:r></a:p></a:txBody></a:tc>
+             <a:tc><a:txBody><a:p><a:r><a:t>120 T€</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+    </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+        let content = extract_texts(xml.as_bytes(), "test").unwrap();
+        assert_eq!(content.title.as_deref(), Some("Quarterly Table"));
+        let table_text = content
+            .texts
+            .iter()
+            .find(|t| t.contains("Quartal"))
+            .expect("table cell text extracted");
+        for term in ["Quartal", "Umsatz", "Q1", "120 T€"] {
+            assert!(table_text.contains(term), "missing {term} in {table_text:?}");
+        }
     }
 
     #[test]

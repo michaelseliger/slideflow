@@ -63,6 +63,10 @@ pub fn run() {
             commands::get_slide_svg,
             commands::compose_deck,
             commands::get_stats,
+            commands::get_stats_overview,
+            commands::record_search,
+            commands::toggle_favorite_slide,
+            commands::toggle_favorite_deck,
             commands::reveal_in_finder,
             commands::open_file,
         ])

@@ -3,7 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, FolderOpen } from "lucide-react";
 import type { SearchHit } from "../lib/types";
 import { useApp } from "../stores/useApp";
-import { cx } from "../lib/utils";
+import { cx, deckDisplayName } from "../lib/utils";
 import * as api from "../lib/api";
 import SlideCard from "./SlideCard";
 
@@ -80,7 +80,7 @@ export default function SlideGrid() {
       out.push({
         kind: "header",
         deckId: id,
-        title: deck.title,
+        title: deckDisplayName(deck),
         path: deck.path,
         count: cells.length,
       });
@@ -199,7 +199,9 @@ function GroupHeader({
         ) : (
           <ChevronDown size={14} className="text-subtle" />
         )}
-        <span className="text-title font-semibold text-ink">{title}</span>
+        <span className="text-title font-semibold text-ink" title={path}>
+          {title}
+        </span>
         <span className="tabnum ml-1 rounded-full bg-ink/8 px-1.5 text-caption text-subtle">
           {count}
         </span>

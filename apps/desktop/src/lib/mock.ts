@@ -5,11 +5,14 @@
 import type {
   ComposeReport,
   DeckRecord,
+  ExportRecord,
   RootRecord,
+  SearchHistoryEntry,
   SearchHit,
   SlidePick,
   SlideRecord,
   Stats,
+  StatsOverview,
 } from "./types";
 
 const EMU_W = 12_192_000;
@@ -167,6 +170,7 @@ const svgById = new Map<number, string>();
       size_bytes: 1_200_000 + deckId * 40_000,
       slide_width_emu: EMU_W,
       slide_height_emu: EMU_H,
+      favorite: false,
     };
     mockDecks.push(deck);
     seed.slides.forEach((s, i) => {
@@ -178,6 +182,7 @@ const svgById = new Map<number, string>();
         body_text: s.body,
         notes: s.notes ?? null,
         thumb_path: null,
+        favorite: false,
       };
       mockSlides.push(rec);
       svgById.set(slideId, svgFor(seed, s.title, s.body));
@@ -268,7 +273,11 @@ export const mock = {
 
   search: async (
     query: string,
-    filters: { path_prefix?: string | null; deck_query?: string | null } = {},
+    filters: {
+      path_prefix?: string | null;
+      deck_query?: string | null;
+      favorites_only?: boolean | null;
+    } = {},
   ): Promise<SearchHit[]> => {
     const q = query.trim().toLowerCase();
     const hits: SearchHit[] = [];
@@ -277,6 +286,7 @@ export const mock = {
       if (filters.path_prefix && !deck.path.startsWith(filters.path_prefix)) {
         continue;
       }
+      if (filters.favorites_only && !slide.favorite) continue;
       if (
         filters.deck_query &&
         !`${deck.title} ${deck.file_name}`
@@ -307,12 +317,19 @@ export const mock = {
   composeDeck: async (
     picks: SlidePick[],
     outputPath: string,
-    _title: string,
+    title: string,
     _includeNotes: boolean,
   ): Promise<ComposeReport> => {
     // Simulate assembly latency so the progress UI is exercised in the browser.
     await new Promise((r) => setTimeout(r, 700));
     const decks = new Set(picks.map((p) => p.pptx_path));
+    mockExports.unshift({
+      output_path: outputPath,
+      title,
+      slide_count: picks.length,
+      source_decks: decks.size,
+      exported_unix: Math.floor(Date.now() / 1000),
+    });
     return {
       output_path: outputPath,
       slides_written: picks.length,
@@ -320,4 +337,60 @@ export const mock = {
       warnings: [],
     };
   },
+
+  // --- favorites / stats ---------------------------------------------------
+
+  toggleFavoriteSlide: async (slideId: number): Promise<boolean> => {
+    const slide = mockSlides.find((s) => s.id === slideId);
+    if (!slide) return false;
+    slide.favorite = !slide.favorite;
+    return slide.favorite;
+  },
+
+  toggleFavoriteDeck: async (deckId: number): Promise<boolean> => {
+    const deck = mockDecks.find((d) => d.id === deckId);
+    if (!deck) return false;
+    deck.favorite = !deck.favorite;
+    return deck.favorite;
+  },
+
+  recordSearch: async (query: string, resultCount: number): Promise<void> => {
+    const q = query.trim();
+    if (!q) return;
+    const last = mockSearches[0];
+    if (last && (q.startsWith(last.query) || last.query.startsWith(q))) {
+      last.query = q;
+      last.result_count = resultCount;
+      last.searched_unix = Math.floor(Date.now() / 1000);
+      return;
+    }
+    mockSearches.unshift({
+      query: q,
+      result_count: resultCount,
+      searched_unix: Math.floor(Date.now() / 1000),
+    });
+  },
+
+  getStatsOverview: async (): Promise<StatsOverview> => ({
+    deck_count: mockDecks.length,
+    slide_count: mockSlides.length,
+    total_bytes: mockDecks.reduce((n, d) => n + d.size_bytes, 0),
+    favorite_slides: mockSlides.filter((s) => s.favorite).length,
+    favorite_decks: mockDecks.filter((d) => d.favorite).length,
+    last_scan: {
+      started_unix: Math.floor(Date.now() / 1000) - 3600,
+      duration_ms: 1840,
+      indexed: mockDecks.length,
+      removed: 0,
+      unchanged: 0,
+    },
+    recent_searches: structuredClone(mockSearches.slice(0, 10)),
+    recent_exports: structuredClone(mockExports.slice(0, 10)),
+    largest_decks: structuredClone(
+      [...mockDecks].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, 5),
+    ),
+  }),
 };
+
+const mockSearches: SearchHistoryEntry[] = [];
+const mockExports: ExportRecord[] = [];

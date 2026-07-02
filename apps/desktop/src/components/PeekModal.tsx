@@ -4,7 +4,7 @@ import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
 import { useRawSlideSvg } from "../lib/useSlideSvg";
-import { prefersReducedMotion } from "../lib/utils";
+import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import * as api from "../lib/api";
 
 /** Finder-style Quick Look: a large centered preview with arrow-key navigation
@@ -56,10 +56,10 @@ export default function PeekModal() {
             <div className="flex items-center justify-between gap-3 px-4 py-2.5 hairline-b">
               <div className="min-w-0">
                 <div className="truncate text-title font-semibold text-ink">
-                  {hit.slide.title || hit.deck.title}
+                  {hit.slide.title || deckDisplayName(hit.deck)}
                 </div>
-                <div className="tabnum truncate text-caption text-subtle">
-                  {hit.deck.title} · Slide {hit.slide.slide_index} of{" "}
+                <div className="tabnum truncate text-caption text-subtle" title={hit.deck.path}>
+                  {deckDisplayName(hit.deck)} · Slide {hit.slide.slide_index} of{" "}
                   {hit.deck.slide_count}
                 </div>
               </div>

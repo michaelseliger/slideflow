@@ -5,9 +5,11 @@ import {
   FolderPlus,
   Presentation,
   Loader2,
+  Star,
+  BarChart3,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
-import { cx, basename } from "../lib/utils";
+import { cx, basename, deckDisplayName } from "../lib/utils";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
 import * as api from "../lib/api";
 
@@ -24,6 +26,9 @@ export default function Sidebar() {
   const setNav = useApp((s) => s.setNav);
   const addFolder = useApp((s) => s.addFolder);
   const [menu, setMenu] = useState<{ x: number; y: number; rootId: number } | null>(null);
+  const [deckMenu, setDeckMenu] = useState<{ x: number; y: number; deckId: number } | null>(
+    null,
+  );
 
   const isActive = (type: string, id?: number) =>
     nav.type === type && nav.id === id;
@@ -50,6 +55,22 @@ export default function Sidebar() {
           onClick={() => void setNav({ type: "all" })}
         />
 
+        <Row
+          icon={<Star size={15} />}
+          label="Favorites"
+          active={isActive("favorites")}
+          collapsed={collapsed}
+          onClick={() => void setNav({ type: "favorites" })}
+        />
+
+        <Row
+          icon={<BarChart3 size={15} />}
+          label="Statistics"
+          active={isActive("stats")}
+          collapsed={collapsed}
+          onClick={() => void setNav({ type: "stats" })}
+        />
+
         {roots.map((r) => (
           <Row
             key={r.id}
@@ -72,12 +93,23 @@ export default function Sidebar() {
             {decks.map((d) => (
               <Row
                 key={d.id}
-                icon={<Presentation size={15} />}
-                label={d.title || d.file_name}
+                icon={
+                  d.favorite ? (
+                    <Star size={15} className="fill-current text-amber-400" />
+                  ) : (
+                    <Presentation size={15} />
+                  )
+                }
+                label={deckDisplayName(d)}
+                tooltip={d.path}
                 count={d.slide_count}
                 active={isActive("deck", d.id)}
                 collapsed={collapsed}
                 onClick={() => void setNav({ type: "deck", id: d.id })}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setDeckMenu({ x: e.clientX, y: e.clientY, deckId: d.id });
+                }}
               />
             ))}
           </>
@@ -124,6 +156,30 @@ export default function Sidebar() {
         {!collapsed && <span>Add folder…</span>}
       </button>
 
+      {deckMenu && (
+        <ContextMenu
+          x={deckMenu.x}
+          y={deckMenu.y}
+          onClose={() => setDeckMenu(null)}
+          items={(() => {
+            const deck = decks.find((d) => d.id === deckMenu.deckId);
+            return [
+              {
+                label: deck?.favorite ? "Remove from Favorites" : "Add to Favorites",
+                onClick: () =>
+                  void useApp.getState().toggleFavoriteDeck(deckMenu.deckId),
+              },
+              {
+                label: "Reveal in Finder",
+                onClick: () => {
+                  if (deck) void api.revealInFinder(deck.path);
+                },
+              },
+            ] as MenuItem[];
+          })()}
+        />
+      )}
+
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -168,6 +224,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function Row({
   icon,
   label,
+  tooltip,
   count,
   active,
   collapsed,
@@ -176,6 +233,8 @@ function Row({
 }: {
   icon: React.ReactNode;
   label: string;
+  /** Hover tooltip (e.g. the full path); falls back to the label when collapsed. */
+  tooltip?: string;
   count?: number;
   active: boolean;
   collapsed: boolean;
@@ -186,7 +245,7 @@ function Row({
     <button
       onClick={onClick}
       onContextMenu={onContextMenu}
-      title={collapsed ? label : undefined}
+      title={tooltip ?? (collapsed ? label : undefined)}
       className={cx(
         "group mb-0.5 flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-body transition-colors",
         collapsed && "justify-center px-0",

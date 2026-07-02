@@ -19,7 +19,7 @@ export type ThemeMode = "light" | "dark" | "system";
 export type Grouping = "flat" | "deck";
 
 export interface NavTarget {
-  type: "all" | "root" | "deck";
+  type: "all" | "root" | "deck" | "favorites" | "stats";
   id?: number;
 }
 
@@ -130,6 +130,10 @@ interface AppState {
   setTheme: (t: ThemeMode) => void;
   cycleTheme: () => void;
 
+  // favorites
+  toggleFavoriteSlide: (slideId: number) => Promise<void>;
+  toggleFavoriteDeck: (deckId: number) => Promise<void>;
+
   // scan
   startScan: () => Promise<void>;
   handleScanEvent: (ev: ScanEvent) => void;
@@ -141,6 +145,7 @@ interface AppState {
 
 let searchToken = 0;
 let debounceTimer: number | undefined;
+let recordTimer: number | undefined;
 
 export const useApp = create<AppState>((set, get) => ({
   roots: [],
@@ -230,6 +235,12 @@ export const useApp = create<AppState>((set, get) => ({
     const token = ++searchToken;
     const { query, filters, nav, decks } = get();
 
+    // The stats view fetches its own data; keep the grid empty behind it.
+    if (nav.type === "stats") {
+      set({ results: [], selectedIds: new Set(), anchorIndex: null, searching: false });
+      return;
+    }
+
     // Show the shimmer only if results are slow (>150ms) so fast queries never
     // flash a loader.
     let slow = false;
@@ -246,6 +257,9 @@ export const useApp = create<AppState>((set, get) => ({
       if (nav.type === "root") {
         const root = get().roots.find((r) => r.id === nav.id);
         if (root) eff.path_prefix = root.path;
+      }
+      if (nav.type === "favorites") {
+        eff.favorites_only = true;
       }
 
       if (nav.type === "deck" && nav.id != null && query.trim() === "") {
@@ -266,6 +280,17 @@ export const useApp = create<AppState>((set, get) => ({
 
       if (token !== searchToken) return; // stale — a newer query superseded us.
       set({ results: hits, selectedIds: new Set(), anchorIndex: null });
+
+      // Remember settled searches for the stats view: only after the user
+      // pauses typing for a moment, so keystroke prefixes don't pile up.
+      if (recordTimer) window.clearTimeout(recordTimer);
+      const settled = query.trim();
+      if (settled !== "") {
+        const count = hits.length;
+        recordTimer = window.setTimeout(() => {
+          void api.recordSearch(settled, count).catch(() => {});
+        }, 1200);
+      }
     } catch (err) {
       if (token === searchToken) {
         toast.error(`Search failed: ${String(err)}`);
@@ -378,6 +403,40 @@ export const useApp = create<AppState>((set, get) => ({
     const order: ThemeMode[] = ["system", "light", "dark"];
     const next = order[(order.indexOf(get().theme) + 1) % order.length];
     get().setTheme(next);
+  },
+
+  // --- favorites -----------------------------------------------------------
+
+  toggleFavoriteSlide: async (slideId) => {
+    try {
+      const fav = await api.toggleFavoriteSlide(slideId);
+      // Patch the visible results in place; drop the slide when un-starring
+      // inside the Favorites view.
+      const { results, nav } = get();
+      const next = results
+        .map((r) =>
+          r.slide.id === slideId ? { ...r, slide: { ...r.slide, favorite: fav } } : r,
+        )
+        .filter((r) => !(nav.type === "favorites" && r.slide.id === slideId && !fav));
+      set({ results: next });
+      toast.success(fav ? "Added to Favorites" : "Removed from Favorites");
+    } catch (err) {
+      toast.error(`Couldn't update favorite: ${String(err)}`);
+    }
+  },
+
+  toggleFavoriteDeck: async (deckId) => {
+    try {
+      const fav = await api.toggleFavoriteDeck(deckId);
+      const patchDeck = (d: DeckRecord) => (d.id === deckId ? { ...d, favorite: fav } : d);
+      set({
+        decks: get().decks.map(patchDeck),
+        results: get().results.map((r) => ({ ...r, deck: patchDeck(r.deck) })),
+      });
+      toast.success(fav ? "Deck added to Favorites" : "Deck removed from Favorites");
+    } catch (err) {
+      toast.error(`Couldn't update favorite: ${String(err)}`);
+    }
   },
 
   // --- scan --------------------------------------------------------------

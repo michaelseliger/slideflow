@@ -30,6 +30,16 @@ export function dirname(path: string): string {
   return idx > 0 ? path.slice(0, idx) : path;
 }
 
+/**
+ * Display name for a deck: the real file name (without extension). Deliberately
+ * NOT the docProps/core.xml title — generators write junk there ("PptxGenJS
+ * Presentation"), while the file name is what users recognize.
+ */
+export function deckDisplayName(deck: { file_name: string; path: string }): string {
+  const name = deck.file_name || basename(deck.path);
+  return name.replace(/\.pptx$/i, "");
+}
+
 /** Human file size. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

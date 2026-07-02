@@ -14,6 +14,7 @@ import type {
   SlidePick,
   SlideRecord,
   Stats,
+  StatsOverview,
 } from "./types";
 import { mock } from "./mock";
 
@@ -144,6 +145,35 @@ export function getSlideSvg(slideId: number): Promise<string> {
 
 export function getStats(): Promise<Stats> {
   return isTauri() ? tauriInvoke("get_stats") : mock.getStats();
+}
+
+export function getStatsOverview(): Promise<StatsOverview> {
+  return isTauri() ? tauriInvoke("get_stats_overview") : mock.getStatsOverview();
+}
+
+/** Remember a settled search for the stats view (fire-and-forget). */
+export function recordSearch(query: string, resultCount: number): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("record_search", { query, resultCount })
+    : mock.recordSearch(query, resultCount);
+}
+
+// ---------------------------------------------------------------------------
+// Favorites
+// ---------------------------------------------------------------------------
+
+/** Toggle a slide's favorite star; resolves to the new state. */
+export function toggleFavoriteSlide(slideId: number): Promise<boolean> {
+  return isTauri()
+    ? tauriInvoke("toggle_favorite_slide", { slideId })
+    : mock.toggleFavoriteSlide(slideId);
+}
+
+/** Toggle a deck's favorite star; resolves to the new state. */
+export function toggleFavoriteDeck(deckId: number): Promise<boolean> {
+  return isTauri()
+    ? tauriInvoke("toggle_favorite_deck", { deckId })
+    : mock.toggleFavoriteDeck(deckId);
 }
 
 // ---------------------------------------------------------------------------

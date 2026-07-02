@@ -40,6 +40,14 @@ pub mod rel_type {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
     pub const CORE_PROPS: &str =
         "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+    pub const EXTENDED_PROPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
+    pub const PRES_PROPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps";
+    pub const VIEW_PROPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
+    pub const TABLE_STYLES: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -53,6 +53,9 @@ use crate::pptx::PresentationFile;
 const CT_PRESENTATION: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
 const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
+const CT_APP: &str = "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+const CT_TABLE_STYLES: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml";
 const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
 
 const NS_DECL: &str = concat!(
@@ -98,15 +101,27 @@ pub fn compose(
             let ct = pf.package.content_types()?;
             let idx = composer.decks.len();
             deck_index.insert(pick.pptx_path.clone(), idx);
-            composer.decks.push(DeckState { pf, ct, copied: HashMap::new() });
+            composer.decks.push(DeckState {
+                path: pick.pptx_path.clone(),
+                pf,
+                ct,
+                copied: HashMap::new(),
+            });
         }
     }
 
-    // Slide size / notes size come from the first source deck.
+    // Slide size / notes size / default text style come from the first source
+    // deck. Warn when other decks disagree — their slides keep their absolute
+    // shape positions but play on a differently-sized canvas.
     let first_idx = deck_index[&picks[0].pptx_path];
     let slide_w = composer.decks[first_idx].pf.slide_width_emu;
     let slide_h = composer.decks[first_idx].pf.slide_height_emu;
     let notes_sz = parse_notes_sz(&composer.decks[first_idx].pf);
+    let default_text_style =
+        presentation_xml(&composer.decks[first_idx].pf)
+            .and_then(|xml| extract_element_raw(&xml, "p:defaultTextStyle"))
+            .unwrap_or_default();
+    composer.warn_deck_mismatches(first_idx, slide_w, slide_h);
 
     // Copy each picked slide's full closure, in pick order.
     for pick in picks {
@@ -116,8 +131,10 @@ pub fn compose(
     }
 
     composer.finalize_masters()?;
-    composer.build_presentation(slide_w, slide_h, &notes_sz)?;
+    let extra_rels = composer.carry_presentation_level_parts(first_idx)?;
+    composer.build_presentation(slide_w, slide_h, &notes_sz, &default_text_style, extra_rels)?;
     composer.build_core(&options.title);
+    composer.build_app();
     composer.build_root_rels();
     composer.finish_content_types();
 
@@ -132,6 +149,8 @@ pub fn compose(
 }
 
 struct DeckState {
+    /// Source file path (for warnings).
+    path: String,
     pf: PresentationFile,
     ct: ContentTypes,
     /// Original part name → output part name (within-deck dedup).
@@ -234,6 +253,156 @@ impl Composer {
         ));
     }
 
+    /// Warn about per-deck properties the output cannot fully honor: slide
+    /// sizes other than the first deck's, and embedded fonts (never carried).
+    fn warn_deck_mismatches(&mut self, first: usize, slide_w: i64, slide_h: i64) {
+        let mut warnings = Vec::new();
+        for (i, deck) in self.decks.iter().enumerate() {
+            let name = Path::new(&deck.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| deck.path.clone());
+            if i != first
+                && (deck.pf.slide_width_emu != slide_w || deck.pf.slide_height_emu != slide_h)
+            {
+                warnings.push(format!(
+                    "{name} uses a different slide size ({}x{} vs {slide_w}x{slide_h} EMU); \
+                     its slides keep their absolute layout on the output canvas",
+                    deck.pf.slide_width_emu, deck.pf.slide_height_emu
+                ));
+            }
+            if presentation_xml(&deck.pf)
+                .is_some_and(|xml| xml.contains("<p:embeddedFontLst"))
+            {
+                warnings.push(format!(
+                    "{name} embeds fonts; embedded fonts are not carried over"
+                ));
+            }
+        }
+        self.warnings.extend(warnings);
+    }
+
+    /// Copy presentation-level style parts into the output and return the
+    /// relationship type + output part name pairs for `build_presentation`.
+    ///
+    /// `presProps` / `viewProps` come from the first source deck. `tableStyles`
+    /// is *merged* across all source decks: slides reference table styles by
+    /// GUID into this single presentation-level part, so a slide from deck B
+    /// would lose its table styling if only deck A's part were carried.
+    fn carry_presentation_level_parts(
+        &mut self,
+        first: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let mut extra: Vec<(String, String)> = Vec::new();
+
+        for (rel_ty, out_name) in [
+            (rel_type::PRES_PROPS, "ppt/presProps.xml"),
+            (rel_type::VIEW_PROPS, "ppt/viewProps.xml"),
+        ] {
+            let main = match self.decks[first].pf.package.main_document_part() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let rels = self.deck_rels(first, &main)?;
+            if let Some(rel) = rels.iter().find(|r| r.rel_type == rel_ty && !r.external) {
+                let resolved = resolve_target(&main, &rel.target);
+                if self.decks[first].pf.package.has_part(&resolved) {
+                    // Canonical fixed name (alloc() names always carry a number,
+                    // so this can never collide with slide-closure parts).
+                    self.copy_fixed_name(first, &resolved, out_name)?;
+                    extra.push((rel_ty.to_string(), out_name.to_string()));
+                }
+            }
+        }
+
+        if let Some(bytes) = self.merge_table_styles()? {
+            let name = "ppt/tableStyles.xml".to_string();
+            self.out_pkg.insert_part(name.clone(), bytes);
+            self.out_ct.set_override(&name, CT_TABLE_STYLES);
+            extra.push((rel_type::TABLE_STYLES.to_string(), name));
+        }
+
+        Ok(extra)
+    }
+
+    /// Copy a part under a fixed output name, following its relationships like
+    /// [`Composer::copy_generic`] does.
+    fn copy_fixed_name(&mut self, deck: usize, orig: &str, out_name: &str) -> Result<()> {
+        let bytes = self
+            .part_bytes(deck, orig)
+            .ok_or_else(|| Error::MissingPart(orig.to_string()))?;
+        let rels = self.deck_rels(deck, orig)?;
+        let mut new_rels = Vec::new();
+        for rel in &rels {
+            if rel.external {
+                new_rels.push(rel.clone());
+                continue;
+            }
+            let resolved = resolve_target(orig, &rel.target);
+            if !self.decks[deck].pf.package.has_part(&resolved) {
+                self.warn_missing(orig, &resolved);
+                continue;
+            }
+            let child = self.copy_target(deck, &resolved)?;
+            new_rels.push(rewritten_rel(rel, out_name, &child));
+        }
+        self.out_pkg.insert_part(out_name.to_string(), bytes);
+        if !new_rels.is_empty() {
+            self.out_pkg.set_rels(out_name, &new_rels);
+        }
+        self.carry_ct(deck, orig, out_name);
+        Ok(())
+    }
+
+    /// Merge every source deck's `tableStyles.xml` into one part, deduplicating
+    /// styles by their GUID `styleId` (first deck wins, including the `def`
+    /// default-style attribute). Returns `None` when no deck has table styles.
+    fn merge_table_styles(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut def: Option<String> = None;
+        let mut seen_ids: Vec<String> = Vec::new();
+        let mut styles = String::new();
+        let mut found_any = false;
+
+        for deck in 0..self.decks.len() {
+            let Ok(main) = self.decks[deck].pf.package.main_document_part() else { continue };
+            let rels = self.deck_rels(deck, &main)?;
+            let Some(rel) = rels
+                .iter()
+                .find(|r| r.rel_type == rel_type::TABLE_STYLES && !r.external)
+            else {
+                continue;
+            };
+            let resolved = resolve_target(&main, &rel.target);
+            let Some(bytes) = self.part_bytes(deck, &resolved) else { continue };
+            let xml = String::from_utf8_lossy(&bytes).into_owned();
+            found_any = true;
+
+            if def.is_none() {
+                def = attr_value(&xml, "tblStyleLst", "def");
+            }
+            for style in extract_all_elements_raw(&xml, "a:tblStyle") {
+                let id = attr_value(&style, "tblStyle", "styleId").unwrap_or_default();
+                if !id.is_empty() && seen_ids.iter().any(|s| s == &id) {
+                    continue;
+                }
+                seen_ids.push(id);
+                styles.push_str(&style);
+            }
+        }
+
+        if !found_any {
+            return Ok(None);
+        }
+        let def_attr = def
+            .map(|d| format!(r#" def="{}""#, xml_escape(&d)))
+            .unwrap_or_default();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"{def_attr}>{styles}</a:tblStyleLst>"#
+        );
+        Ok(Some(xml.into_bytes()))
+    }
+
     /// Copy a picked slide and its whole closure; register it in `slides_out`.
     fn copy_slide(&mut self, deck: usize, orig: &str) -> Result<String> {
         let name = self.alloc(orig);
@@ -263,6 +432,15 @@ impl Composer {
                     continue;
                 }
                 let child = self.copy_notes_slide(deck, &resolved, &name)?;
+                new_rels.push(rewritten_rel(rel, &name, &child));
+            } else if rel.rel_type == rel_type::SLIDE {
+                // A slide-jump hyperlink. The target slide is copied (with its
+                // closure) so the r:id resolves, but it is not part of the
+                // output slide list — the jump lands outside the show.
+                self.warnings.push(format!(
+                    "slide link on {orig} points at a slide that is not part of the composition"
+                ));
+                let child = self.copy_target(deck, &resolved)?;
                 new_rels.push(rewritten_rel(rel, &name, &child));
             } else {
                 let child = self.copy_target(deck, &resolved)?;
@@ -303,7 +481,10 @@ impl Composer {
         let rels = self.deck_rels(deck, orig)?;
         let has_internal = rels.iter().any(|r| !r.external);
 
-        if !has_internal {
+        // Theme parts are exempt from cross-deck hash dedup: PowerPoint pairs
+        // every master with its own theme part, and sharing one part between
+        // masters is a structural deviation some consumers handle badly.
+        if !has_internal && !orig.contains("/theme/") {
             let hash = hash_hex(&bytes);
             if let Some(existing) = self.leaf_by_hash.get(&hash).cloned() {
                 self.decks[deck].copied.insert(orig.to_string(), existing.clone());
@@ -339,7 +520,9 @@ impl Composer {
             new_rels.push(rewritten_rel(rel, &name, &child));
         }
         self.out_pkg.insert_part(name.clone(), bytes);
-        self.out_pkg.set_rels(&name, &new_rels);
+        if !new_rels.is_empty() {
+            self.out_pkg.set_rels(&name, &new_rels);
+        }
         self.carry_ct(deck, orig, &name);
         Ok(name)
     }
@@ -518,7 +701,14 @@ impl Composer {
         Ok(())
     }
 
-    fn build_presentation(&mut self, slide_w: i64, slide_h: i64, notes_sz: &str) -> Result<()> {
+    fn build_presentation(
+        &mut self,
+        slide_w: i64,
+        slide_h: i64,
+        notes_sz: &str,
+        default_text_style: &str,
+        extra_rels: Vec<(String, String)>,
+    ) -> Result<()> {
         let pres = "ppt/presentation.xml";
         let mut pres_rels: Vec<Relationship> = Vec::new();
         let mut rid = 1u32;
@@ -567,6 +757,19 @@ impl Composer {
             nm_rids.push(r);
         }
 
+        // presProps / viewProps / tableStyles — referenced by relationship only,
+        // no element inside <p:presentation>.
+        for (rel_ty, part) in extra_rels {
+            let r = format!("rId{rid}");
+            rid += 1;
+            pres_rels.push(Relationship {
+                id: r,
+                rel_type: rel_ty,
+                target: relative_target(pres, &part),
+                external: false,
+            });
+        }
+
         let master_lst: String = master_entries
             .iter()
             .map(|(id, r)| format!(r#"<p:sldMasterId id="{id}" r:id="{r}"/>"#))
@@ -585,9 +788,11 @@ impl Composer {
             format!("<p:notesMasterIdLst>{inner}</p:notesMasterIdLst>")
         };
 
+        // Child order follows CT_Presentation: sldMasterIdLst, notesMasterIdLst,
+        // sldIdLst, sldSz, notesSz, defaultTextStyle.
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation {NS_DECL}><p:sldMasterIdLst>{master_lst}</p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{slide_lst}</p:sldIdLst><p:sldSz cx="{slide_w}" cy="{slide_h}"/>{notes_sz}</p:presentation>"#
+<p:presentation {NS_DECL}><p:sldMasterIdLst>{master_lst}</p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{slide_lst}</p:sldIdLst><p:sldSz cx="{slide_w}" cy="{slide_h}"/>{notes_sz}{default_text_style}</p:presentation>"#
         );
 
         self.out_pkg.insert_part(pres, xml.into_bytes());
@@ -606,6 +811,18 @@ impl Composer {
         self.out_ct.set_override("docProps/core.xml", CT_CORE);
     }
 
+    /// Minimal `docProps/app.xml` — PowerPoint always writes one; some
+    /// consumers get confused without it.
+    fn build_app(&mut self) {
+        let slides = self.slides_out.len();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Slideflow</Application><Slides>{slides}</Slides><ScaleCrop>false</ScaleCrop><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion></Properties>"#
+        );
+        self.out_pkg.insert_part("docProps/app.xml", xml.into_bytes());
+        self.out_ct.set_override("docProps/app.xml", CT_APP);
+    }
+
     fn build_root_rels(&mut self) {
         let rels = vec![
             Relationship {
@@ -618,6 +835,12 @@ impl Composer {
                 id: "rId2".into(),
                 rel_type: rel_type::CORE_PROPS.into(),
                 target: "docProps/core.xml".into(),
+                external: false,
+            },
+            Relationship {
+                id: "rId3".into(),
+                rel_type: rel_type::EXTENDED_PROPS.into(),
+                target: "docProps/app.xml".into(),
                 external: false,
             },
         ];
@@ -715,6 +938,11 @@ fn rewrite_master_layout_list(
                 wrote = true;
                 in_list = true;
             }
+            Event::Empty(e) if local_name(e.name().as_ref()) == b"sldLayoutIdLst" => {
+                // Self-closing source list: replace it in place.
+                write_list(&mut writer)?;
+                wrote = true;
+            }
             Event::End(e) if local_name(e.name().as_ref()) == b"sldLayoutIdLst" => {
                 in_list = false;
             }
@@ -732,6 +960,76 @@ fn rewrite_master_layout_list(
         buf.clear();
     }
     Ok(writer.into_inner().into_inner())
+}
+
+/// The raw bytes of a deck's `ppt/presentation.xml`, as a string.
+fn presentation_xml(pf: &PresentationFile) -> Option<String> {
+    let main = pf.package.main_document_part().ok()?;
+    let bytes = pf.package.part(&main)?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Extract one raw XML element (open tag through matching close tag) by its
+/// qualified name. Handles the self-closing form. Assumes the element does not
+/// nest within itself — true for every element this module extracts
+/// (`p:defaultTextStyle`, `a:tblStyle`).
+fn extract_element_raw(xml: &str, qname: &str) -> Option<String> {
+    let open = format!("<{qname}");
+    let mut from = 0;
+    while let Some(rel) = xml[from..].find(&open) {
+        let start = from + rel;
+        // The character after the name must terminate it (attr space, `>`,
+        // `/>`) — otherwise this is a longer name sharing the prefix (e.g.
+        // `<a:tblStyleLst` when looking for `a:tblStyle`); keep scanning.
+        let after = xml[start + open.len()..].chars().next()?;
+        if !matches!(after, ' ' | '>' | '/' | '\t' | '\r' | '\n') {
+            from = start + open.len();
+            continue;
+        }
+        let tag_end = start + xml[start..].find('>')?;
+        if xml[..tag_end].ends_with('/') {
+            return Some(xml[start..=tag_end].to_string());
+        }
+        let close = format!("</{qname}>");
+        let end = start + xml[start..].find(&close)? + close.len();
+        return Some(xml[start..end].to_string());
+    }
+    None
+}
+
+/// All raw occurrences of an element (see [`extract_element_raw`]).
+fn extract_all_elements_raw(xml: &str, qname: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(el) = extract_element_raw(rest, qname) {
+        let pos = rest.find(&el).unwrap_or(0) + el.len();
+        out.push(el);
+        rest = &rest[pos..];
+    }
+    out
+}
+
+/// The value of `attr` on the first `<...{element_local} ...>` open tag.
+fn attr_value(xml: &str, element_local: &str, attr: &str) -> Option<String> {
+    let mut reader = Reader::from_reader(xml.as_bytes());
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e))
+                if local_name(e.name().as_ref()) == element_local.as_bytes() =>
+            {
+                for a in e.attributes().flatten() {
+                    if a.key.as_ref() == attr.as_bytes() {
+                        return a.unescape_value().ok().map(|v| v.into_owned());
+                    }
+                }
+                return None;
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Extract the raw `<p:notesSz .../>` element from a deck's presentation part,
@@ -1023,6 +1321,84 @@ mod tests {
         assert_eq!(hyper.target, "https://example.com/page");
         assert!(pkg.has_part(&rels_part_name(out_slide)));
         let _ = std::fs::remove_file(&deck);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Give a fixture deck presentation-level style parts the way PowerPoint /
+    /// PptxGenJS write them: a defaultTextStyle in presentation.xml plus a
+    /// tableStyles part referenced from its rels.
+    fn add_presentation_style_parts(path: &std::path::Path, style_id: &str) {
+        let mut pkg = Package::open(path).unwrap();
+        let pres = String::from_utf8(pkg.part("ppt/presentation.xml").unwrap().to_vec()).unwrap();
+        let styled = pres.replace(
+            "</p:presentation>",
+            r#"<p:defaultTextStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:defaultTextStyle></p:presentation>"#,
+        );
+        pkg.insert_part("ppt/presentation.xml", styled.into_bytes());
+        pkg.insert_part(
+            "ppt/tableStyles.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{{{style_id}}}"><a:tblStyle styleId="{{{style_id}}}" styleName="Fixture Style"><a:wholeTbl><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></a:fill></a:tcStyle></a:wholeTbl></a:tblStyle></a:tblStyleLst>"#
+            )
+            .into_bytes(),
+        );
+        let mut rels = pkg.rels_for("ppt/presentation.xml").unwrap();
+        rels.push(Relationship {
+            id: "rId90".into(),
+            rel_type: rel_type::TABLE_STYLES.into(),
+            target: "tableStyles.xml".into(),
+            external: false,
+        });
+        pkg.set_rels("ppt/presentation.xml", &rels);
+        let mut ct = pkg.content_types().unwrap();
+        ct.set_override("ppt/tableStyles.xml", CT_TABLE_STYLES);
+        pkg.set_content_types(&ct);
+        pkg.save(path).unwrap();
+    }
+
+    #[test]
+    fn carries_presentation_level_style_parts() {
+        let deck_a = tmp("style_a.pptx");
+        let deck_b = tmp("style_b.pptx");
+        DeckSpec::new("A").slide(SlideSpec::new("S1").bullets(&["x"])).write_to(&deck_a).unwrap();
+        DeckSpec::new("B").slide(SlideSpec::new("S2").bullets(&["y"])).write_to(&deck_b).unwrap();
+        add_presentation_style_parts(&deck_a, "5C22544A-7EE6-4342-B048-85BDC9FD1C3A");
+        add_presentation_style_parts(&deck_b, "21E4AEA4-8DFA-4A89-87EB-49C32662AFE0");
+
+        let out = tmp("style_out.pptx");
+        let picks = vec![
+            SlidePick { pptx_path: deck_a.to_string_lossy().into(), slide_index: 1 },
+            SlidePick { pptx_path: deck_b.to_string_lossy().into(), slide_index: 1 },
+        ];
+        compose(&picks, &out, &ComposeOptions::default()).unwrap();
+        let pkg = Package::from_bytes(&std::fs::read(&out).unwrap()).unwrap();
+        assert_integrity(&pkg);
+
+        // app.xml is always generated and wired into the root rels.
+        assert!(pkg.has_part("docProps/app.xml"));
+        assert!(pkg
+            .rels_for("")
+            .unwrap()
+            .iter()
+            .any(|r| r.rel_type == rel_type::EXTENDED_PROPS));
+
+        // defaultTextStyle carried from the first deck.
+        let pres = String::from_utf8_lossy(pkg.part("ppt/presentation.xml").unwrap()).into_owned();
+        assert!(pres.contains("<p:defaultTextStyle>"), "defaultTextStyle missing");
+
+        // tableStyles merged across BOTH decks, referenced from presentation rels.
+        let ts = String::from_utf8_lossy(pkg.part("ppt/tableStyles.xml").unwrap()).into_owned();
+        assert!(ts.contains("5C22544A-7EE6-4342-B048-85BDC9FD1C3A"));
+        assert!(ts.contains("21E4AEA4-8DFA-4A89-87EB-49C32662AFE0"));
+        assert!(pkg
+            .rels_for("ppt/presentation.xml")
+            .unwrap()
+            .iter()
+            .any(|r| r.rel_type == rel_type::TABLE_STYLES));
+
+        let _ = std::fs::remove_file(&deck_a);
+        let _ = std::fs::remove_file(&deck_b);
         let _ = std::fs::remove_file(&out);
     }
 

@@ -1,8 +1,8 @@
-import { FolderOpen, Plus, FileText, Check } from "lucide-react";
+import { FolderOpen, Plus, FileText, Check, Star } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
-import { formatModified, formatBytes } from "../lib/utils";
+import { deckDisplayName, formatModified, formatBytes } from "../lib/utils";
 import * as api from "../lib/api";
 import Thumbnail from "./Thumbnail";
 
@@ -33,7 +33,7 @@ export default function Inspector() {
           </div>
 
           <h2 className="mt-3 text-title font-semibold text-ink">
-            {hit.slide.title || hit.deck.title}
+            {hit.slide.title || deckDisplayName(hit.deck)}
           </h2>
 
           {hit.snippet && (
@@ -44,8 +44,12 @@ export default function Inspector() {
           )}
 
           <dl className="mt-3 space-y-2 text-caption">
-            <Meta label="Source deck" value={hit.deck.title} />
+            <Meta label="Source deck" value={deckDisplayName(hit.deck)} />
             <Meta label="File" value={hit.deck.file_name} mono />
+            {hit.deck.title &&
+              hit.deck.title !== deckDisplayName(hit.deck) && (
+                <Meta label="Doc title" value={hit.deck.title} />
+              )}
             <Meta
               label="Slide"
               value={`${hit.slide.slide_index} of ${hit.deck.slide_count}`}
@@ -80,6 +84,16 @@ export default function Inspector() {
             >
               {inTray ? <Check size={15} /> : <Plus size={15} />}
               {inTray ? "In tray" : "Add to Tray"}
+            </button>
+            <button
+              onClick={() => void useApp.getState().toggleFavoriteSlide(hit.slide.id)}
+              className="flex items-center justify-center gap-2 rounded-[6px] border border-hairline/10 py-2 text-body text-ink transition-colors hover:bg-ink/5"
+            >
+              <Star
+                size={15}
+                className={hit.slide.favorite ? "fill-current text-amber-400" : ""}
+              />
+              {hit.slide.favorite ? "Remove from Favorites" : "Add to Favorites"}
             </button>
             <button
               onClick={() => void api.revealInFinder(hit.deck.path)}

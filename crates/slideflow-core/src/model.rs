@@ -20,6 +20,8 @@ pub struct DeckRecord {
     /// EMU dimensions of the slide canvas.
     pub slide_width_emu: i64,
     pub slide_height_emu: i64,
+    /// User-starred deck. Keyed by path, so it survives reindexing.
+    pub favorite: bool,
 }
 
 /// One indexed slide.
@@ -35,6 +37,9 @@ pub struct SlideRecord {
     pub notes: Option<String>,
     /// Cached preview SVG path (inside the app cache dir), if rendered.
     pub thumb_path: Option<String>,
+    /// User-starred slide. Keyed by (deck path, slide index), so it survives
+    /// reindexing.
+    pub favorite: bool,
 }
 
 /// A search result: slide + owning deck + ranking info.
@@ -58,6 +63,8 @@ pub struct SearchFilters {
     /// Deck modified within [from, to] (unix seconds).
     pub modified_from: Option<i64>,
     pub modified_to: Option<i64>,
+    /// Only slides the user starred.
+    pub favorites_only: Option<bool>,
     pub limit: Option<usize>,
 }
 
@@ -99,4 +106,49 @@ pub struct ComposeReport {
     pub source_decks: usize,
     /// Non-fatal notes (e.g. skipped notes pages, deduplicated masters).
     pub warnings: Vec<String>,
+}
+
+/// One remembered search (for the stats view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHistoryEntry {
+    pub query: String,
+    pub result_count: i64,
+    pub searched_unix: i64,
+}
+
+/// One remembered export/composition (for the stats view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportRecord {
+    pub output_path: String,
+    pub title: String,
+    pub slide_count: i64,
+    pub source_decks: i64,
+    pub exported_unix: i64,
+}
+
+/// One completed index run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRecord {
+    pub started_unix: i64,
+    pub duration_ms: i64,
+    pub indexed: i64,
+    pub removed: i64,
+    pub unchanged: i64,
+}
+
+/// Everything the stats view shows, gathered in one call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsOverview {
+    pub deck_count: i64,
+    pub slide_count: i64,
+    /// Sum of all indexed deck file sizes.
+    pub total_bytes: i64,
+    pub favorite_slides: i64,
+    pub favorite_decks: i64,
+    /// Most recent completed index run.
+    pub last_scan: Option<ScanRecord>,
+    pub recent_searches: Vec<SearchHistoryEntry>,
+    pub recent_exports: Vec<ExportRecord>,
+    /// Biggest decks by file size (descending).
+    pub largest_decks: Vec<DeckRecord>,
 }

@@ -12,7 +12,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
-import { cx, basename, stripMarks } from "../lib/utils";
+import {cx, basename, stripMarks, deckDisplayName } from "../lib/utils";
 import FilterPopover from "./FilterPopover";
 
 /** Unified titlebar toolbar (draggable) + the thin count/chips strip beneath.
@@ -224,12 +224,14 @@ function navLabel(
 ) {
   const suffix = ` · ${count} slide${count === 1 ? "" : "s"}`;
   if (nav.type === "all") return "All Slides" + suffix;
+  if (nav.type === "favorites") return "Favorites" + suffix;
+  if (nav.type === "stats") return "Statistics";
   if (nav.type === "root") {
     const r = roots.find((x) => x.id === nav.id);
     return (r ? basename(r.path) : "Folder") + suffix;
   }
   const d = decks.find((x) => x.id === nav.id);
-  return (d ? d.title || d.file_name : "Deck") + suffix;
+  return (d ? deckDisplayName(d) : "Deck") + suffix;
 }
 
 function ToolbarBtn({

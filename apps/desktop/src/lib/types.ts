@@ -20,6 +20,8 @@ export interface DeckRecord {
   /** EMU dimensions of the slide canvas. */
   slide_width_emu: number;
   slide_height_emu: number;
+  /** User-starred deck (persisted by path, survives reindexing). */
+  favorite: boolean;
 }
 
 /** One indexed slide. Mirrors `SlideRecord`. */
@@ -34,6 +36,8 @@ export interface SlideRecord {
   notes: string | null;
   /** Cached preview SVG path (inside the app cache dir), if rendered. */
   thumb_path: string | null;
+  /** User-starred slide (persisted by deck path + index, survives reindexing). */
+  favorite: boolean;
 }
 
 /** A search result: slide + owning deck + ranking info. Mirrors `SearchHit`. */
@@ -55,6 +59,8 @@ export interface SearchFilters {
   /** Deck modified within [from, to] (unix seconds). */
   modified_from?: number | null;
   modified_to?: number | null;
+  /** Only slides the user starred. */
+  favorites_only?: boolean | null;
   limit?: number | null;
 }
 
@@ -97,4 +103,42 @@ export interface ComposeReport {
 export interface Stats {
   deck_count: number;
   slide_count: number;
+}
+
+/** One remembered search. Mirrors `SearchHistoryEntry`. */
+export interface SearchHistoryEntry {
+  query: string;
+  result_count: number;
+  searched_unix: number;
+}
+
+/** One remembered export/composition. Mirrors `ExportRecord`. */
+export interface ExportRecord {
+  output_path: string;
+  title: string;
+  slide_count: number;
+  source_decks: number;
+  exported_unix: number;
+}
+
+/** One completed index run. Mirrors `ScanRecord`. */
+export interface ScanRecord {
+  started_unix: number;
+  duration_ms: number;
+  indexed: number;
+  removed: number;
+  unchanged: number;
+}
+
+/** Full stats-view payload. Mirrors `StatsOverview`. */
+export interface StatsOverview {
+  deck_count: number;
+  slide_count: number;
+  total_bytes: number;
+  favorite_slides: number;
+  favorite_decks: number;
+  last_scan: ScanRecord | null;
+  recent_searches: SearchHistoryEntry[];
+  recent_exports: ExportRecord[];
+  largest_decks: DeckRecord[];
 }

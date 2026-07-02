@@ -1,8 +1,8 @@
 import { memo, useState } from "react";
 import { motion } from "framer-motion";
-import { Eye, Plus, FolderOpen, Check } from "lucide-react";
+import { Eye, Plus, FolderOpen, Check, Star } from "lucide-react";
 import type { SearchHit } from "../lib/types";
-import { cx, prefersReducedMotion } from "../lib/utils";
+import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
@@ -57,6 +57,10 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
 
   const menuItems: MenuItem[] = [
     { label: "Add to Tray", onClick: addThis },
+    {
+      label: slide.favorite ? "Remove from Favorites" : "Add to Favorites",
+      onClick: () => void useApp.getState().toggleFavoriteSlide(slide.id),
+    },
     { label: "Peek", onClick: () => useApp.getState().openPeek(index) },
     {
       label: "Open source deck",
@@ -99,11 +103,11 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
           )}
         >
           <div className="relative">
-            <Thumbnail slideId={slide.id} alt={slide.title ?? deck.title} />
+            <Thumbnail slideId={slide.id} alt={slide.title ?? deckDisplayName(deck)} />
 
             {/* Hover caption: deck + slide number */}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between rounded-b-[6px] bg-gradient-to-t from-black/70 to-transparent px-2 pb-1 pt-4 text-caption text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-              <span className="truncate">{deck.title}</span>
+              <span className="truncate">{deckDisplayName(deck)}</span>
               <span className="tabnum ml-2 shrink-0 opacity-80">
                 #{slide.slide_index}
               </span>
@@ -131,6 +135,15 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
                 {inTray ? <Check size={13} /> : <Plus size={13} />}
               </QuickBtn>
               <QuickBtn
+                title={slide.favorite ? "Remove from Favorites" : "Add to Favorites"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void useApp.getState().toggleFavoriteSlide(slide.id);
+                }}
+              >
+                <Star size={13} className={slide.favorite ? "fill-current text-amber-400" : ""} />
+              </QuickBtn>
+              <QuickBtn
                 title="Reveal in Finder"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -141,9 +154,18 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
               </QuickBtn>
             </div>
 
-            {inTray && (
-              <div className="absolute left-1.5 top-1.5 rounded-full bg-accent p-0.5 text-white shadow">
-                <Check size={11} />
+            {(inTray || slide.favorite) && (
+              <div className="absolute left-1.5 top-1.5 flex flex-col gap-1">
+                {inTray && (
+                  <div className="rounded-full bg-accent p-0.5 text-white shadow">
+                    <Check size={11} />
+                  </div>
+                )}
+                {slide.favorite && (
+                  <div className="rounded-full bg-amber-400 p-0.5 text-white shadow">
+                    <Star size={11} className="fill-current" />
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -151,7 +173,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
           {/* Text renders before the image decodes (readable-first). */}
           <div className="px-0.5 pb-0.5 pt-1.5">
             <div className="truncate text-body font-medium text-ink">
-              {slide.title || deck.title}
+              {slide.title || deckDisplayName(deck)}
             </div>
             <div
               className="mt-0.5 line-clamp-1 text-caption text-subtle [&_mark]:font-semibold"
@@ -161,7 +183,9 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
             <div className="mt-1 flex items-center gap-1 text-caption text-subtle/80">
               <span className="tabnum">Slide {slide.slide_index}</span>
               <span aria-hidden>·</span>
-              <span className="truncate">{deck.file_name}</span>
+              <span className="truncate" title={deck.path}>
+                {deck.file_name}
+              </span>
             </div>
           </div>
         </motion.div>
