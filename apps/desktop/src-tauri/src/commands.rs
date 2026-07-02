@@ -334,3 +334,12 @@ pub async fn open_file(app: AppHandle, path: String) -> Result<(), String> {
         .open_path(path, None::<&str>)
         .map_err(e)
 }
+
+/// Open a URL in the default browser.
+#[tauri::command]
+pub async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(e)
+}

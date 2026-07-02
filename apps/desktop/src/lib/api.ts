@@ -214,6 +214,20 @@ export function openFile(path: string): Promise<void> {
   return Promise.resolve();
 }
 
+/** Open an external URL in the default browser. */
+export function openUrl(url: string): Promise<void> {
+  if (isTauri()) return tauriInvoke("open_url", { url });
+  window.open(url, "_blank", "noopener,noreferrer");
+  return Promise.resolve();
+}
+
+/** App version string, read from the Tauri bundle config at runtime. */
+export async function getAppVersion(): Promise<string> {
+  if (!isTauri()) return "dev";
+  const { getVersion } = await import("@tauri-apps/api/app");
+  return getVersion();
+}
+
 // ---------------------------------------------------------------------------
 // Native dialogs (folder picker, save sheet)
 // ---------------------------------------------------------------------------

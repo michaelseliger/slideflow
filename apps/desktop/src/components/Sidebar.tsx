@@ -7,6 +7,7 @@ import {
   Loader2,
   Star,
   BarChart3,
+  Info,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { cx, basename, deckDisplayName } from "../lib/utils";
@@ -154,6 +155,19 @@ export default function Sidebar() {
       >
         <FolderPlus size={15} />
         {!collapsed && <span>Add folder…</span>}
+      </button>
+
+      {/* Pinned About row. */}
+      <button
+        onClick={() => useApp.getState().setAboutOpen(true)}
+        className={cx(
+          "flex items-center gap-2 px-4 py-2.5 text-body text-subtle transition-colors hover:bg-ink/5 hover:text-ink",
+          collapsed && "justify-center px-0",
+        )}
+        title="About Slideflow"
+      >
+        <Info size={15} />
+        {!collapsed && <span>About</span>}
       </button>
 
       {deckMenu && (

@@ -69,6 +69,7 @@ pub fn run() {
             commands::toggle_favorite_deck,
             commands::reveal_in_finder,
             commands::open_file,
+            commands::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Slideflow");

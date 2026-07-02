@@ -9,6 +9,7 @@ import {
   Search as SearchIcon,
   PanelRight,
   PanelLeft,
+  Info,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { prefersReducedMotion } from "../lib/utils";
@@ -86,6 +87,12 @@ export default function CommandPalette() {
         hint: "⌘I",
         icon: <PanelRight size={15} />,
         run: () => app.toggleInspector(),
+      },
+      {
+        id: "about",
+        label: "About Slideflow",
+        icon: <Info size={15} />,
+        run: () => app.setAboutOpen(true),
       },
     ];
     const deckActions: Action[] = decks.map((d) => ({

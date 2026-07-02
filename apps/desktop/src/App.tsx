@@ -15,6 +15,7 @@ import PeekModal from "./components/PeekModal";
 import StatsView from "./components/StatsView";
 import CommandPalette from "./components/CommandPalette";
 import ExportSheet from "./components/ExportSheet";
+import AboutSheet from "./components/AboutSheet";
 import Toaster from "./components/Toaster";
 
 function focusSearch() {
@@ -245,6 +246,7 @@ export default function App() {
       <PeekModal />
       <CommandPalette />
       <ExportSheet />
+      <AboutSheet />
       <Toaster />
     </div>
   );
