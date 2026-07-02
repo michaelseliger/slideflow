@@ -1,6 +1,26 @@
+<div align="center">
+
+<img src="apps/desktop/src-tauri/icons/128x128.png" alt="Slideflow icon" width="96" height="96" />
+
 # Slideflow
 
 **Every slide you ever made, one keystroke away.**
+
+[![CI](https://github.com/michaelseliger/slideflow/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelseliger/slideflow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey.svg)](https://github.com/michaelseliger/slideflow/releases/latest)
+[![Built with](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri%202-orange.svg)](#architecture)
+
+[Website](https://slideflow.app) · [Download](https://github.com/michaelseliger/slideflow/releases/latest) · [Design overview](DESIGN.md) · [Report a bug](https://github.com/michaelseliger/slideflow/issues)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshot-dark.png" />
+  <img src="docs/assets/screenshot-light.png" alt="Slideflow — slide library with full-text search, inspector, and composition tray" width="800" />
+</picture>
+
+</div>
+
+---
 
 Slideflow turns the scattered pile of PowerPoint files on your machine into a
 single, instantly searchable library of *individual slides* — and lets you drag
@@ -8,11 +28,9 @@ any of them into a tray to compose a brand-new deck, where every slide keeps the
 **exact look, layout, master, and theme** it had in its source file.
 
 It's a local-first desktop app for **macOS, Windows, and Linux**. No cloud, no
-accounts, no telemetry — your slides never leave your computer.
-
-**Website & downloads:** **[slideflow.app](https://slideflow.app)**
-
----
+accounts, no telemetry — your slides never leave your computer. All PPTX
+handling is **pure Rust**: no LibreOffice, no bundled Python, no conversion
+APIs.
 
 ## Download
 
@@ -24,10 +42,9 @@ Get the latest version for your platform:
   - **Windows** — `.msi` / `.exe`
   - **Linux** — `.deb` / `.AppImage` / `.rpm`
 
-> Builds are currently **unsigned**. On macOS you may need to right-click the app
-> and choose *Open* the first time to bypass Gatekeeper.
-
----
+> [!NOTE]
+> Builds are currently **unsigned**. On macOS you may need to right-click the
+> app and choose *Open* the first time to bypass Gatekeeper.
 
 ## Why Slideflow
 
@@ -47,8 +64,6 @@ Slideflow fixes that:
   look **exactly** like their sources — every time.
 - **Stay in control of your files.** Everything runs natively on your machine.
   No LibreOffice, no bundled Python, no paid conversion APIs, no server.
-
----
 
 ## Features
 
@@ -81,8 +96,6 @@ Slideflow fixes that:
 - Native window chrome, dark mode, a command palette (`⌘K`), and a keyboard-first
   layout.
 
----
-
 ## How to use
 
 1. **Add your folders.** Point Slideflow at the folders where your `.pptx` files
@@ -100,8 +113,6 @@ Slideflow fixes that:
 
 **Handy shortcuts:** `⌘F` search · `space` peek · `return` add to tray ·
 `⌘E` export · `⌘R` re-index · `⌘Z` / `⌘⇧Z` undo/redo · `⌘K` command palette.
-
----
 
 ## Privacy
 
@@ -121,32 +132,60 @@ machine.**
 You point Slideflow at folders you already own, and that's the entire trust
 boundary.
 
----
+## Architecture
 
-## Open source
+Slideflow is two layers in **two separate Cargo workspaces**:
 
-Slideflow is **open source under the MIT license** — read it, fork it, build it,
-ship it. All PPTX handling is pure Rust: parsing, search, preview rendering, and
-deck composition are native, with no external runtimes touching your files.
+```mermaid
+graph TD
+  subgraph shell["apps/desktop — Tauri 2 shell"]
+    UI["React + TypeScript + Tailwind UI"]
+    HOST["Rust IPC host (src-tauri)"]
+    UI <-->|"typed IPC wrappers (lib/api.ts)"| HOST
+  end
+  subgraph core["crates/slideflow-core — pure-Rust engine"]
+    PARSER["pptx/parser<br/>slide order, text, notes"]
+    COMPOSER["pptx/composer<br/>style-preserving deck export"]
+    RENDER["render<br/>slide → self-contained SVG"]
+    INDEX["index<br/>SQLite + FTS5, fs watcher"]
+    OPC["opc<br/>zip parts, content types, relationships"]
+    PARSER --> OPC
+    COMPOSER --> OPC
+    RENDER --> OPC
+  end
+  HOST --> PARSER
+  HOST --> COMPOSER
+  HOST --> RENDER
+  HOST --> INDEX
+```
 
-Repository: **<https://github.com/michaelseliger/slideflow>**
-
----
-
-## Building from source
-
-Slideflow is two layers, in **two separate Cargo workspaces**:
-
-- **`crates/slideflow-core`** — the pure-Rust engine: PPTX parsing, the
-  SQLite/FTS5 search index + file watcher, the slide→SVG renderer, and the
-  style-preserving deck composer. No GUI, no GTK/WebKit, no OS dependency — it
-  builds and tests anywhere.
+- **`crates/slideflow-core`** — the engine: PPTX parsing, the SQLite/FTS5
+  search index + file watcher, the slide→SVG renderer, and the style-preserving
+  deck composer. No GUI, no GTK/WebKit, no OS dependency — it builds and tests
+  anywhere.
 - **`apps/desktop`** — the Tauri 2 shell (React + TypeScript + Vite + Tailwind
   frontend, thin Rust IPC host) that drives the engine.
 
 The Tauri host at `apps/desktop/src-tauri` is intentionally excluded from the
 root workspace, so `cargo test` at the repo root — and the `core` CI job — runs
 on plain Linux/macOS/Windows without any GTK/WebKit system libraries.
+
+The composer's core invariant is what makes exports pixel-faithful: every copied
+slide brings its **complete relationship closure** (layout → master → theme →
+media → charts) plus presentation-level parts, with identical parts across
+picks deduplicated by content hash.
+
+| Engine module | What it does |
+| --- | --- |
+| `opc` | Open Packaging Conventions layer: zip parts, `[Content_Types].xml`, relationships |
+| `pptx/parser` | Slide order, text, speaker notes, metadata extraction |
+| `pptx/composer` | Builds new decks from picked slides, preserving each slide's full style chain |
+| `render` | Slide → self-contained SVG previews (theme colors, placeholder inheritance, embedded images) |
+| `index` | SQLite + FTS5 library: incremental scanning, ranked full-text search, filesystem watcher |
+| `model` | Serde domain types shared with the frontend |
+| `fixtures` | Programmatic minimal-but-valid PPTX builders for tests |
+
+## Building from source
 
 ### Prerequisites
 
@@ -214,3 +253,32 @@ Two GitHub Actions workflows live in `.github/workflows/`:
 
 To cut a release: `git tag v0.2.1 && git push origin v0.2.1`, then publish the
 drafted release once the bundles are attached.
+
+## Contributing
+
+Issues and pull requests are welcome — for anything non-trivial, please open an
+issue first so we can discuss the approach.
+
+Before submitting a PR:
+
+```bash
+cargo test -p slideflow-core                 # engine tests must pass
+cd apps/desktop && pnpm build                # frontend must type-check + build
+```
+
+The engine has no GUI dependencies, so you can hack on parsing, search,
+rendering, or composition from any OS without a Tauri toolchain.
+
+## License
+
+Slideflow is open source under the **[MIT license](LICENSE)** — read it, fork
+it, build it, ship it.
+
+## Acknowledgements
+
+Built on the shoulders of [Tauri](https://tauri.app),
+[SQLite FTS5](https://sqlite.org/fts5.html) (via
+[rusqlite](https://github.com/rusqlite/rusqlite)),
+[quick-xml](https://github.com/tafia/quick-xml) /
+[roxmltree](https://github.com/RazrFalcon/roxmltree), and the wider Rust crates
+ecosystem.
