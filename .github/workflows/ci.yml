@@ -1,0 +1,82 @@
+# CI for Slideflow.
+#
+# Two things are tested on every push / PR:
+#   * the pure-Rust engine crate `slideflow-core` (no GTK/WebKit needed — the
+#     Tauri shell at apps/desktop/src-tauri is a *separate* Cargo workspace and
+#     is deliberately excluded from the root workspace, so this runs on plain
+#     Linux/macOS/Windows runners).
+#   * the React/TS frontend under apps/desktop (type-check + production build).
+#
+# `clippy` runs but is intentionally NON-BLOCKING (continue-on-error) — see the
+# comment on that job. `cargo fmt --check` is not gated at all: the crate does
+# not currently pass it, so adding it would make CI red on unrelated code.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Engine crate: build + run all tests (lib, integration, examples, doctests).
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test -p slideflow-core --all-targets
+
+  # Frontend: install deps + `pnpm build` (= tsc --noEmit && vite build).
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm must be set up BEFORE setup-node: setup-node's `cache: pnpm` step
+      # shells out to `pnpm store path`, which fails if pnpm isn't installed yet.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      # NB: the pnpm 11 supply-chain cooldown (minimumReleaseAge) would reject
+      # this frozen install whenever the lockfile pins a < 1-day-old browserslist
+      # data package; the exemptions in apps/desktop/pnpm-workspace.yaml handle it.
+      - name: Install dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: pnpm build
+
+  # Lint. NON-BLOCKING (continue-on-error): slideflow-core currently trips a
+  # handful of clippy lints (e.g. while_let_loop, enum_variant_names) that must
+  # be fixed inside crates/ in a dedicated PR. Until then this job reports lint
+  # status without failing the pipeline. Flip `continue-on-error` to false once
+  # the crate is clean.
+  clippy:
+    name: clippy (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy -p slideflow-core --all-targets -- -D warnings

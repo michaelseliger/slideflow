@@ -1,0 +1,14 @@
+# Frontend
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# Tauri / Rust
+src-tauri/target
+src-tauri/gen
+
+# Editor / OS
+.DS_Store
+*.log

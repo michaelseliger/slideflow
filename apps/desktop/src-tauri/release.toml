@@ -1,0 +1,35 @@
+# cargo-release config for the Slideflow desktop app.
+#
+# `cargo release <patch|minor|major>` bumps the version, keeps the three
+# version sources in sync, commits, and creates the `vX.Y.Z` tag that
+# `.github/workflows/release.yml` builds from.
+#
+#   Cargo.toml                 <- bumped by cargo-release itself
+#   tauri.conf.json            <- the version tauri-action stamps on the bundle
+#   ../package.json            <- the frontend package version
+#
+# Run from this directory (apps/desktop/src-tauri).
+
+# This is an app, never a crates.io crate — never publish.
+publish = false
+
+# Don't auto-push. Pushing the tag triggers the full multi-platform release
+# build, so push deliberately once you've reviewed:  git push --follow-tags
+push = false
+
+# Tag as `v0.2.1` (matches the `v*` trigger in release.yml).
+tag-name = "v{{version}}"
+tag-message = "Slideflow {{version}}"
+pre-release-commit-message = "Release v{{version}}"
+
+# Keep tauri.conf.json's version in lockstep with Cargo.toml.
+[[pre-release-replacements]]
+file = "tauri.conf.json"
+search = '"version": "[^"]+"'
+replace = '"version": "{{version}}"'
+
+# Keep the frontend package.json version in lockstep too.
+[[pre-release-replacements]]
+file = "../package.json"
+search = '"version": "[^"]+"'
+replace = '"version": "{{version}}"'

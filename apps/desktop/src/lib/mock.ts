@@ -1,0 +1,396 @@
+// Browser-mode fixtures. When the app runs in a plain browser (no Tauri IPC),
+// `api.ts` falls back to these so `pnpm dev` gives a fully clickable app with a
+// realistic-feeling library of ~40 slides across a handful of decks.
+
+import type {
+  ComposeReport,
+  DeckRecord,
+  ExportRecord,
+  RootRecord,
+  SearchHistoryEntry,
+  SearchHit,
+  SlidePick,
+  SlideRecord,
+  Stats,
+  StatsOverview,
+} from "./types";
+
+const EMU_W = 12_192_000;
+const EMU_H = 6_858_000;
+
+interface DeckSeed {
+  title: string;
+  file: string;
+  folder: string;
+  author: string;
+  accent: string;
+  slides: { title: string; body: string; notes?: string }[];
+}
+
+const DECK_SEEDS: DeckSeed[] = [
+  {
+    title: "Q3 Business Review",
+    file: "Q3-Business-Review.pptx",
+    folder: "/Users/you/Decks/Finance",
+    author: "Jane Doe",
+    accent: "#0A84FF",
+    slides: [
+      { title: "Q3 Business Review", body: "Fiscal year 2026 · Confidential", notes: "Welcome the exec team; set the frame for the quarter." },
+      { title: "Revenue up 18% YoY", body: "ARR crossed $42M this quarter with net retention at 121%.", notes: "Emphasize durable growth, not one-time deals." },
+      { title: "Pipeline Health", body: "Coverage 3.4x · Win rate 27% · Sales cycle down 9 days" },
+      { title: "Churn Down to 4.1%", body: "Gross churn improved on the back of the new onboarding flow." },
+      { title: "Gross Margin", body: "Blended gross margin held at 78% despite infra growth." },
+      { title: "Cash Runway", body: "22 months of runway at current burn; efficient growth intact." },
+    ],
+  },
+  {
+    title: "Product Roadmap 2026",
+    file: "Product-Roadmap-2026.pptx",
+    folder: "/Users/you/Decks/Product",
+    author: "Miguel Santos",
+    accent: "#30D158",
+    slides: [
+      { title: "Product Roadmap 2026", body: "Search, Compose, Collaborate" },
+      { title: "Ship Instant Search", body: "Sub-100ms keystroke-to-results on a local FTS5 index.", notes: "This is the headline; demo it live." },
+      { title: "Compose With Fidelity", body: "Dragged slides keep original theme, master and formatting." },
+      { title: "Real-time Collaboration", body: "Shared trays and comment threads land in H2." },
+      { title: "Offline First", body: "Everything works without a network; sync is additive." },
+      { title: "Enterprise Controls", body: "SSO, audit logs, and folder-level permissions." },
+    ],
+  },
+  {
+    title: "Brand Guidelines",
+    file: "Brand-Guidelines.pptx",
+    folder: "/Users/you/Decks/Marketing",
+    author: "Priya Nair",
+    accent: "#FF375F",
+    slides: [
+      { title: "Brand Guidelines", body: "Voice, color, and typography" },
+      { title: "Our Voice", body: "Warm, precise, never corporate. Speak like a helpful colleague." },
+      { title: "Color System", body: "One restrained accent; neutral greys everywhere else." },
+      { title: "Typography", body: "System font stack. Tabular numerals for data." },
+      { title: "Logo Usage", body: "Clear space equals the height of the mark. Never re-color." },
+    ],
+  },
+  {
+    title: "All-Hands Update",
+    file: "All-Hands-March.pptx",
+    folder: "/Users/you/Decks/Company",
+    author: "Jane Doe",
+    accent: "#BF5AF2",
+    slides: [
+      { title: "All-Hands · March", body: "Team update and Q&A" },
+      { title: "Welcome New Folks", body: "Twelve new teammates across product, sales, and support." },
+      { title: "Customer Wins", body: "Three lighthouse logos went live this month." },
+      { title: "What We Learned", body: "Ship smaller, measure sooner, and talk to users weekly." },
+      { title: "Open Q&A", body: "Drop questions in the thread; we'll get to all of them." },
+    ],
+  },
+  {
+    title: "Sales Playbook",
+    file: "Sales-Playbook.pptx",
+    folder: "/Users/you/Decks/Sales",
+    author: "Alex Kim",
+    accent: "#FF9F0A",
+    slides: [
+      { title: "Sales Playbook", body: "Discovery to close" },
+      { title: "Qualify With MEDDIC", body: "Metrics, economic buyer, decision criteria, and champion." },
+      { title: "Handle Objections", body: "Acknowledge, reframe, and return to business value." },
+      { title: "Pricing Conversation", body: "Anchor on outcomes; never lead with the discount." },
+      { title: "Close and Handoff", body: "A clean handoff to onboarding sets up net retention." },
+    ],
+  },
+  {
+    title: "Design System",
+    file: "Design-System.pptx",
+    folder: "/Users/you/Decks/Product",
+    author: "Miguel Santos",
+    accent: "#64D2FF",
+    slides: [
+      { title: "Design System", body: "Components, tokens, and patterns" },
+      { title: "8px Spacing Grid", body: "Consistent gutters keep dense grids calm and legible." },
+      { title: "Elevation", body: "Hairline separators over heavy borders. Soft shadows on lift." },
+      { title: "Motion", body: "Spring physics on meaningful moments only. Respect reduced motion." },
+      { title: "Dark Mode", body: "Elevated greys, matted thumbnails, vibrant text on materials only." },
+    ],
+  },
+];
+
+function svgFor(deck: DeckSeed, title: string, body: string): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const W = 960;
+  const H = 540;
+  // Wrap the body naively at ~44 chars.
+  const words = body.split(" ");
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if ((cur + " " + w).trim().length > 44) {
+      lines.push(cur.trim());
+      cur = w;
+    } else {
+      cur += " " + w;
+    }
+  }
+  if (cur.trim()) lines.push(cur.trim());
+  const bodyTspans = lines
+    .slice(0, 4)
+    .map(
+      (l, i) =>
+        `<text x="64" y="${300 + i * 40}" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="26" fill="#3a3a3c">${esc(
+          l,
+        )}</text>`,
+    )
+    .join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="#ffffff"/><rect x="0" y="0" width="14" height="${H}" fill="${deck.accent}"/><rect x="64" y="150" width="120" height="8" rx="4" fill="${deck.accent}"/><text x="64" y="120" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="46" font-weight="700" fill="#1c1c1e">${esc(
+    title,
+  )}</text>${bodyTspans}<text x="${W - 64}" y="${H - 40}" text-anchor="end" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="18" fill="#c7c7cc">${esc(
+    deck.title,
+  )}</text></svg>`;
+}
+
+let mockDecks: DeckRecord[] = [];
+let mockSlides: SlideRecord[] = [];
+const svgById = new Map<number, string>();
+
+(function build() {
+  let deckId = 1;
+  let slideId = 1;
+  const now = Math.floor(Date.now() / 1000);
+  for (const seed of DECK_SEEDS) {
+    const deck: DeckRecord = {
+      id: deckId,
+      path: `${seed.folder}/${seed.file}`,
+      file_name: seed.file,
+      title: seed.title,
+      author: seed.author,
+      slide_count: seed.slides.length,
+      modified_unix: now - deckId * 86400 * 3,
+      size_bytes: 1_200_000 + deckId * 40_000,
+      slide_width_emu: EMU_W,
+      slide_height_emu: EMU_H,
+      favorite: false,
+    };
+    mockDecks.push(deck);
+    seed.slides.forEach((s, i) => {
+      const rec: SlideRecord = {
+        id: slideId,
+        deck_id: deckId,
+        slide_index: i + 1,
+        title: s.title,
+        body_text: s.body,
+        notes: s.notes ?? null,
+        thumb_path: null,
+        favorite: false,
+      };
+      mockSlides.push(rec);
+      svgById.set(slideId, svgFor(seed, s.title, s.body));
+      slideId += 1;
+    });
+    deckId += 1;
+  }
+})();
+
+const mockRoots: RootRecord[] = (() => {
+  const byFolder = new Map<string, { decks: number; slides: number }>();
+  for (const seed of DECK_SEEDS) {
+    const cur = byFolder.get(seed.folder) ?? { decks: 0, slides: 0 };
+    cur.decks += 1;
+    cur.slides += seed.slides.length;
+    byFolder.set(seed.folder, cur);
+  }
+  // Collapse to the two top-level roots the seeds live under.
+  const roots = ["/Users/you/Decks"];
+  return roots.map((path, i) => {
+    let decks = 0;
+    let slides = 0;
+    for (const [folder, v] of byFolder) {
+      if (folder.startsWith(path)) {
+        decks += v.decks;
+        slides += v.slides;
+      }
+    }
+    return {
+      id: i + 1,
+      path,
+      deck_count: decks,
+      slide_count: slides,
+      last_scan_unix: Math.floor(Date.now() / 1000) - 3600,
+    };
+  });
+})();
+
+function highlight(text: string, query: string): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (!query.trim()) return esc(text.slice(0, 120));
+  const tokens = query.trim().split(/\s+/).filter(Boolean);
+  let out = esc(text);
+  for (const t of tokens) {
+    const re = new RegExp(
+      `(${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
+      "ig",
+    );
+    out = out.replace(re, "<mark>$1</mark>");
+  }
+  return out;
+}
+
+export const mock = {
+  listRoots: async (): Promise<RootRecord[]> => structuredClone(mockRoots),
+
+  addRoot: async (path: string): Promise<RootRecord> => {
+    const rec: RootRecord = {
+      id: mockRoots.length + 1,
+      path,
+      deck_count: 0,
+      slide_count: 0,
+      last_scan_unix: null,
+    };
+    mockRoots.push(rec);
+    return rec;
+  },
+
+  removeRoot: async (rootId: number): Promise<void> => {
+    const i = mockRoots.findIndex((r) => r.id === rootId);
+    if (i >= 0) mockRoots.splice(i, 1);
+  },
+
+  getDecks: async (): Promise<DeckRecord[]> => structuredClone(mockDecks),
+
+  getDeckSlides: async (deckId: number): Promise<SlideRecord[]> =>
+    structuredClone(mockSlides.filter((s) => s.deck_id === deckId)),
+
+  getStats: async (): Promise<Stats> => ({
+    deck_count: mockDecks.length,
+    slide_count: mockSlides.length,
+  }),
+
+  getSlideSvg: async (slideId: number): Promise<string> =>
+    svgById.get(slideId) ??
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="540" fill="#eee"/></svg>`,
+
+  search: async (
+    query: string,
+    filters: {
+      path_prefix?: string | null;
+      deck_query?: string | null;
+      favorites_only?: boolean | null;
+    } = {},
+  ): Promise<SearchHit[]> => {
+    const q = query.trim().toLowerCase();
+    const hits: SearchHit[] = [];
+    for (const slide of mockSlides) {
+      const deck = mockDecks.find((d) => d.id === slide.deck_id)!;
+      if (filters.path_prefix && !deck.path.startsWith(filters.path_prefix)) {
+        continue;
+      }
+      if (filters.favorites_only && !slide.favorite) continue;
+      if (
+        filters.deck_query &&
+        !`${deck.title} ${deck.file_name}`
+          .toLowerCase()
+          .includes(filters.deck_query.toLowerCase())
+      ) {
+        continue;
+      }
+      const hay = `${slide.title ?? ""} ${slide.body_text} ${
+        slide.notes ?? ""
+      }`.toLowerCase();
+      const matched = !q || hay.includes(q);
+      if (!matched) continue;
+      const source = slide.body_text.toLowerCase().includes(q)
+        ? slide.body_text
+        : slide.title ?? slide.body_text;
+      hits.push({
+        slide: structuredClone(slide),
+        deck: structuredClone(deck),
+        snippet: highlight(source, query),
+        score: q ? (slide.title?.toLowerCase().includes(q) ? 2 : 1) : 0,
+      });
+    }
+    hits.sort((a, b) => b.score - a.score || a.slide.id - b.slide.id);
+    return hits;
+  },
+
+  composeDeck: async (
+    picks: SlidePick[],
+    outputPath: string,
+    title: string,
+    _includeNotes: boolean,
+  ): Promise<ComposeReport> => {
+    // Simulate assembly latency so the progress UI is exercised in the browser.
+    await new Promise((r) => setTimeout(r, 700));
+    const decks = new Set(picks.map((p) => p.pptx_path));
+    mockExports.unshift({
+      output_path: outputPath,
+      title,
+      slide_count: picks.length,
+      source_decks: decks.size,
+      exported_unix: Math.floor(Date.now() / 1000),
+    });
+    return {
+      output_path: outputPath,
+      slides_written: picks.length,
+      source_decks: decks.size,
+      warnings: [],
+    };
+  },
+
+  // --- favorites / stats ---------------------------------------------------
+
+  toggleFavoriteSlide: async (slideId: number): Promise<boolean> => {
+    const slide = mockSlides.find((s) => s.id === slideId);
+    if (!slide) return false;
+    slide.favorite = !slide.favorite;
+    return slide.favorite;
+  },
+
+  toggleFavoriteDeck: async (deckId: number): Promise<boolean> => {
+    const deck = mockDecks.find((d) => d.id === deckId);
+    if (!deck) return false;
+    deck.favorite = !deck.favorite;
+    return deck.favorite;
+  },
+
+  recordSearch: async (query: string, resultCount: number): Promise<void> => {
+    const q = query.trim();
+    if (!q) return;
+    const last = mockSearches[0];
+    if (last && (q.startsWith(last.query) || last.query.startsWith(q))) {
+      last.query = q;
+      last.result_count = resultCount;
+      last.searched_unix = Math.floor(Date.now() / 1000);
+      return;
+    }
+    mockSearches.unshift({
+      query: q,
+      result_count: resultCount,
+      searched_unix: Math.floor(Date.now() / 1000),
+    });
+  },
+
+  getStatsOverview: async (): Promise<StatsOverview> => ({
+    deck_count: mockDecks.length,
+    slide_count: mockSlides.length,
+    total_bytes: mockDecks.reduce((n, d) => n + d.size_bytes, 0),
+    favorite_slides: mockSlides.filter((s) => s.favorite).length,
+    favorite_decks: mockDecks.filter((d) => d.favorite).length,
+    last_scan: {
+      started_unix: Math.floor(Date.now() / 1000) - 3600,
+      duration_ms: 1840,
+      indexed: mockDecks.length,
+      removed: 0,
+      unchanged: 0,
+    },
+    recent_searches: structuredClone(mockSearches.slice(0, 10)),
+    recent_exports: structuredClone(mockExports.slice(0, 10)),
+    largest_decks: structuredClone(
+      [...mockDecks].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, 5),
+    ),
+  }),
+};
+
+const mockSearches: SearchHistoryEntry[] = [];
+const mockExports: ExportRecord[] = [];

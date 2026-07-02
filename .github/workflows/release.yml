@@ -1,0 +1,134 @@
+# Release builds for Slideflow.
+#
+# Produces installable bundles for every desktop target and (on a tag push)
+# attaches them to a DRAFT GitHub release:
+#   * macOS  — .dmg for Apple Silicon (aarch64) and Intel (x86_64)
+#   * Linux  — .deb, .AppImage and .rpm (built on ubuntu-22.04)
+#   * Windows — .msi (WiX) and .exe (NSIS)
+#
+# Triggers:
+#   * push of a tag matching `v*`  -> build + create/populate a draft release
+#   * workflow_dispatch (manual)   -> build only, NO release is created
+#     (tagName is left empty on non-tag runs, and tauri-action then just builds
+#      the app without uploading assets — handy for verifying the build).
+#
+# Bundle targets are chosen per-OS via the tauri CLI `--bundles` flag passed
+# through tauri-action's `args`, rather than editing tauri.conf.json (whose
+# `bundle.targets` is ["app","dmg"], i.e. macOS-only).
+#
+# NOTE ON SIGNING:
+#   * macOS — Developer ID signing + notarization ARE wired up below via the
+#     APPLE_* env vars on the tauri-action step. They read from repo secrets;
+#     until all six secrets exist the macOS build falls back to UNSIGNED (which
+#     produces the "Slideflow is damaged" Gatekeeper error on download). See
+#     docs/RELEASE_SIGNING.md for how to create the Developer ID cert and add
+#     the secrets. The APPLE_* vars are inert on the Linux/Windows runners.
+#   * Windows — .msi / .exe are still UNSIGNED (SmartScreen warnings). Add a
+#     WINDOWS_CERTIFICATE when ready.
+#
+# NOTE ON ACTION VERSION: tauri-apps/tauri-action is pinned to @v1, the current
+# major (latest release action-v1.0.0). It supersedes the older @v0 (0.6.x)
+# line; all current Tauri 2 docs use @v1.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: build (${{ matrix.platform }} ${{ matrix.arch }})
+    # Required so tauri-action can create the draft release and upload assets.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            arch: aarch64
+            args: '--target aarch64-apple-darwin --bundles dmg'
+          - platform: macos-latest
+            arch: x86_64
+            args: '--target x86_64-apple-darwin --bundles dmg'
+          - platform: ubuntu-22.04
+            arch: x86_64
+            args: '--bundles deb,appimage,rpm'
+          - platform: windows-latest
+            arch: x86_64
+            args: '--bundles msi,nsis'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # The macOS runner is Apple Silicon; the x86_64 build needs the Intel
+          # target added. Installed on macOS only to keep Linux/Windows lean.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The Tauri host crate lives in its own workspace under src-tauri.
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev
+
+      # pnpm before setup-node so setup-node's pnpm cache can find pnpm.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the app and (on tag) publish a draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS Developer ID signing + notarization. tauri-action imports the
+          # cert from APPLE_CERTIFICATE/APPLE_CERTIFICATE_PASSWORD into a temp
+          # keychain automatically; notarization uses APPLE_ID + APPLE_PASSWORD
+          # (app-specific password) + APPLE_TEAM_ID. Read only by the macOS
+          # bundler — inert on Linux/Windows. Empty (secrets unset) => unsigned.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          # Only set a tag/release name for tag pushes. On workflow_dispatch
+          # these are empty, so tauri-action builds without creating a release.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Slideflow {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
