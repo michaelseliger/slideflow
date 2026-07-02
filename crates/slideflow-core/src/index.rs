@@ -6,9 +6,9 @@
 //! Schema (owned by this module, created/migrated in `Library::open`):
 //! - `roots(id, path UNIQUE, last_scan_unix)`
 //! - `decks(id, root_id, path UNIQUE, file_name, title, author, slide_count,
-//!    modified_unix, size_bytes, slide_width_emu, slide_height_emu,
-//!    content_hash)` — `content_hash` = sha256 of (mtime,size) or file bytes,
-//!    used for incremental rescans (unchanged files are skipped).
+//!   modified_unix, size_bytes, slide_width_emu, slide_height_emu,
+//!   content_hash)` — `content_hash` = sha256 of (mtime,size) or file bytes,
+//!   used for incremental rescans (unchanged files are skipped).
 //! - `slides(id, deck_id, slide_index, title, body_text, notes, thumb_path)`
 //! - FTS5: `slides_fts(title, body, notes, deck_title, content='')` —
 //!   contentless or external-content table kept in sync inside the same
@@ -1023,12 +1023,9 @@ pub fn watch_roots(
     }
 
     thread::spawn(move || {
-        loop {
-            // Block until the first change of a new batch.
-            let first = match rx.recv() {
-                Ok(p) => p,
-                Err(_) => break,
-            };
+        // Block until the first change of a new batch (loop ends when the
+        // watcher's sender is dropped and `recv` returns `Err`).
+        while let Ok(first) = rx.recv() {
             let mut batch: HashSet<PathBuf> = HashSet::new();
             batch.insert(first);
 

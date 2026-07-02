@@ -469,7 +469,7 @@ impl Ctx<'_> {
                     }
                     return Fill::Unspecified;
                 }
-                "noFill" => return Fill::NoFill,
+                "noFill" => return Fill::None,
                 "gradFill" => {
                     // Use the first gradient stop's color as a flat approximation.
                     if let Some(c) = ch(child, "gsLst")
@@ -907,7 +907,7 @@ fn collect_background(doc: &Document, theme: &Theme) -> Option<Fill> {
                         .and_then(|cn| theme.parse_color(cn))
                         .map(Fill::Solid);
                 }
-                "noFill" => return Some(Fill::NoFill),
+                "noFill" => return Some(Fill::None),
                 _ => {}
             }
         }
@@ -928,7 +928,7 @@ fn collect_background(doc: &Document, theme: &Theme) -> Option<Fill> {
 
 enum Fill {
     Solid(Rgba),
-    NoFill,
+    None,
     Unspecified,
 }
 

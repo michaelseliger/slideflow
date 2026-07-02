@@ -159,11 +159,11 @@ impl PresentationFile {
     }
 }
 
-/// Returns (ordered slide r:ids, slide size in EMU if declared).
-fn parse_presentation_xml(
-    xml: &[u8],
-    part: &str,
-) -> Result<(Vec<String>, Option<(i64, i64)>)> {
+/// Ordered slide `r:id`s plus the slide size in EMU, if declared.
+type PresentationInfo = (Vec<String>, Option<(i64, i64)>);
+
+/// Returns the ordered slide r:ids and the slide size in EMU if declared.
+fn parse_presentation_xml(xml: &[u8], part: &str) -> Result<PresentationInfo> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
@@ -248,10 +248,8 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                     }
                 }
                 b"t" if shape_depth > 0 => in_a_t = true,
-                b"p" if shape_depth > 0 => {
-                    if !current_text.is_empty() {
-                        pending_newline = true;
-                    }
+                b"p" if shape_depth > 0 && !current_text.is_empty() => {
+                    pending_newline = true;
                 }
                 _ => {}
             },
@@ -266,10 +264,8 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                         }
                     }
                 }
-                b"br" if in_a_t || shape_depth > 0 => {
-                    if !current_text.is_empty() {
-                        pending_newline = true;
-                    }
+                b"br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
+                    pending_newline = true;
                 }
                 _ => {}
             },
@@ -285,16 +281,14 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
             }
             Event::End(ref e) => match local_name(e.name().as_ref()) {
                 b"t" => in_a_t = false,
-                b"sp" | b"graphicFrame" => {
-                    if shape_depth > 0 {
-                        shape_depth -= 1;
-                        if shape_depth == 0 && !current_text.trim().is_empty() {
-                            let text = current_text.trim().to_string();
-                            if current_is_title && content.title.is_none() {
-                                content.title = Some(text.clone());
-                            }
-                            content.texts.push(text);
+                b"sp" | b"graphicFrame" if shape_depth > 0 => {
+                    shape_depth -= 1;
+                    if shape_depth == 0 && !current_text.trim().is_empty() {
+                        let text = current_text.trim().to_string();
+                        if current_is_title && content.title.is_none() {
+                            content.title = Some(text.clone());
                         }
+                        content.texts.push(text);
                     }
                 }
                 _ => {}
@@ -315,8 +309,7 @@ fn parse_core_props(package: &Package) -> CoreProps {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut current: Option<&'static str> = None;
-    loop {
-        let Ok(event) = reader.read_event_into(&mut buf) else { break };
+    while let Ok(event) = reader.read_event_into(&mut buf) {
         match event {
             Event::Start(ref e) => {
                 current = match local_name(e.name().as_ref()) {

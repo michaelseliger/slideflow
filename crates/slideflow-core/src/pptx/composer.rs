@@ -679,11 +679,9 @@ impl Composer {
         for master_name in &order {
             let Some(mo) = self.masters.get(master_name).cloned() else { continue };
             let mut rels = mo.base_rels.clone();
-            let mut next = max_rid_num(&rels) + 1;
             let mut entries: Vec<(u64, String)> = Vec::new();
-            for layout in &mo.layouts {
+            for (next, layout) in (max_rid_num(&rels) + 1..).zip(&mo.layouts) {
                 let rid = format!("rId{next}");
-                next += 1;
                 let big = self.next_big_id;
                 self.next_big_id += 1;
                 rels.push(Relationship {
