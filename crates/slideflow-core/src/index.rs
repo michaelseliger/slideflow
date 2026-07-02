@@ -1189,7 +1189,10 @@ mod tests {
         };
         let hits = lib.search("shared", &filters).unwrap();
         assert!(!hits.is_empty());
-        assert!(hits.iter().all(|h| h.deck.path.contains("/a/")));
+        // Native separators: `/a/` on Unix, `\a\` on Windows.
+        let sep = std::path::MAIN_SEPARATOR;
+        let a_dir = format!("{sep}a{sep}");
+        assert!(hits.iter().all(|h| h.deck.path.contains(&a_dir)));
     }
 
     #[test]
