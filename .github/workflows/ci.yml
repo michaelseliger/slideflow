@@ -53,6 +53,9 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      # NB: the pnpm 11 supply-chain cooldown (minimumReleaseAge) would reject
+      # this frozen install whenever the lockfile pins a < 1-day-old browserslist
+      # data package; the exemptions in apps/desktop/pnpm-workspace.yaml handle it.
       - name: Install dependencies
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile

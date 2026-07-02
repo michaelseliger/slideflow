@@ -1,3 +1,15 @@
 # esbuild ships a postinstall that links its native binary; approve it.
 allowBuilds:
   esbuild: true
+
+# pnpm 11 turns on a supply-chain cooldown by default (minimumReleaseAge = 1 day).
+# It gates BOTH `pnpm install --frozen-lockfile` and the implicit dependency check
+# pnpm runs before `pnpm build` (verifyDepsBeforeRun), rejecting the install if the
+# committed lockfile has any entry published < 1 day ago. The browserslist data
+# packages below publish several times a day, so a freshly generated lockfile almost
+# always pins a < 1-day-old version and would break CI (and local `pnpm build`).
+# They are generated target-data, not runtime code — exempt them from the cooldown
+# while keeping it in force for every other dependency.
+minimumReleaseAgeExclude:
+  - electron-to-chromium
+  - caniuse-lite
