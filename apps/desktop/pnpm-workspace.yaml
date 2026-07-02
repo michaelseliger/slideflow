@@ -1,0 +1,3 @@
+# esbuild ships a postinstall that links its native binary; approve it.
+allowBuilds:
+  esbuild: true
