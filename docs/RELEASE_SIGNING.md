@@ -97,8 +97,9 @@ If all three pass, users can double-click with no warning.
 - The `x86_64` (Intel) DMG is signed + notarized by the same secrets.
 - Developer ID Application certs expire (~5 years) — re-export and update
   `APPLE_CERTIFICATE` / `APPLE_CERTIFICATE_PASSWORD` when that happens.
-- Windows `.msi` / `.exe` are still unsigned (SmartScreen). That's a separate
-  cert (`WINDOWS_CERTIFICATE`) not covered here.
+- Windows `.msi` / `.exe` signing is covered separately in
+  [`WINDOWS_SIGNING.md`](./WINDOWS_SIGNING.md) (Azure Artifact Signing). There is
+  no Windows equivalent of notarization.
 
 ## Un-breaking an unsigned build by hand (stopgap)
 

@@ -23,8 +23,14 @@
 #     produces the "Slideflow is damaged" Gatekeeper error on download). See
 #     docs/RELEASE_SIGNING.md for how to create the Developer ID cert and add
 #     the secrets. The APPLE_* vars are inert on the Linux/Windows runners.
-#   * Windows — .msi / .exe are still UNSIGNED (SmartScreen warnings). Add a
-#     WINDOWS_CERTIFICATE when ready.
+#   * Windows — Authenticode signing via Azure Artifact Signing (formerly
+#     "Trusted Signing") IS wired up below. It reads six AZURE_* repo secrets;
+#     until they exist the Windows build falls back to UNSIGNED (SmartScreen
+#     "unknown publisher" warning). There is no Windows equivalent of Apple
+#     notarization — a valid signature stops the "unknown publisher" wording,
+#     but SmartScreen still warns until the download builds reputation. See
+#     docs/WINDOWS_SIGNING.md for how to create the Azure resources and add the
+#     secrets. The AZURE_* vars are inert on the macOS/Linux runners.
 #   * Updater — update packages are minisign-signed with
 #     TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD (repo
 #     secrets, independent of Apple signing); the matching pubkey lives in
@@ -48,6 +54,18 @@ jobs:
     # Required so tauri-action can create the draft release and upload assets.
     permissions:
       contents: write
+    # Windows Authenticode signing (Azure Artifact Signing). trusted-signing-cli
+    # reads the three AZURE credentials from the environment; the endpoint /
+    # account / profile become the signCommand injected below. All inert unless
+    # the secrets are set, and unused on the macOS/Linux jobs. Job-level so the
+    # "Set up Windows signing" step's `if:` can gate on env.AZURE_CLIENT_ID.
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+      AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+      AZURE_CERT_PROFILE_NAME: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +146,26 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
+      # Windows only, and only when the Azure secrets are present. Installs the
+      # signer and writes a tiny config overlay that sets bundle.windows.signCommand.
+      # tauri-action merges it via `--config` (appended to args below). Leaving
+      # tauri.conf.json itself free of signCommand keeps local/unsigned builds
+      # working — without this overlay the Windows build is simply unsigned.
+      - name: Set up Windows signing (Azure Artifact Signing)
+        id: winsign
+        if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: |
+          cargo install trusted-signing-cli --locked
+          # Resolve endpoint/account/profile now; keep %1 literal — Tauri
+          # substitutes it with each artifact path at bundle time. Forward
+          # slashes only: Tauri runs signCommand as a raw process, not a shell.
+          $cmd = "trusted-signing-cli -e $env:AZURE_ENDPOINT -a $env:AZURE_CODE_SIGNING_ACCOUNT_NAME -c $env:AZURE_CERT_PROFILE_NAME -d Slideflow %1"
+          $conf = @{ bundle = @{ windows = @{ signCommand = $cmd } } } | ConvertTo-Json -Depth 6
+          # Written into projectPath (apps/desktop); --config resolves from there.
+          Set-Content -Path "apps/desktop/sign.windows.conf.json" -Value $conf
+          "config=--config sign.windows.conf.json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Build the app and (on tag) publish a draft release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -164,4 +202,6 @@ jobs:
           # installer (smoother update UX than msi); per-installer keys are
           # still emitted, so MSI installs keep updating via msi.
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          # steps.winsign.outputs.config is empty on every job except a Windows
+          # build with the Azure secrets set, where it adds the signing overlay.
+          args: ${{ matrix.args }} ${{ steps.winsign.outputs.config }}
