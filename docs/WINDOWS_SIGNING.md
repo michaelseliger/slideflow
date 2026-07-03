@@ -10,6 +10,21 @@ using credentials stored as repo secrets, exactly like the macOS notarization
 setup. The CI (`.github/workflows/release.yml`) is already wired; it just needs
 six repository secrets.
 
+> **Not ready to pay? That's fine.** Windows builds ship **unsigned by default** —
+> if none of the `AZURE_*` secrets are set, the signing step is skipped and the
+> build still succeeds (users just get the SmartScreen "unknown publisher"
+> notice). There is **nothing to do** to stay unsigned.
+>
+> **Free option for open source:** Because Slideflow is MIT-licensed,
+> [**SignPath Foundation**](https://signpath.org/) issues a **free** code-signing
+> certificate to qualifying OSS projects, on their cloud HSM, usable from CI on a
+> Mac — no monthly fee and no hardware token. It's an application/review process
+> and they favour projects with some track record, so it's most realistic once
+> Slideflow has a bit of adoption. Same OV semantics as Azure (publisher name
+> shows; SmartScreen reputation still builds over time). This is the recommended
+> path if cost is the blocker. The paid Azure route below is the fallback for
+> when the project is commercial / doesn't qualify for the Foundation.
+
 ## First, the honest part: there is no Windows "notarization"
 
 macOS notarization gives you a clean install with **zero warnings** the moment
