@@ -13,7 +13,12 @@ use super::{a, ch, fnum, Ctx};
 impl Ctx<'_> {
     pub(crate) fn render_pic(&mut self, node: Node, tf: Transform) {
         let sp_pr = ch(node, "spPr");
-        let xfrm = sp_pr.and_then(|s| ch(s, "xfrm")).map(parse_xfrm);
+        // Placeholder pictures (p:ph type="pic") often carry no xfrm of their
+        // own — geometry comes from the matching layout/master placeholder,
+        // exactly like placeholder text shapes.
+        let xfrm = sp_pr.and_then(|s| ch(s, "xfrm")).map(parse_xfrm).or_else(|| {
+            super::placeholder::shape_placeholder(node).and_then(|ph| self.inherited_xfrm(&ph))
+        });
         let Some(x) = xfrm else { return };
         let rect = tf.apply(&x);
         if rect.w <= 0.0 || rect.h <= 0.0 {

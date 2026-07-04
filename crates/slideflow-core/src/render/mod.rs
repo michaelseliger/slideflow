@@ -480,7 +480,7 @@ impl Ctx<'_> {
         self.cur_rels = prev_rels;
     }
 
-    fn inherited_xfrm(&self, ph: &Placeholder) -> Option<Xfrm> {
+    pub(crate) fn inherited_xfrm(&self, ph: &Placeholder) -> Option<Xfrm> {
         for src in [&self.layout_phs, &self.master_phs] {
             if let Some(m) = match_placeholder(src, ph) {
                 if let Some(x) = &m.xfrm {
