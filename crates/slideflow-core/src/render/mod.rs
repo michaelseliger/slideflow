@@ -38,6 +38,8 @@
 //! - Escape all text. The SVG is injected into the app's webview via
 //!   `<img src=data:>` — it must not contain scripts or external references.
 
+use std::collections::HashMap;
+
 use roxmltree::{Document, Node};
 
 use crate::error::{Error, Result};
@@ -178,20 +180,23 @@ pub fn render_slide_svg(
         defs: String::new(),
         body: String::new(),
         clip_id: 0,
+        grad_id: 0,
+        grad_cache: HashMap::new(),
     };
 
     // Background: slide's own, else layout, else master, else white.
     let slide_bg = collect_background(&slide_doc, &ctx.theme);
     let bg = slide_bg.or(layout_bg).or(master_bg);
-    let bg_hex = match bg {
-        Some(Fill::Solid(c)) => c.hex(),
-        _ => "#FFFFFF".to_string(),
+    let bg_fill = match &bg {
+        Some(f @ Fill::Gradient { .. }) => ctx.fill_attrs(f),
+        Some(Fill::Solid(c)) => format!(r#" fill="{}""#, c.hex()),
+        _ => r##" fill="#FFFFFF""##.to_string(),
     };
     ctx.body.push_str(&format!(
-        r#"<rect x="0" y="0" width="{w}" height="{h}" fill="{bg}"/>"#,
+        r#"<rect x="0" y="0" width="{w}" height="{h}"{bg}/>"#,
         w = fnum(w_pt),
         h = fnum(h_pt),
-        bg = bg_hex
+        bg = bg_fill
     ));
 
     // Slide shapes, in document order.
@@ -251,6 +256,10 @@ struct Ctx<'a> {
     defs: String,
     body: String,
     clip_id: usize,
+    /// Monotonic id for interned `<defs>` gradients (`grad0`, `grad1`, …).
+    grad_id: usize,
+    /// Serialized-gradient → def-id, so repeated gradients emit one `<defs>`.
+    grad_cache: HashMap<String, String>,
 }
 
 impl Ctx<'_> {
@@ -357,8 +366,18 @@ impl Ctx<'_> {
             return;
         }
 
-        let fill = sp_pr.map(|s| self.resolve_fill(s)).unwrap_or(Fill::Unspecified);
-        let stroke = sp_pr.and_then(|s| self.resolve_stroke(s));
+        // Explicit spPr fill/line wins; otherwise fall back to the shape's
+        // p:style fillRef/lnRef references into the theme's fmtScheme.
+        let mut fill = sp_pr.map(|s| self.resolve_fill(s)).unwrap_or(Fill::Unspecified);
+        if matches!(fill, Fill::Unspecified) {
+            if let Some(f) = self.resolve_style_fill(node) {
+                fill = f;
+            }
+        }
+        let mut stroke = sp_pr.and_then(|s| self.resolve_stroke(s));
+        if stroke.is_none() {
+            stroke = self.resolve_style_stroke(node);
+        }
         let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom"));
 
         let transform = rect.svg_transform(&x);
@@ -368,7 +387,7 @@ impl Ctx<'_> {
         }
 
         // Draw geometry only when there's something visible to draw.
-        let has_fill = matches!(fill, Fill::Solid(_));
+        let has_fill = matches!(fill, Fill::Solid(_) | Fill::Gradient { .. });
         let has_stroke = stroke.is_some();
         if geom_node.is_some() || has_fill || has_stroke {
             self.draw_geometry(geom_node, &rect, &fill, stroke.as_ref());
@@ -737,5 +756,114 @@ mod tests {
     fn wrap_hard_breaks_long_words() {
         let lines = wrap("supercalifragilisticexpialidocious", 18.0, 40.0);
         assert!(lines.len() > 1, "long word should hard-break: {lines:?}");
+    }
+
+    // --- Feature 2: real gradients -----------------------------------------
+
+    #[test]
+    fn gradient_fill_emits_linear_gradient_with_ordered_stops() {
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="G"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="50000"><a:srgbClr val="00FF00"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<linearGradient"), "expected a linearGradient: {svg}");
+        assert!(svg.contains(r#"fill="url(#grad0)""#), "rect references gradient: {svg}");
+        let r = svg.find(r##"stop-color="#FF0000""##).unwrap();
+        let g = svg.find(r##"stop-color="#00FF00""##).unwrap();
+        let b = svg.find(r##"stop-color="#0000FF""##).unwrap();
+        assert!(r < g && g < b, "stops must be in position order: {svg}");
+        assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn gradient_angle_90_is_vertical() {
+        // ang=5400000 → 90°: endpoints run top→bottom (x1==x2, y from 0 to 1).
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="G"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"x1="0.5""#) && svg.contains(r#"x2="0.5""#), "vertical x: {svg}");
+        assert!(svg.contains(r#"y1="0""#) && svg.contains(r#"y2="1""#), "vertical y: {svg}");
+    }
+
+    #[test]
+    fn identical_gradients_are_deduplicated() {
+        let one = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="G"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="2000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill></p:spPr></p:sp>"#;
+        let shapes = format!("{one}{one}");
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<linearGradient").count(), 1, "gradient def deduped: {svg}");
+        assert_eq!(svg.matches(r#"fill="url(#grad0)""#).count(), 2, "both shapes reuse it: {svg}");
+    }
+
+    // --- Feature 3: shape style references ----------------------------------
+
+    #[test]
+    fn style_fillref_resolves_from_fmtscheme() {
+        // No spPr fill; fillRef idx=1 → fillStyleLst[0] (solidFill phClr),
+        // phClr = accent1. lnRef idx=3 → lnStyleLst[2] width 19050 EMU = 1.5pt.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Styled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="3"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#FF00AA""##), "fillRef → accent1 fill: {svg}");
+        assert!(svg.contains(r##"stroke="#FF00AA""##), "lnRef → accent1 stroke: {svg}");
+        assert!(svg.contains(r#"stroke-width="1.5""#), "lnRef width from template: {svg}");
+    }
+
+    #[test]
+    fn explicit_sppr_fill_wins_over_style_ref() {
+        // An explicit solidFill must override the fillRef.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Styled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="00CC00"/></a:solidFill></p:spPr><p:style><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef></p:style></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#00CC00""##), "explicit fill wins: {svg}");
+        assert!(!svg.contains(r##"fill="#FF00AA""##), "style ref must not apply: {svg}");
+    }
+
+    // --- Feature 4: bgRef backgrounds ---------------------------------------
+
+    fn slide_with_bg(bg_inner: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {NS}><p:cSld><p:bg>{bg_inner}</p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#
+        )
+    }
+
+    fn pf_with_slide_and_theme(deck: DeckSpec, slide_xml: &str, theme: Option<&str>) -> PresentationFile {
+        let bytes = deck.build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", slide_xml.to_string().into_bytes());
+        if let Some(t) = theme {
+            pkg.insert_part("ppt/theme/theme1.xml", t.to_string().into_bytes());
+        }
+        PresentationFile::from_package(pkg).unwrap()
+    }
+
+    #[test]
+    fn bgref_derives_background_from_bgfillstylelst() {
+        // Fixture bgFillStyleLst is solid phClr; bgRef idx=1001 → accent1.
+        let slide = slide_with_bg(r#"<p:bgRef idx="1001"><a:schemeClr val="accent1"/></p:bgRef>"#);
+        let pf = pf_with_slide_and_theme(
+            DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")),
+            &slide,
+            None,
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(r##"<rect x="0" y="0" width="960" height="540" fill="#FF00AA"/>"##),
+            "background derived from bgRef, not white: {svg}"
+        );
+    }
+
+    #[test]
+    fn bgref_gradient_background_emits_gradient() {
+        // Custom theme whose bgFillStyleLst[0] is a gradient; bgRef phClr = #123456.
+        let theme = format!(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"><a:themeElements><a:clrScheme name="c"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme><a:fmtScheme name="s"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:alpha val="0"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="2700000"/></a:gradFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#
+        );
+        let slide = slide_with_bg(r#"<p:bgRef idx="1001"><a:srgbClr val="123456"/></p:bgRef>"#);
+        let pf = pf_with_slide_and_theme(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &slide, Some(&theme));
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<linearGradient"), "bgRef gradient template emitted: {svg}");
+        assert!(svg.contains(r##"stop-color="#123456""##), "phClr substituted into stops: {svg}");
+        assert!(svg.contains(r#"fill="url(#grad0)""#), "bg rect uses the gradient: {svg}");
     }
 }

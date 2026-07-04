@@ -107,7 +107,7 @@ impl Ctx<'_> {
         stroke: Option<&Stroke>,
     ) {
         let prst = geom_node.and_then(|g| a(g, "prst"));
-        let fill_attrs = fill.svg_attrs();
+        let fill_attrs = self.fill_attrs(fill);
         let mut stroke_attrs = String::new();
         if let Some(s) = stroke {
             stroke_attrs = format!(
