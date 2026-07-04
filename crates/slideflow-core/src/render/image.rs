@@ -8,7 +8,7 @@ use roxmltree::Node;
 use crate::opc::resolve_target;
 
 use super::geometry::{parse_xfrm, Rect, Transform};
-use super::{ch, fnum, Ctx};
+use super::{a, ch, fnum, Ctx};
 
 impl Ctx<'_> {
     pub(crate) fn render_pic(&mut self, node: Node, tf: Transform) {
@@ -31,22 +31,55 @@ impl Ctx<'_> {
             None
         };
         match data_uri {
-            Some(uri) => {
-                self.body.push_str(&format!(
-                    r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="none" href="{uri}"/>"#,
-                    x = fnum(rect.x),
-                    y = fnum(rect.y),
-                    w = fnum(rect.w),
-                    h = fnum(rect.h),
-                    uri = uri
-                ));
-            }
+            Some(uri) => self.emit_image(node, &rect, &uri),
             None => self.draw_image_placeholder(&rect),
         }
 
         if open_g {
             self.body.push_str("</g>");
         }
+    }
+
+    /// Emit an `<image>` for `rect`, honoring a `blipFill/srcRect` crop: the crop
+    /// selects a sub-rectangle of the source that must fill `rect`, so we draw
+    /// the *full* image enlarged so its visible sub-rect lands on `rect`, then
+    /// clip to `rect`.
+    fn emit_image(&mut self, node: Node, rect: &Rect, uri: &str) {
+        if let Some((l, t, r, b)) = ch(node, "blipFill").and_then(parse_src_rect) {
+            let vis_w = 1.0 - l - r;
+            let vis_h = 1.0 - t - b;
+            let cropped = l != 0.0 || t != 0.0 || r != 0.0 || b != 0.0;
+            if cropped && vis_w > 0.0 && vis_h > 0.0 {
+                let full_w = rect.w / vis_w;
+                let full_h = rect.h / vis_h;
+                let img_x = rect.x - l * full_w;
+                let img_y = rect.y - t * full_h;
+                let cid = self.clip_id;
+                self.clip_id += 1;
+                self.defs.push_str(&format!(
+                    r#"<clipPath id="imgclip{cid}"><rect x="{x}" y="{y}" width="{w}" height="{h}"/></clipPath>"#,
+                    x = fnum(rect.x),
+                    y = fnum(rect.y),
+                    w = fnum(rect.w),
+                    h = fnum(rect.h),
+                ));
+                self.body.push_str(&format!(
+                    r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="none" clip-path="url(#imgclip{cid})" href="{uri}"/>"#,
+                    x = fnum(img_x),
+                    y = fnum(img_y),
+                    w = fnum(full_w),
+                    h = fnum(full_h),
+                ));
+                return;
+            }
+        }
+        self.body.push_str(&format!(
+            r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="none" href="{uri}"/>"#,
+            x = fnum(rect.x),
+            y = fnum(rect.y),
+            w = fnum(rect.w),
+            h = fnum(rect.h),
+        ));
     }
 
     fn pic_data_uri(&self, node: Node) -> Option<String> {
@@ -135,6 +168,19 @@ impl Ctx<'_> {
     }
 }
 
+/// The `a:srcRect` crop fractions `(l, t, r, b)` of a `blipFill`, each a
+/// fraction of the source dimension (0 = no crop; negative = zoom out — legal).
+fn parse_src_rect(blip_fill: Node) -> Option<(f64, f64, f64, f64)> {
+    let sr = ch(blip_fill, "srcRect")?;
+    let pct = |name: &str| {
+        a(sr, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    Some((pct("l"), pct("t"), pct("r"), pct("b")))
+}
+
 /// The `r:embed` of an `<asvg:svgBlip>` inside a blip's `a:extLst`, if present.
 /// Matched by local name so it's namespace-prefix agnostic.
 fn svg_blip_embed(blip: Node) -> Option<String> {
@@ -217,8 +263,26 @@ pub(crate) fn downscale_raster(bytes: &[u8], cap: u32) -> Option<(String, Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{svg_blip_embed, svg_is_safe};
+    use super::{parse_src_rect, svg_blip_embed, svg_is_safe};
     use roxmltree::Document;
+
+    #[test]
+    fn parse_src_rect_reads_fractions() {
+        let xml = r#"<a:blipFill xmlns:a="urn:a"><a:srcRect l="25000" t="0" r="10000" b="50000"/></a:blipFill>"#;
+        let doc = Document::parse(xml).unwrap();
+        let (l, t, r, b) = parse_src_rect(doc.root_element()).unwrap();
+        assert!((l - 0.25).abs() < 1e-9);
+        assert_eq!(t, 0.0);
+        assert!((r - 0.10).abs() < 1e-9);
+        assert!((b - 0.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_src_rect_absent_without_element() {
+        let xml = r#"<a:blipFill xmlns:a="urn:a"><a:blip/></a:blipFill>"#;
+        let doc = Document::parse(xml).unwrap();
+        assert!(parse_src_rect(doc.root_element()).is_none());
+    }
 
     #[test]
     fn svg_blip_embed_prefers_the_vector_source() {
