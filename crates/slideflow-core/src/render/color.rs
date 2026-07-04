@@ -149,6 +149,23 @@ impl Theme {
         }
     }
 
+    /// Apply a slide's `p:clrMapOvr/a:overrideClrMapping`, if present: its
+    /// attributes replace the master `clrMap` so inherited master/layout
+    /// decoration recolors along with the slide. An `a:masterClrMapping` element
+    /// (or an absent override) means "no override" — the master map is kept.
+    pub(crate) fn apply_clr_map_override(&mut self, slide_doc: &Document) {
+        if let Some(ovr) = slide_doc
+            .root_element()
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "overrideClrMapping")
+        {
+            self.clr_map.clear();
+            for at in ovr.attributes() {
+                self.clr_map.insert(at.name().to_string(), at.value().to_string());
+            }
+        }
+    }
+
     /// Resolve a scheme slot color without transforms.
     fn parse_scheme_base(&self, node: Node) -> Option<Rgba> {
         match node.tag_name().name() {

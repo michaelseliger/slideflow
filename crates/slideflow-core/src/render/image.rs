@@ -84,7 +84,11 @@ impl Ctx<'_> {
 
     fn pic_data_uri(&self, node: Node) -> Option<String> {
         let blip = ch(node, "blipFill").and_then(|b| ch(b, "blip"))?;
+        self.blip_data_uri(blip)
+    }
 
+    /// Resolve an `a:blip` (from a `p:pic` or a shape `blipFill`) to a data URI.
+    fn blip_data_uri(&self, blip: Node) -> Option<String> {
         // Prefer a vector (SVG) source when present. PowerPoint stores it in an
         // a:extLst extension (<asvg:svgBlip r:embed>) and keeps the raster
         // r:embed only as a fallback — so try the SVG first, and fall through to
@@ -96,16 +100,22 @@ impl Ctx<'_> {
                 }
             }
         }
-
         // Raster (or content-typed SVG) via the blip's own r:embed.
         let embed = blip.attributes().find(|at| at.name() == "embed").map(|at| at.value())?;
-        let (target, bytes) = self.embed_target(embed)?;
+        let (target, _) = self.embed_target(embed)?;
+        self.data_uri_for_target(&target)
+    }
+
+    /// Encode a resolved image part (by part name) as a data URI, applying the
+    /// same content-type gate and thumbnail downscaling as blip embedding.
+    fn data_uri_for_target(&self, target: &str) -> Option<String> {
+        let bytes = self.pf.package.part(target)?;
         let ct = self
             .content_types
             .as_ref()
-            .and_then(|c| c.content_type_of(&target))
+            .and_then(|c| c.content_type_of(target))
             .map(|s| s.to_string())
-            .or_else(|| mime_from_ext(&target))?;
+            .or_else(|| mime_from_ext(target))?;
         // A directly-content-typed SVG passes through untouched (compact,
         // resolution-independent) after the same safety check.
         if ct == "image/svg+xml" {
@@ -125,11 +135,65 @@ impl Ctx<'_> {
         Some(format!("data:{};base64,{}", ct, B64.encode(bytes)))
     }
 
-    /// Resolve a (non-external) relationship id on the slide to the referenced
-    /// part's `(target, bytes)`.
+    /// Paint a shape's `blipFill` as a clipped image filling `rect` (PowerPoint
+    /// stretches/crops a picture fill to the shape bounds — approximated here as
+    /// a rect-clipped `slice` image). Falls back to the gray photo placeholder
+    /// when not embedding or when the image can't be resolved.
+    pub(crate) fn emit_blip_fill(&mut self, blip_fill: Node, rect: &Rect) {
+        let uri = if self.options.embed_images {
+            ch(blip_fill, "blip").and_then(|b| self.blip_data_uri(b))
+        } else {
+            None
+        };
+        let Some(uri) = uri else {
+            self.draw_image_placeholder(rect);
+            return;
+        };
+        let cid = self.clip_id;
+        self.clip_id += 1;
+        self.defs.push_str(&format!(
+            r#"<clipPath id="blipclip{cid}"><rect x="{x}" y="{y}" width="{w}" height="{h}"/></clipPath>"#,
+            x = fnum(rect.x),
+            y = fnum(rect.y),
+            w = fnum(rect.w),
+            h = fnum(rect.h),
+        ));
+        self.body.push_str(&format!(
+            r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" clip-path="url(#blipclip{cid})" href="{uri}"/>"#,
+            x = fnum(rect.x),
+            y = fnum(rect.y),
+            w = fnum(rect.w),
+            h = fnum(rect.h),
+        ));
+    }
+
+    /// Paint a full-slide picture background: resolve `embed` against the part
+    /// that declared the `<p:bg>` (slide/layout/master) and emit an `<image>`
+    /// covering the whole `w_pt`×`h_pt` slide (`slice` = fill, cropping overflow).
+    pub(crate) fn emit_bg_image(&mut self, embed: &str, part: &str, w_pt: f64, h_pt: f64) {
+        if !self.options.embed_images {
+            return;
+        }
+        let rels = self.pf.package.rels_for(part).unwrap_or_default();
+        let Some(rel) = rels.iter().find(|r| r.id == embed && !r.external) else {
+            return;
+        };
+        let target = resolve_target(part, &rel.target);
+        let Some(uri) = self.data_uri_for_target(&target) else {
+            return;
+        };
+        self.body.push_str(&format!(
+            r#"<image x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" href="{uri}"/>"#,
+            w = fnum(w_pt),
+            h = fnum(h_pt),
+        ));
+    }
+
+    /// Resolve a (non-external) relationship id against the current part to the
+    /// referenced part's `(target, bytes)`.
     fn embed_target(&self, embed_id: &str) -> Option<(String, &[u8])> {
-        let rel = self.slide_rels.iter().find(|r| r.id == embed_id && !r.external)?;
-        let target = resolve_target(&self.slide_part, &rel.target);
+        let rel = self.cur_rels.iter().find(|r| r.id == embed_id && !r.external)?;
+        let target = resolve_target(&self.cur_part, &rel.target);
         let bytes = self.pf.package.part(&target)?;
         Some((target, bytes))
     }

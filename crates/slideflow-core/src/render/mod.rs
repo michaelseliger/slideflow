@@ -53,7 +53,7 @@ mod placeholder;
 mod text;
 
 use color::Theme;
-use fill::{collect_background, Fill};
+use fill::{bg_blip_embed, collect_background, Fill};
 use geometry::{parse_xfrm, Transform, Xfrm};
 use placeholder::{collect_placeholders, match_placeholder, shape_placeholder, Placeholder};
 
@@ -132,35 +132,33 @@ pub fn render_slide_svg(
     let layout_xml = owned_part(pf, layout_part.as_deref());
     let theme_xml = owned_part(pf, theme_part.as_deref());
 
-    let mut theme = Theme::default();
-    if let Some(x) = &theme_xml {
-        if let Ok(doc) = Document::parse(x) {
-            theme.load_theme(&doc);
-        }
-    }
-    if let Some(x) = &master_xml {
-        if let Ok(doc) = Document::parse(x) {
-            theme.load_clr_map(&doc);
-        }
-    }
+    // Parse the layout/master/theme parts once; every downstream step (theme,
+    // placeholder inheritance, background, and the static-shape passes) reuses
+    // these documents.
+    let theme_doc = theme_xml.as_deref().and_then(|x| Document::parse(x).ok());
+    let master_doc = master_xml.as_deref().and_then(|x| Document::parse(x).ok());
+    let layout_doc = layout_xml.as_deref().and_then(|x| Document::parse(x).ok());
 
-    // Placeholder geometry inheritance sources.
-    let mut layout_phs = Vec::new();
-    let mut layout_bg: Option<Fill> = None;
-    if let Some(x) = &layout_xml {
-        if let Ok(doc) = Document::parse(x) {
-            layout_phs = collect_placeholders(&doc, &theme);
-            layout_bg = collect_background(&doc, &theme);
-        }
+    let mut theme = Theme::default();
+    if let Some(doc) = &theme_doc {
+        theme.load_theme(doc);
     }
-    let mut master_phs = Vec::new();
-    let mut master_bg: Option<Fill> = None;
-    if let Some(x) = &master_xml {
-        if let Ok(doc) = Document::parse(x) {
-            master_phs = collect_placeholders(&doc, &theme);
-            master_bg = collect_background(&doc, &theme);
-        }
+    if let Some(doc) = &master_doc {
+        theme.load_clr_map(doc);
     }
+    // A slide-level color-map override recolors inherited decoration too, so
+    // apply it before any background/placeholder colors are resolved.
+    theme.apply_clr_map_override(&slide_doc);
+
+    // Placeholder geometry inheritance sources (layout first, then master).
+    let layout_phs = layout_doc
+        .as_ref()
+        .map(|d| collect_placeholders(d, &theme))
+        .unwrap_or_default();
+    let master_phs = master_doc
+        .as_ref()
+        .map(|d| collect_placeholders(d, &theme))
+        .unwrap_or_default();
 
     let w_pt = pf.slide_width_emu as f64 / EMU_PER_PT;
     let h_pt = pf.slide_height_emu as f64 / EMU_PER_PT;
@@ -172,8 +170,8 @@ pub fn render_slide_svg(
         pf,
         options,
         theme,
-        slide_part: slide_part.clone(),
-        slide_rels,
+        cur_part: slide_part.clone(),
+        cur_rels: slide_rels,
         content_types,
         layout_phs,
         master_phs,
@@ -184,10 +182,29 @@ pub fn render_slide_svg(
         grad_cache: HashMap::new(),
     };
 
-    // Background: slide's own, else layout, else master, else white.
-    let slide_bg = collect_background(&slide_doc, &ctx.theme);
-    let bg = slide_bg.or(layout_bg).or(master_bg);
-    let bg_fill = match &bg {
+    // Background: the first of slide → layout → master that declares a `<p:bg>`
+    // wins outright. A `bgPr/blipFill` picture background paints a full-slide
+    // `<image>` over the base rect (resolved against the part that defined it);
+    // any other background resolves to a solid/gradient/bgRef fill, else white.
+    let bg_chain: [(Option<&Document>, Option<&str>); 3] = [
+        (Some(&slide_doc), Some(slide_part.as_str())),
+        (layout_doc.as_ref(), layout_part.as_deref()),
+        (master_doc.as_ref(), master_part.as_deref()),
+    ];
+    let mut bg_fill: Option<Fill> = None;
+    let mut bg_blip: Option<(String, String)> = None;
+    for (doc, part) in bg_chain {
+        let (Some(doc), Some(part)) = (doc, part) else { continue };
+        let Some(bg_el) = ch(doc.root_element(), "cSld").and_then(|c| ch(c, "bg")) else {
+            continue;
+        };
+        match bg_blip_embed(bg_el) {
+            Some(embed) => bg_blip = Some((embed, part.to_string())),
+            None => bg_fill = collect_background(doc, &ctx.theme),
+        }
+        break;
+    }
+    let bg_attr = match &bg_fill {
         Some(f @ Fill::Gradient { .. }) => ctx.fill_attrs(f),
         Some(Fill::Solid(c)) => format!(r#" fill="{}""#, c.hex()),
         _ => r##" fill="#FFFFFF""##.to_string(),
@@ -196,11 +213,35 @@ pub fn render_slide_svg(
         r#"<rect x="0" y="0" width="{w}" height="{h}"{bg}/>"#,
         w = fnum(w_pt),
         h = fnum(h_pt),
-        bg = bg_fill
+        bg = bg_attr
     ));
+    if let Some((embed, part)) = &bg_blip {
+        ctx.emit_bg_image(embed, part, w_pt, h_pt);
+    }
 
-    // Slide shapes, in document order.
+    // Static decoration from the master and layout, painted *under* the slide's
+    // own shapes (z-order: master → layout → slide).
+    // showMasterSp: the master pass runs only when neither the layout nor the
+    // slide suppresses it (`showMasterSp="0"`). Absent attribute = shown.
     let root = slide_doc.root_element();
+    let slide_shows_master = a(root, "showMasterSp") != Some("0");
+    let layout_shows_master = layout_doc
+        .as_ref()
+        .map(|d| a(d.root_element(), "showMasterSp") != Some("0"))
+        .unwrap_or(true);
+    if slide_shows_master && layout_shows_master {
+        if let (Some(doc), Some(part)) = (&master_doc, master_part.as_deref()) {
+            let rels = pf.package.rels_for(part).unwrap_or_default();
+            ctx.render_static_pass(doc, part, rels);
+        }
+    }
+    // The layout pass always runs.
+    if let (Some(doc), Some(part)) = (&layout_doc, layout_part.as_deref()) {
+        let rels = pf.package.rels_for(part).unwrap_or_default();
+        ctx.render_static_pass(doc, part, rels);
+    }
+
+    // Slide shapes, in document order (on top of master/layout decoration).
     let sp_tree = ch(root, "cSld").and_then(|c| ch(c, "spTree"));
     if let Some(tree) = sp_tree {
         let base = Transform::identity();
@@ -248,8 +289,12 @@ struct Ctx<'a> {
     pf: &'a PresentationFile,
     options: &'a RenderOptions,
     theme: Theme,
-    slide_part: String,
-    slide_rels: Vec<crate::opc::Relationship>,
+    /// The part currently being walked (slide, layout, or master) and its
+    /// relationships. Blip/image rels resolve against THIS part, so the
+    /// master/layout passes point these at their own part for the pass's
+    /// duration and restore them to the slide afterward.
+    cur_part: String,
+    cur_rels: Vec<crate::opc::Relationship>,
     content_types: Option<crate::opc::ContentTypes>,
     layout_phs: Vec<Placeholder>,
     master_phs: Vec<Placeholder>,
@@ -378,7 +423,10 @@ impl Ctx<'_> {
         if stroke.is_none() {
             stroke = self.resolve_style_stroke(node);
         }
-        let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom"));
+        let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom").or_else(|| ch(s, "custGeom")));
+        // A picture fill (`a:blipFill`) is painted after the geometry, clipped
+        // to the shape rect.
+        let blip_fill = sp_pr.and_then(|s| ch(s, "blipFill"));
 
         let transform = rect.svg_transform(&x);
         let open_g = !transform.is_empty();
@@ -389,8 +437,11 @@ impl Ctx<'_> {
         // Draw geometry only when there's something visible to draw.
         let has_fill = matches!(fill, Fill::Solid(_) | Fill::Gradient { .. });
         let has_stroke = stroke.is_some();
-        if geom_node.is_some() || has_fill || has_stroke {
+        if geom_node.is_some() || has_fill || has_stroke || blip_fill.is_some() {
             self.draw_geometry(geom_node, &rect, &fill, stroke.as_ref());
+        }
+        if let Some(bf) = blip_fill {
+            self.emit_blip_fill(bf, &rect);
         }
 
         // Text body.
@@ -401,6 +452,32 @@ impl Ctx<'_> {
         if open_g {
             self.body.push_str("</g>");
         }
+    }
+
+    /// Render the *static* (non-placeholder) shapes of a layout or master
+    /// `spTree` — logos, sidebars, decorative rectangles/lines that give the
+    /// deck its visual identity. Placeholder shapes (`p:ph`) are prototypes
+    /// PowerPoint never paints directly, so they are skipped: the slide's own
+    /// placeholders render in the slide pass with inherited geometry.
+    ///
+    /// Blip/image rels in these shapes must resolve against the layout/master
+    /// part, so `cur_part`/`cur_rels` are swapped to `part`/`rels` for the pass
+    /// and restored afterward.
+    fn render_static_pass(&mut self, doc: &Document, part: &str, rels: Vec<crate::opc::Relationship>) {
+        let prev_part = std::mem::replace(&mut self.cur_part, part.to_string());
+        let prev_rels = std::mem::replace(&mut self.cur_rels, rels);
+        if let Some(tree) = ch(doc.root_element(), "cSld").and_then(|c| ch(c, "spTree")) {
+            let base = Transform::identity();
+            for child in tree.children().filter(|n| n.is_element()) {
+                // Skip placeholder prototypes; only static decoration is painted.
+                if shape_placeholder(child).is_some() {
+                    continue;
+                }
+                self.render_shape(child, base);
+            }
+        }
+        self.cur_part = prev_part;
+        self.cur_rels = prev_rels;
     }
 
     fn inherited_xfrm(&self, ph: &Placeholder) -> Option<Xfrm> {
@@ -865,5 +942,321 @@ mod tests {
         assert!(svg.contains("<linearGradient"), "bgRef gradient template emitted: {svg}");
         assert!(svg.contains(r##"stop-color="#123456""##), "phClr substituted into stops: {svg}");
         assert!(svg.contains(r#"fill="url(#grad0)""#), "bg rect uses the gradient: {svg}");
+    }
+
+    // --- Feature R2: layout/master static shapes ---------------------------
+
+    /// Build a deck, optionally overriding the (single) layout and master parts.
+    fn pf_custom(deck: DeckSpec, layout: Option<&str>, master: Option<&str>) -> PresentationFile {
+        let bytes = deck.build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        if let Some(l) = layout {
+            pkg.insert_part("ppt/slideLayouts/slideLayout1.xml", l.to_string().into_bytes());
+        }
+        if let Some(m) = master {
+            pkg.insert_part("ppt/slideMasters/slideMaster1.xml", m.to_string().into_bytes());
+        }
+        PresentationFile::from_package(pkg).unwrap()
+    }
+
+    /// A layout carrying one static decoration rect (`#AB12CD`, no `p:ph`) and a
+    /// title placeholder prototype whose fill is `#EE99FF`.
+    fn layout_with_deco() -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody"><p:cSld name="Custom"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Deco"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="2000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="AB12CD"/></a:solidFill></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Title 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="838200" y="365125"/><a:ext cx="10515600" cy="1325563"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EE99FF"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        )
+    }
+
+    /// A master carrying one static decoration rect (`#123ABC`, no `p:ph`).
+    fn master_with_deco() -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {NS}><p:cSld><p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Logo"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="123ABC"/></a:solidFill></p:spPr></p:sp></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:sldMaster>"#
+        )
+    }
+
+    #[test]
+    fn layout_static_shape_renders_once_placeholder_skipped() {
+        let pf = pf_custom(
+            DeckSpec::new("Deck").slide(SlideSpec::new("Hello")),
+            Some(&layout_with_deco()),
+            None,
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        // Static decoration rect painted exactly once.
+        assert_eq!(
+            svg.matches(r##"fill="#AB12CD""##).count(),
+            1,
+            "static layout rect drawn exactly once: {svg}"
+        );
+        // The layout's placeholder prototype (its fill) must NOT leak into output.
+        assert!(
+            !svg.contains(r##"fill="#EE99FF""##),
+            "layout placeholder prototype must be skipped: {svg}"
+        );
+        // The slide's own title still renders.
+        assert!(svg.contains("Hello"), "slide title still rendered: {svg}");
+    }
+
+    #[test]
+    fn master_static_shape_renders() {
+        let pf = pf_custom(
+            DeckSpec::new("Deck").slide(SlideSpec::new("Hi")),
+            None,
+            Some(&master_with_deco()),
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(
+            svg.matches(r##"fill="#123ABC""##).count(),
+            1,
+            "static master rect drawn exactly once: {svg}"
+        );
+    }
+
+    #[test]
+    fn show_master_sp_zero_suppresses_master_pass() {
+        // Layout with showMasterSp="0" hides the master's static decoration.
+        let layout = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody" showMasterSp="0"><p:cSld name="NoMaster"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        );
+        let pf = pf_custom(
+            DeckSpec::new("Deck").slide(SlideSpec::new("Hi")),
+            Some(&layout),
+            Some(&master_with_deco()),
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            !svg.contains(r##"fill="#123ABC""##),
+            "showMasterSp=0 must suppress master static shapes: {svg}"
+        );
+    }
+
+    // --- Feature R2: clrMapOvr override -------------------------------------
+
+    #[test]
+    fn clr_map_override_recolors_scheme() {
+        // A rect filled with schemeClr bg1. Under the master map bg1→lt1 (white);
+        // an overrideClrMapping remaps bg1→dk1 (black). The master background
+        // (also schemeClr bg1) recolors along with it — which is the point.
+        let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="B"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></p:spPr></p:sp>"#;
+        let render = |ovr: &str| {
+            let slide = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shape}</p:spTree></p:cSld><p:clrMapOvr>{ovr}</p:clrMapOvr></p:sld>"#
+            );
+            let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x")).build();
+            let mut pkg = Package::from_bytes(&bytes).unwrap();
+            pkg.insert_part("ppt/slides/slide1.xml", slide.into_bytes());
+            let pf = PresentationFile::from_package(pkg).unwrap();
+            render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap()
+        };
+        let over = render(
+            r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#,
+        );
+        let none = render(r#"<a:masterClrMapping/>"#);
+        assert!(
+            over.contains(r##"fill="#000000""##) && !over.contains(r##"fill="#FFFFFF""##),
+            "override remaps bg1→dk1 (black): {over}"
+        );
+        assert!(
+            none.contains(r##"fill="#FFFFFF""##) && !none.contains(r##"fill="#000000""##),
+            "master map keeps bg1→lt1 (white): {none}"
+        );
+    }
+
+    // --- Feature R2: custom geometry ---------------------------------------
+
+    /// Wrap a custGeom `pathLst` body into a shape whose extents are 100×100pt
+    /// (1270000 EMU) and path space is 100×100 → 1:1 scale for easy assertions.
+    fn custgeom_shape(path_lst: &str, fill: &str) -> String {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="C"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:rect l="0" t="0" r="0" b="0"/><a:pathLst>{path_lst}</a:pathLst></a:custGeom>{fill}</p:spPr></p:sp>"#
+        )
+    }
+
+    #[test]
+    fn custgeom_triangle_emits_scaled_path() {
+        let path = r#"<a:path w="100" h="100"><a:moveTo><a:pt x="0" y="100"/></a:moveTo><a:lnTo><a:pt x="50" y="0"/></a:lnTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path>"#;
+        let shapes = custgeom_shape(path, r#"<a:solidFill><a:srgbClr val="AA00BB"/></a:solidFill>"#);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(r#"<path d="M0 100L50 0L100 100Z""#),
+            "triangle path scaled into rect: {svg}"
+        );
+        assert!(svg.contains(r##"fill="#AA00BB""##), "path carries the shape fill: {svg}");
+    }
+
+    #[test]
+    fn custgeom_cubic_bezier_emits_c_command() {
+        let path = r#"<a:path w="100" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:cubicBezTo><a:pt x="0" y="50"/><a:pt x="50" y="100"/><a:pt x="100" y="100"/></a:cubicBezTo></a:path>"#;
+        let shapes = custgeom_shape(path, r#"<a:solidFill><a:srgbClr val="112233"/></a:solidFill>"#);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"<path d="M0 0C0 50 50 100 100 100""#), "cubic bezier path: {svg}");
+    }
+
+    #[test]
+    fn custgeom_formula_guide_falls_back_to_rect() {
+        // A guide-name coordinate (`x="wd2"`) is not a literal number → Tier 1
+        // aborts the path conversion and the shape draws as a plain rectangle.
+        let path = r#"<a:path w="100" h="100"><a:moveTo><a:pt x="wd2" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path>"#;
+        let shapes = custgeom_shape(path, r#"<a:solidFill><a:srgbClr val="0055AA"/></a:solidFill>"#);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(!svg.contains("<path d="), "non-literal coord must not emit a path: {svg}");
+        assert!(
+            svg.contains(r##"<rect x="0" y="0" width="100" height="100" fill="#0055AA"/>"##),
+            "shape falls back to a plain rect: {svg}"
+        );
+    }
+
+    // --- Feature R2: extra preset geometries -------------------------------
+
+    #[test]
+    fn extra_presets_emit_polygons_with_expected_vertex_counts() {
+        let cases = [
+            ("triangle", 3),
+            ("rtTriangle", 3),
+            ("diamond", 4),
+            ("parallelogram", 4),
+            ("trapezoid", 4),
+            ("pentagon", 5),
+            ("hexagon", 6),
+            ("chevron", 6),
+            ("rightArrow", 7),
+            ("leftArrow", 7),
+            ("plus", 12),
+        ];
+        for (prst, n) in cases {
+            let shapes = format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="2000000"/></a:xfrm><a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="123456"/></a:solidFill></p:spPr></p:sp>"#
+            );
+            let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+            let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+            let marker = r#"<polygon points=""#;
+            let start = svg.find(marker).unwrap_or_else(|| panic!("{prst}: no polygon: {svg}"));
+            let rest = &svg[start + marker.len()..];
+            let pts = &rest[..rest.find('"').unwrap()];
+            assert_eq!(
+                pts.split(' ').filter(|s| s.contains(',')).count(),
+                n,
+                "{prst}: expected {n} vertices, got points={pts:?}"
+            );
+            assert!(svg.contains(r##"fill="#123456""##), "{prst}: carries fill: {svg}");
+        }
+    }
+
+    #[test]
+    fn unknown_preset_still_falls_back_to_rect() {
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="cloud"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="654321"/></a:solidFill></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(!svg.contains("<polygon"), "unknown preset must not emit polygon: {svg}");
+        // Falls back to a plain <rect> carrying the shape fill (not a <path>).
+        assert!(!svg.contains("<path"), "unknown preset must not emit a path: {svg}");
+        assert!(
+            svg.contains(r##"fill="#654321""##),
+            "unknown preset still fills as a rect: {svg}"
+        );
+    }
+
+    // --- Feature R2: blipFill shape fills & picture backgrounds -------------
+
+    /// A rect shape whose fill is the slide image `rId2` (present when the deck
+    /// slide is built with `.image()`).
+    const BLIP_FILL_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Filled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="2000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:spPr></p:sp>"#;
+
+    fn pf_with_image_slide(shapes: &str) -> PresentationFile {
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x").image()).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", wrap_slide(shapes).into_bytes());
+        PresentationFile::from_package(pkg).unwrap()
+    }
+
+    #[test]
+    fn shape_blip_fill_emits_clipped_image() {
+        let pf = pf_with_image_slide(BLIP_FILL_SHAPE);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("data:image/png;base64,"), "blip fill embedded: {svg}");
+        assert!(
+            svg.contains(r#"preserveAspectRatio="xMidYMid slice""#),
+            "picture fill uses slice: {svg}"
+        );
+        assert!(svg.contains(r##"clip-path="url(#blipclip0)""##), "clipped to shape: {svg}");
+        assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn shape_blip_fill_falls_back_to_placeholder_without_embedding() {
+        let pf = pf_with_image_slide(BLIP_FILL_SHAPE);
+        let svg =
+            render_slide_svg(&pf, 1, &RenderOptions { embed_images: false, ..Default::default() })
+                .unwrap();
+        assert!(!svg.contains("data:"), "no data URI when not embedding: {svg}");
+        assert!(svg.contains(r##"fill="#D1D5DB""##), "gray placeholder box drawn: {svg}");
+    }
+
+    #[test]
+    fn slide_picture_background_emits_full_slide_image() {
+        let slide = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {NS}><p:cSld><p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#
+        );
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x").image()).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", slide.into_bytes());
+        let pf = PresentationFile::from_package(pkg).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(
+                r#"<image x="0" y="0" width="960" height="540" preserveAspectRatio="xMidYMid slice""#
+            ),
+            "full-slide bg image: {svg}"
+        );
+        assert!(svg.contains("data:image/png;base64,"), "bg image embedded: {svg}");
+    }
+
+    #[test]
+    fn layout_picture_background_resolves_against_layout_part() {
+        use crate::fixtures::TINY_PNG;
+        use crate::opc::{rel_type, Relationship};
+        // A layout that declares a full-bleed picture background via its own rel.
+        let layout = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody"><p:cSld name="Bg"><p:bg><p:bgPr><a:blipFill><a:blip r:embed="rIdBg"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        );
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x")).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slideLayouts/slideLayout1.xml", layout.into_bytes());
+        pkg.insert_part("ppt/media/imageL.png", TINY_PNG.to_vec());
+        pkg.set_rels(
+            "ppt/slideLayouts/slideLayout1.xml",
+            &[
+                Relationship {
+                    id: "rId1".into(),
+                    rel_type: rel_type::SLIDE_MASTER.into(),
+                    target: "../slideMasters/slideMaster1.xml".into(),
+                    external: false,
+                },
+                Relationship {
+                    id: "rIdBg".into(),
+                    rel_type: rel_type::IMAGE.into(),
+                    target: "../media/imageL.png".into(),
+                    external: false,
+                },
+            ],
+        );
+        let pf = PresentationFile::from_package(pkg).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(
+                r#"<image x="0" y="0" width="960" height="540" preserveAspectRatio="xMidYMid slice""#
+            ),
+            "layout picture background painted full-slide: {svg}"
+        );
+        assert!(svg.contains("data:image/png;base64,"), "resolved against layout rels: {svg}");
     }
 }

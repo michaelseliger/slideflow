@@ -139,6 +139,14 @@ fn resolve_template_stroke(
     Some(Stroke { color, width_pt })
 }
 
+/// The `r:embed` of a `<p:bg>`'s `bgPr/blipFill/blip` picture background, if any.
+/// A blip background is painted as a full-slide `<image>`, not a `Fill`, so the
+/// caller detects it before falling back to [`collect_background`].
+pub(crate) fn bg_blip_embed(bg: Node) -> Option<String> {
+    let blip = ch(bg, "bgPr").and_then(|p| ch(p, "blipFill")).and_then(|b| ch(b, "blip"))?;
+    blip.attributes().find(|at| at.name() == "embed").map(|at| at.value().to_string())
+}
+
 pub(crate) fn collect_background(doc: &Document, theme: &Theme) -> Option<Fill> {
     let bg = ch(doc.root_element(), "cSld").and_then(|c| ch(c, "bg"))?;
     // p:bgPr (explicit fill) or p:bgRef (style index + color).
