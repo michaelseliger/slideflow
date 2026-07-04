@@ -51,28 +51,33 @@ impl Ctx<'_> {
 
     fn pic_data_uri(&self, node: Node) -> Option<String> {
         let blip = ch(node, "blipFill").and_then(|b| ch(b, "blip"))?;
-        // r:embed attribute (namespaced) — match by local name.
-        let embed = blip
-            .attributes()
-            .find(|at| at.name() == "embed")
-            .map(|at| at.value())?;
-        let rel = self
-            .slide_rels
-            .iter()
-            .find(|r| r.id == embed && !r.external)?;
-        let target = resolve_target(&self.slide_part, &rel.target);
-        let bytes = self.pf.package.part(&target)?;
+
+        // Prefer a vector (SVG) source when present. PowerPoint stores it in an
+        // a:extLst extension (<asvg:svgBlip r:embed>) and keeps the raster
+        // r:embed only as a fallback — so try the SVG first, and fall through to
+        // the raster if it's missing or looks unsafe.
+        if let Some(svg_embed) = svg_blip_embed(blip) {
+            if let Some((_, bytes)) = self.embed_target(&svg_embed) {
+                if svg_is_safe(bytes) {
+                    return Some(format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
+                }
+            }
+        }
+
+        // Raster (or content-typed SVG) via the blip's own r:embed.
+        let embed = blip.attributes().find(|at| at.name() == "embed").map(|at| at.value())?;
+        let (target, bytes) = self.embed_target(embed)?;
         let ct = self
             .content_types
             .as_ref()
             .and_then(|c| c.content_type_of(&target))
             .map(|s| s.to_string())
-            .or_else(|| mime_from_ext(&target));
-        let ct = ct?;
-        // Vector images pass through untouched — compact, resolution-independent,
-        // and must never enter the raster downscaler.
+            .or_else(|| mime_from_ext(&target))?;
+        // A directly-content-typed SVG passes through untouched (compact,
+        // resolution-independent) after the same safety check.
         if ct == "image/svg+xml" {
-            return Some(format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
+            return svg_is_safe(bytes)
+                .then(|| format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
         }
         if !(ct == "image/png" || ct == "image/jpeg" || ct == "image/gif") {
             return None; // unsupported raster (EMF/WMF/…): skip gracefully.
@@ -85,6 +90,15 @@ impl Ctx<'_> {
             }
         }
         Some(format!("data:{};base64,{}", ct, B64.encode(bytes)))
+    }
+
+    /// Resolve a (non-external) relationship id on the slide to the referenced
+    /// part's `(target, bytes)`.
+    fn embed_target(&self, embed_id: &str) -> Option<(String, &[u8])> {
+        let rel = self.slide_rels.iter().find(|r| r.id == embed_id && !r.external)?;
+        let target = resolve_target(&self.slide_part, &rel.target);
+        let bytes = self.pf.package.part(&target)?;
+        Some((target, bytes))
     }
 
     fn draw_image_placeholder(&mut self, rect: &Rect) {
@@ -119,6 +133,43 @@ impl Ctx<'_> {
             ex = fnum(ex)
         ));
     }
+}
+
+/// The `r:embed` of an `<asvg:svgBlip>` inside a blip's `a:extLst`, if present.
+/// Matched by local name so it's namespace-prefix agnostic.
+fn svg_blip_embed(blip: Node) -> Option<String> {
+    blip.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "svgBlip")?
+        .attributes()
+        .find(|a| a.name() == "embed")
+        .map(|a| a.value().to_string())
+}
+
+/// Whether an embedded SVG is safe to inline as an `<image>` data URI: it must
+/// look like SVG and must not run scripts or fetch external resources. Note the
+/// SVG namespace declaration (`xmlns="http://www.w3.org/2000/svg"`) legitimately
+/// contains an http URL, so we flag concrete external *references* — `href`/
+/// `src`/`url(...)` pointing at http(s) — and `<script>`/`<foreignObject>`,
+/// rather than any occurrence of "http". Our output is itself loaded as a
+/// sandboxed image, but keep the embed honest anyway.
+fn svg_is_safe(bytes: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let lower = s.to_ascii_lowercase();
+    if !lower.contains("<svg") {
+        return false;
+    }
+    const BAD: [&str; 7] = [
+        "<script",
+        "<foreignobject",
+        "href=\"http",
+        "href='http",
+        "src=\"http",
+        "src='http",
+        "url(http",
+    ];
+    !BAD.iter().any(|p| lower.contains(p))
 }
 
 fn mime_from_ext(part: &str) -> Option<String> {
@@ -161,5 +212,41 @@ pub(crate) fn downscale_raster(bytes: &[u8], cap: u32) -> Option<(String, Vec<u8
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
         enc.encode_image(&rgb).ok()?;
         Some(("image/jpeg".to_string(), out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{svg_blip_embed, svg_is_safe};
+    use roxmltree::Document;
+
+    #[test]
+    fn svg_blip_embed_prefers_the_vector_source() {
+        let xml = r#"<a:blip xmlns:a="urn:a" xmlns:r="urn:r" xmlns:asvg="urn:s" r:embed="rIdRaster">
+            <a:extLst><a:ext uri="{28A0092B}"><asvg:svgBlip r:embed="rIdVector"/></a:ext></a:extLst>
+        </a:blip>"#;
+        let doc = Document::parse(xml).unwrap();
+        assert_eq!(svg_blip_embed(doc.root_element()).as_deref(), Some("rIdVector"));
+    }
+
+    #[test]
+    fn svg_blip_embed_absent_without_extension() {
+        let xml = r#"<a:blip xmlns:a="urn:a" xmlns:r="urn:r" r:embed="rIdRaster"/>"#;
+        let doc = Document::parse(xml).unwrap();
+        assert!(svg_blip_embed(doc.root_element()).is_none());
+    }
+
+    #[test]
+    fn svg_safety_gate() {
+        // The SVG namespace URL alone must NOT trip the gate.
+        assert!(svg_is_safe(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>"#
+        ));
+        assert!(!svg_is_safe(br#"<svg><script>alert(1)</script></svg>"#));
+        assert!(!svg_is_safe(
+            br#"<svg><image href="http://evil/x.png"/></svg>"#
+        ));
+        assert!(!svg_is_safe(br#"<svg><foreignObject/></svg>"#));
+        assert!(!svg_is_safe(b"not svg at all"));
     }
 }
