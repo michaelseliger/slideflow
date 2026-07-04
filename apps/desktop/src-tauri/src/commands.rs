@@ -22,6 +22,7 @@ use slideflow_core::model::{
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
 use slideflow_core::render::{render_slide_svg, RenderOptions};
+use slideflow_core::thumbs::{sweep_thumbs, thumb_file_name, ThumbTier};
 
 /// Shared, Tauri-managed application state.
 ///
@@ -103,7 +104,7 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
     let app_for_thread = app.clone();
     std::thread::spawn(move || {
         let state = app_for_thread.state::<AppState>();
-        let result = {
+        let (result, valid) = {
             let mut lib = match state.scan_library.lock() {
                 Ok(lib) => lib,
                 Err(_) => {
@@ -113,11 +114,20 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
                 }
             };
             let app_emit = app_for_thread.clone();
-            lib.scan(&mut |event| {
+            let result = lib.scan(&mut |event| {
                 let _ = app_emit.emit("scan:event", &event);
-            })
+            });
+            // Snapshot the valid-set for the thumb sweep while we still hold the
+            // lock; skip it if the scan itself failed (the set would be partial).
+            let valid = result.as_ref().ok().and_then(|_| lib.all_deck_hashes().ok());
+            (result, valid)
         };
         state.scanning.store(false, Ordering::SeqCst);
+        // Reclaim orphaned cache files: decks that vanished or changed hash this
+        // scan, plus any legacy `<id>.svg` files from before content-addressing.
+        if let Some(valid) = valid {
+            sweep_thumbs(&state.thumbs_dir, &valid);
+        }
         if let Err(err) = result {
             let _ = app_for_thread.emit("scan:error", err.to_string());
         }
@@ -166,41 +176,52 @@ pub async fn get_deck_slides(
 
 /// Render (or serve from cache) the SVG preview for a slide.
 ///
-/// The SVG is cached at `thumbs_dir/<slide_id>.svg` and the path persisted onto
-/// the slide row via `set_thumb_path`, so repeat views are a plain file read.
+/// The cache filename is *content-addressed* (see [`thumb_file_name`]): it's
+/// derived from the deck's path + content hash + slide index, never the slide
+/// rowid. This is deliberate — rowids are recycled after `DELETE`, so a filename
+/// keyed on the id would serve a removed slide's SVG to whatever new slide
+/// inherited its id. The DB lookup runs *before* the cache check so an unknown
+/// (deleted) id errors instead of matching a stale file.
 #[tauri::command]
 pub async fn get_slide_svg(state: State<'_, AppState>, slide_id: i64) -> Result<String, String> {
-    let cache_path = state.thumbs_dir.join(format!("{slide_id}.svg"));
+    let (deck_path, content_hash, slide_index) = {
+        let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+        lib.slide_render_info(slide_id).map_err(e)?
+    };
 
-    // Fast path: serve the cached file if present and non-empty.
+    let file_name =
+        thumb_file_name(&deck_path, &content_hash, slide_index as usize, ThumbTier::Thumb);
+    let cache_path = state.thumbs_dir.join(&file_name);
+
+    // Fast path: serve the content-addressed cache file if present and non-empty.
     if let Ok(bytes) = fs::read(&cache_path) {
         if !bytes.is_empty() {
             return String::from_utf8(bytes).map_err(e);
         }
     }
 
-    // Slow path: look up the slide + owning deck, open the deck, render.
-    let (deck_path, slide_index) = {
-        let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
-        let slide = lib.slide(slide_id).map_err(e)?;
-        let deck = lib.deck(slide.deck_id).map_err(e)?;
-        (deck.path, slide.slide_index as usize)
-    };
-
     let pf = PresentationFile::open(Path::new(&deck_path)).map_err(e)?;
-    let svg = render_slide_svg(&pf, slide_index, &RenderOptions::default()).map_err(e)?;
+    let svg = render_slide_svg(&pf, slide_index as usize, &RenderOptions::default()).map_err(e)?;
 
-    // Cache to disk (best-effort) and persist the path.
-    if let Some(parent) = cache_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::write(&cache_path, svg.as_bytes()).is_ok() {
-        if let Ok(mut lib) = state.library.lock() {
-            let _ = lib.set_thumb_path(slide_id, &cache_path.to_string_lossy());
-        }
-    }
+    write_cache_atomic(&state.thumbs_dir, &cache_path, svg.as_bytes());
 
     Ok(svg)
+}
+
+/// Write `bytes` to `final_path` atomically: a uniquely named temp file in the
+/// same directory, then `rename` over the target (atomic on one filesystem). A
+/// crash mid-write can therefore never leave a partial file that the fast path
+/// would later serve as a valid cache hit. Best-effort — the cache is only an
+/// optimization, so I/O errors are swallowed.
+fn write_cache_atomic(dir: &Path, final_path: &Path, bytes: &[u8]) {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let _ = fs::create_dir_all(dir);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), seq));
+    if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, final_path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -561,6 +561,30 @@ impl Library {
         )?)
     }
 
+    /// The minimum a slide needs to render + cache-key its preview:
+    /// `(deck_path, content_hash, slide_index)`. One indexed join; keeps
+    /// `content_hash` out of the IPC models. Errors if the slide id is unknown
+    /// (e.g. it was deleted) — callers must treat that as "no preview" rather
+    /// than serving a possibly-stale cached file keyed on a reused id.
+    pub fn slide_render_info(&self, slide_id: i64) -> Result<(String, String, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT d.path, d.content_hash, s.slide_index \
+             FROM slides s JOIN decks d ON d.id = s.deck_id WHERE s.id=?1",
+            params![slide_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
+    /// `(deck_path, content_hash)` for every indexed deck — the valid-set for
+    /// [`crate::thumbs::sweep_thumbs`].
+    pub fn all_deck_hashes(&self) -> Result<HashSet<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT path, content_hash FROM decks")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        Ok(rows)
+    }
+
     /// Persist the cached thumbnail path for a slide.
     pub fn set_thumb_path(&mut self, slide_id: i64, thumb_path: &str) -> Result<()> {
         self.conn.execute(
@@ -1069,6 +1093,7 @@ fn watch_relevant(p: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::fixtures::{DeckSpec, SlideSpec};
+    use std::collections::HashSet;
     use std::fs::OpenOptions;
 
     fn scan_silent(lib: &mut Library) -> ScanEvent {
@@ -1313,6 +1338,65 @@ mod tests {
         ] {
             // Must not error, regardless of FTS operators in the input.
             let _ = lib.search(q, &SearchFilters::default()).unwrap();
+        }
+    }
+
+    #[test]
+    fn thumb_keys_survive_rowid_reuse() {
+        use crate::thumbs::{thumb_file_name, ThumbTier};
+
+        fn capture(lib: &Library) -> Vec<(i64, String)> {
+            let mut out = Vec::new();
+            for deck in lib.decks().unwrap() {
+                for slide in lib.slides_for_deck(deck.id).unwrap() {
+                    let (path, chash, idx) = lib.slide_render_info(slide.id).unwrap();
+                    let key = thumb_file_name(&path, &chash, idx as usize, ThumbTier::Thumb);
+                    out.push((slide.id, key));
+                }
+            }
+            out
+        }
+
+        let dir_a = tempfile::tempdir().unwrap();
+        DeckSpec::new("Alpha")
+            .slide(SlideSpec::new("A1").bullets(&["one"]))
+            .slide(SlideSpec::new("A2").bullets(&["two"]))
+            .write_to(&dir_a.path().join("alpha.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir_a.path()).unwrap();
+        scan_silent(&mut lib);
+        let a = capture(&lib);
+        assert!(!a.is_empty());
+
+        // Remove folder A: its slide rowids are now free for reuse.
+        let root_a = lib.roots().unwrap()[0].id;
+        lib.remove_root(root_a).unwrap();
+
+        // Add a *different* folder B; its slides reclaim the freed rowids.
+        let dir_b = tempfile::tempdir().unwrap();
+        DeckSpec::new("Beta")
+            .slide(SlideSpec::new("B1").bullets(&["three"]))
+            .slide(SlideSpec::new("B2").bullets(&["four"]))
+            .write_to(&dir_b.path().join("beta.pptx"))
+            .unwrap();
+        lib.add_root(dir_b.path()).unwrap();
+        scan_silent(&mut lib);
+        let b = capture(&lib);
+
+        // Precondition of the original bug: a rowid really is reused here.
+        let a_ids: HashSet<i64> = a.iter().map(|(id, _)| *id).collect();
+        assert!(
+            b.iter().any(|(id, _)| a_ids.contains(id)),
+            "expected rowid reuse across remove+add"
+        );
+
+        // The fix: content-addressed keys never collide across decks, so folder
+        // B's slides can't be served folder A's cached SVGs.
+        let a_keys: HashSet<&str> = a.iter().map(|(_, k)| k.as_str()).collect();
+        for (_, key) in &b {
+            assert!(!a_keys.contains(key.as_str()), "thumb key {key} collides across decks");
         }
     }
 

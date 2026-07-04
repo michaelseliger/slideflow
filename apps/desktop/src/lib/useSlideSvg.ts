@@ -7,23 +7,38 @@ import { useEffect, useState } from "react";
 import { getSlideSvg } from "./api";
 import { svgToDataUri } from "./utils";
 
+let generation = 0;
 const cache = new Map<number, string>();
 const inflight = new Map<number, Promise<string>>();
+
+/** Drop every memoized preview. Call whenever the library changes (a folder is
+ *  removed, a rescan finishes) — slide ids are recycled after deletes, so a
+ *  cache keyed by id would otherwise hand a new slide the previous slide's
+ *  preview. Bumping the generation makes in-flight loads that settle *after* the
+ *  clear discard their result instead of repopulating the cleared cache. */
+export function clearSlideSvgCache() {
+  generation += 1;
+  cache.clear();
+  inflight.clear();
+}
 
 async function load(slideId: number): Promise<string> {
   const hit = cache.get(slideId);
   if (hit) return hit;
   let p = inflight.get(slideId);
   if (!p) {
+    const gen = generation;
     p = getSlideSvg(slideId)
       .then((svg) => {
         const uri = svgToDataUri(svg);
-        cache.set(slideId, uri);
-        inflight.delete(slideId);
+        if (gen === generation) {
+          cache.set(slideId, uri);
+          inflight.delete(slideId);
+        }
         return uri;
       })
       .catch((err) => {
-        inflight.delete(slideId);
+        if (gen === generation) inflight.delete(slideId);
         throw err;
       });
     inflight.set(slideId, p);

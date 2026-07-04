@@ -14,6 +14,7 @@ import type {
 } from "../lib/types";
 import { useTray } from "./useTray";
 import { toast } from "./useToast";
+import { clearSlideSvgCache } from "../lib/useSlideSvg";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type Grouping = "flat" | "deck";
@@ -484,6 +485,10 @@ export const useApp = create<AppState>((set, get) => ({
         scan.running = false;
         scan.indexed = ev.indexed;
         scan.lastPath = null;
+        // Slide ids get recycled across reindexes; drop the session preview
+        // cache if anything actually changed so no slide shows a stale preview.
+        // Skip on no-op rescans so scrollback stays warm.
+        if (ev.indexed > 0 || ev.removed > 0) clearSlideSvgCache();
         // Refresh library + current view now that the index changed.
         void get().reloadLibrary().then(() => get().refresh());
         break;
@@ -509,6 +514,9 @@ export const useApp = create<AppState>((set, get) => ({
   removeRoot: async (rootId) => {
     try {
       await api.removeRoot(rootId);
+      // Removing decks frees their slide ids for reuse by later scans; clear
+      // the session preview cache so a reused id can't serve a stale preview.
+      clearSlideSvgCache();
       if (get().nav.type === "root" && get().nav.id === rootId) {
         set({ nav: { type: "all" } });
       }

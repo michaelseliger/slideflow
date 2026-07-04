@@ -48,6 +48,17 @@ pub fn run() {
             // responsive while a scan holds the other one (see AppState docs).
             let scan_library = Library::open(&db_path).expect("open scan connection");
 
+            // Reclaim stale/orphaned preview-cache files on startup — decks no
+            // longer indexed, stale render versions, and (on first upgrade) the
+            // legacy `<id>.svg` files from before content-addressing. Off the
+            // main thread so launch isn't blocked by cache I/O.
+            if let Ok(valid) = library.all_deck_hashes() {
+                let sweep_dir = thumbs_dir.clone();
+                std::thread::spawn(move || {
+                    slideflow_core::thumbs::sweep_thumbs(&sweep_dir, &valid);
+                });
+            }
+
             app.manage(AppState::new(library, scan_library, thumbs_dir));
             Ok(())
         })

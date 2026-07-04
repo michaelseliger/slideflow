@@ -48,6 +48,13 @@ use crate::error::{Error, Result};
 use crate::opc::resolve_target;
 use crate::pptx::PresentationFile;
 
+/// Version of the SVG output format. Any change that alters the bytes produced
+/// for a given slide (renderer fidelity, image encoding, …) between *released*
+/// builds should bump this: it is baked into the thumbnail cache key
+/// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
+/// on upgrade, with no eviction bookkeeping.
+pub const RENDER_VERSION: u32 = 1;
+
 const EMU_PER_PT: f64 = 12700.0;
 // Default text insets (bodyPr lIns/tIns/rIns/bIns) in points.
 const L_INS: f64 = 7.2;
