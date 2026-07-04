@@ -71,7 +71,7 @@ pub fn run() {
             commands::search,
             commands::get_decks,
             commands::get_deck_slides,
-            commands::get_slide_svg,
+            commands::get_slide_preview,
             commands::compose_deck,
             commands::get_stats,
             commands::get_stats_overview,

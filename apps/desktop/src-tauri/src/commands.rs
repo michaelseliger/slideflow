@@ -174,38 +174,52 @@ pub async fn get_deck_slides(
 // Rendering (SVG thumbnails, cached on disk)
 // ---------------------------------------------------------------------------
 
-/// Render (or serve from cache) the SVG preview for a slide.
+/// Render (or serve from cache) a slide preview and return the absolute path of
+/// the cached SVG file. The frontend turns that into an `asset:` URL via
+/// `convertFileSrc` and loads it in a plain `<img>` — so the multi-MB SVG never
+/// crosses the IPC boundary and the webview gets HTTP-style caching for free.
 ///
-/// The cache filename is *content-addressed* (see [`thumb_file_name`]): it's
-/// derived from the deck's path + content hash + slide index, never the slide
-/// rowid. This is deliberate — rowids are recycled after `DELETE`, so a filename
-/// keyed on the id would serve a removed slide's SVG to whatever new slide
-/// inherited its id. The DB lookup runs *before* the cache check so an unknown
-/// (deleted) id errors instead of matching a stale file.
+/// `tier` picks the quality: `"thumb"` (small grid tile, images downscaled hard)
+/// or `"full"` (crisper preview for the peek modal / inspector). Each tier is a
+/// distinct cache file.
+///
+/// The cache filename is *content-addressed* (see [`thumb_file_name`]): derived
+/// from the deck's path + content hash + slide index + tier, never the slide
+/// rowid. Rowids are recycled after `DELETE`, so a filename keyed on the id would
+/// serve a removed slide's SVG to whatever new slide inherited its id. The DB
+/// lookup runs *before* the cache check so an unknown (deleted) id errors instead
+/// of matching a stale file.
 #[tauri::command]
-pub async fn get_slide_svg(state: State<'_, AppState>, slide_id: i64) -> Result<String, String> {
+pub async fn get_slide_preview(
+    state: State<'_, AppState>,
+    slide_id: i64,
+    tier: String,
+) -> Result<String, String> {
+    let tier = ThumbTier::parse(&tier);
     let (deck_path, content_hash, slide_index) = {
         let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
         lib.slide_render_info(slide_id).map_err(e)?
     };
 
-    let file_name =
-        thumb_file_name(&deck_path, &content_hash, slide_index as usize, ThumbTier::Thumb);
+    let file_name = thumb_file_name(&deck_path, &content_hash, slide_index as usize, tier);
     let cache_path = state.thumbs_dir.join(&file_name);
 
-    // Fast path: serve the content-addressed cache file if present and non-empty.
-    if let Ok(bytes) = fs::read(&cache_path) {
-        if !bytes.is_empty() {
-            return String::from_utf8(bytes).map_err(e);
-        }
+    // Fast path: a present, non-empty cache file is served straight from disk —
+    // no read, no render.
+    if cache_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(cache_path.to_string_lossy().into_owned());
     }
 
+    let options = match tier {
+        ThumbTier::Thumb => RenderOptions::thumb(),
+        ThumbTier::Full => RenderOptions::preview(),
+    };
     let pf = PresentationFile::open(Path::new(&deck_path)).map_err(e)?;
-    let svg = render_slide_svg(&pf, slide_index as usize, &RenderOptions::default()).map_err(e)?;
+    let svg = render_slide_svg(&pf, slide_index as usize, &options).map_err(e)?;
 
     write_cache_atomic(&state.thumbs_dir, &cache_path, svg.as_bytes());
 
-    Ok(svg)
+    Ok(cache_path.to_string_lossy().into_owned())
 }
 
 /// Write `bytes` to `final_path` atomically: a uniquely named temp file in the

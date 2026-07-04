@@ -3,7 +3,7 @@ import { X, ChevronLeft, ChevronRight, Plus, FolderOpen, Check } from "lucide-re
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
-import { useRawSlideSvg } from "../lib/useSlideSvg";
+import { useSlidePreview } from "../lib/useSlideSvg";
 import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import * as api from "../lib/api";
 
@@ -14,7 +14,7 @@ export default function PeekModal() {
   const results = useApp((s) => s.results);
   const reduce = prefersReducedMotion();
   const hit = peekIndex != null ? results[peekIndex] : null;
-  const svg = useRawSlideSvg(hit?.slide.id ?? null);
+  const previewSrc = useSlidePreview(hit?.slide.id ?? null, "full");
   const inTray = useTray((s) =>
     hit ? s.items.some((i) => i.uid === `${hit.slide.deck_id}:${hit.slide.slide_index}`) : false,
   );
@@ -87,12 +87,14 @@ export default function PeekModal() {
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto bg-canvas p-5">
-              {svg ? (
-                <div
-                  className="mx-auto w-full max-w-4xl overflow-hidden rounded-[8px] bg-white shadow-tile [&>svg]:h-auto [&>svg]:w-full"
+              {previewSrc ? (
+                <img
+                  src={previewSrc}
+                  alt={hit.slide.title || "Slide preview"}
+                  draggable={false}
+                  decoding="async"
+                  className="mx-auto block w-full max-w-4xl overflow-hidden rounded-[8px] bg-white object-contain shadow-tile"
                   style={{ aspectRatio: "16 / 9" }}
-                  // Inline SVG for crisp scaling at large sizes.
-                  dangerouslySetInnerHTML={{ __html: svg }}
                 />
               ) : (
                 <div

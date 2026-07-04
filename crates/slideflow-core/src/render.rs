@@ -68,11 +68,31 @@ pub struct RenderOptions {
     /// Embed raster images as data URIs (true) or draw gray placeholders
     /// with a photo glyph (false — faster, for tiny grid thumbnails).
     pub embed_images: bool,
+    /// Cap the longer edge of embedded raster images to this many pixels,
+    /// downscaling anything larger before base64-encoding it. `None` embeds
+    /// images at full resolution. Vector (SVG) images are never affected.
+    /// This is the main lever keeping grid-thumbnail SVGs small — a full-res
+    /// photo embedded at ~200px display size is otherwise multiple MB.
+    pub max_image_px: Option<u32>,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { embed_images: true }
+        RenderOptions { embed_images: true, max_image_px: None }
+    }
+}
+
+impl RenderOptions {
+    /// Small grid thumbnail: images downscaled hard.
+    pub fn thumb() -> Self {
+        RenderOptions { embed_images: true, max_image_px: Some(512) }
+    }
+
+    /// Larger preview for the peek modal / inspector: crisp but still bounded
+    /// (export fidelity is unaffected — the composer copies original parts,
+    /// never these renders).
+    pub fn preview() -> Self {
+        RenderOptions { embed_images: true, max_image_px: Some(1600) }
     }
 }
 
@@ -424,8 +444,20 @@ impl Ctx<'_> {
             .map(|s| s.to_string())
             .or_else(|| mime_from_ext(&target));
         let ct = ct?;
+        // Vector images pass through untouched — compact, resolution-independent,
+        // and must never enter the raster downscaler.
+        if ct == "image/svg+xml" {
+            return Some(format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
+        }
         if !(ct == "image/png" || ct == "image/jpeg" || ct == "image/gif") {
-            return None; // unsupported raster: skip gracefully.
+            return None; // unsupported raster (EMF/WMF/…): skip gracefully.
+        }
+        // Downscale oversized rasters for lightweight thumbnails; on any decode
+        // failure fall through and embed the original bytes (never drop the image).
+        if let Some(cap) = self.options.max_image_px {
+            if let Some((new_ct, new_bytes)) = downscale_raster(bytes, cap) {
+                return Some(format!("data:{};base64,{}", new_ct, B64.encode(&new_bytes)));
+            }
         }
         Some(format!("data:{};base64,{}", ct, B64.encode(bytes)))
     }
@@ -1276,6 +1308,39 @@ fn mime_from_ext(part: &str) -> Option<String> {
     }
 }
 
+/// Downscale a raster whose longer edge exceeds `cap` pixels, returning the
+/// re-encoded `(content_type, bytes)`. Images with an alpha channel re-encode as
+/// PNG (to keep transparency); opaque images as JPEG q80 — JPEG-ing opaque
+/// photos is where most of the size reduction comes from. Returns `None` when
+/// the image is already within `cap` or can't be decoded; the caller then embeds
+/// the original bytes rather than dropping the image entirely.
+fn downscale_raster(bytes: &[u8], cap: u32) -> Option<(String, Vec<u8>)> {
+    // Cheap header sniff to skip decoding images already under the cap.
+    if let Ok(dim) = imagesize::blob_size(bytes) {
+        if dim.width as u32 <= cap && dim.height as u32 <= cap {
+            return None;
+        }
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    if img.width() <= cap && img.height() <= cap {
+        return None;
+    }
+    // Fits the image within cap×cap, preserving aspect ratio.
+    let resized = img.resize(cap, cap, image::imageops::FilterType::Triangle);
+    let mut out = Vec::new();
+    if resized.color().has_alpha() {
+        resized
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .ok()?;
+        Some(("image/png".to_string(), out))
+    } else {
+        let rgb = image::DynamicImage::ImageRgb8(resized.to_rgb8());
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+        enc.encode_image(&rgb).ok()?;
+        Some(("image/jpeg".to_string(), out))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Small XML/number utilities
 // ---------------------------------------------------------------------------
@@ -1337,6 +1402,54 @@ mod tests {
     use crate::fixtures::{DeckSpec, SlideSpec};
     use crate::opc::Package;
 
+    fn png_bytes(w: u32, h: u32, alpha: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let img = if alpha {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                w,
+                h,
+                image::Rgba([10, 120, 220, 128]),
+            ))
+        } else {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                w,
+                h,
+                image::Rgb([10, 120, 220]),
+            ))
+        };
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn downscale_shrinks_oversized_opaque_to_jpeg() {
+        let big = png_bytes(1000, 600, false);
+        let (ct, bytes) = downscale_raster(&big, 512).expect("should downscale");
+        assert_eq!(ct, "image/jpeg");
+        let dim = imagesize::blob_size(&bytes).unwrap();
+        assert!(dim.width as u32 <= 512 && dim.height as u32 <= 512);
+        // Aspect ratio preserved: longer edge (width) hits the cap.
+        assert_eq!(dim.width, 512);
+        assert!(bytes.len() < big.len());
+    }
+
+    #[test]
+    fn downscale_keeps_alpha_as_png() {
+        let big = png_bytes(1000, 600, true);
+        let (ct, bytes) = downscale_raster(&big, 512).expect("should downscale");
+        assert_eq!(ct, "image/png");
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert!(decoded.color().has_alpha());
+        assert!(decoded.width() <= 512 && decoded.height() <= 512);
+    }
+
+    #[test]
+    fn downscale_leaves_small_images_alone() {
+        let small = png_bytes(200, 150, false);
+        assert!(downscale_raster(&small, 512).is_none());
+    }
+
     const NS: &str = concat!(
         r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
         r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#,
@@ -1385,7 +1498,7 @@ mod tests {
     fn image_embedded_as_data_uri() {
         let deck = DeckSpec::new("Deck").slide(SlideSpec::new("Pic").image());
         let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
-        let svg = render_slide_svg(&pf, 1, &RenderOptions { embed_images: true }).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions { embed_images: true, ..Default::default() }).unwrap();
         assert!(svg.contains("data:image/png;base64,"), "expected data URI");
         assert_no_external_refs(&svg);
     }
@@ -1394,7 +1507,7 @@ mod tests {
     fn image_placeholder_when_not_embedding() {
         let deck = DeckSpec::new("Deck").slide(SlideSpec::new("Pic").image());
         let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
-        let svg = render_slide_svg(&pf, 1, &RenderOptions { embed_images: false }).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions { embed_images: false, ..Default::default() }).unwrap();
         assert!(!svg.contains("data:"), "should not embed data URIs");
         assert!(svg.contains("<rect"));
     }

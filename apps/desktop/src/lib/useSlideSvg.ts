@@ -1,15 +1,20 @@
-// Lazy, cached slide-SVG loader. Thumbnails are fetched once per slide id and
-// memoized in a module-level cache so scrolling back never re-renders on the
-// Rust side. Concurrent decodes are naturally capped by React only mounting
-// the visible (virtualized) tiles.
+// Lazy, cached slide-preview loader. Each (slide, tier) pair is resolved once
+// to a ready-to-use `<img src>` string — an `asset:` URL in the native app, a
+// data URI in browser-mock mode — and memoized so scrolling back never re-hits
+// the backend. The cached values are short URL strings (not multi-MB SVG data),
+// so the map stays tiny even for a large library. Concurrent loads are capped
+// naturally by React only mounting the visible (virtualized) tiles.
 
 import { useEffect, useState } from "react";
-import { getSlideSvg } from "./api";
-import { svgToDataUri } from "./utils";
+import { getSlidePreviewSrc, type PreviewTier } from "./api";
 
 let generation = 0;
-const cache = new Map<number, string>();
-const inflight = new Map<number, Promise<string>>();
+const cache = new Map<string, string>();
+const inflight = new Map<string, Promise<string>>();
+
+function keyOf(slideId: number, tier: PreviewTier): string {
+  return `${slideId}:${tier}`;
+}
 
 /** Drop every memoized preview. Call whenever the library changes (a folder is
  *  removed, a rescan finishes) — slide ids are recycled after deletes, so a
@@ -22,77 +27,61 @@ export function clearSlideSvgCache() {
   inflight.clear();
 }
 
-async function load(slideId: number): Promise<string> {
-  const hit = cache.get(slideId);
+async function load(slideId: number, tier: PreviewTier): Promise<string> {
+  const key = keyOf(slideId, tier);
+  const hit = cache.get(key);
   if (hit) return hit;
-  let p = inflight.get(slideId);
+  let p = inflight.get(key);
   if (!p) {
     const gen = generation;
-    p = getSlideSvg(slideId)
-      .then((svg) => {
-        const uri = svgToDataUri(svg);
+    p = getSlidePreviewSrc(slideId, tier)
+      .then((src) => {
         if (gen === generation) {
-          cache.set(slideId, uri);
-          inflight.delete(slideId);
+          cache.set(key, src);
+          inflight.delete(key);
         }
-        return uri;
+        return src;
       })
       .catch((err) => {
-        if (gen === generation) inflight.delete(slideId);
+        if (gen === generation) inflight.delete(key);
         throw err;
       });
-    inflight.set(slideId, p);
+    inflight.set(key, p);
   }
   return p;
 }
 
-/** Returns a data-URI for the slide's SVG, or null while loading. */
-export function useSlideSvg(slideId: number | null | undefined, enabled = true) {
-  const [uri, setUri] = useState<string | null>(
-    slideId != null ? cache.get(slideId) ?? null : null,
+/** Returns an `<img src>` for the slide's preview at the given tier, or null
+ *  while it loads. `enabled=false` defers the load (off-viewport tiles). */
+export function useSlidePreview(
+  slideId: number | null | undefined,
+  tier: PreviewTier = "thumb",
+  enabled = true,
+): string | null {
+  const [src, setSrc] = useState<string | null>(
+    slideId != null ? cache.get(keyOf(slideId, tier)) ?? null : null,
   );
 
   useEffect(() => {
     if (!enabled || slideId == null) return;
-    const cached = cache.get(slideId);
+    const cached = cache.get(keyOf(slideId, tier));
     if (cached) {
-      setUri(cached);
+      setSrc(cached);
       return;
     }
     let alive = true;
-    setUri(null);
-    load(slideId)
-      .then((u) => {
-        if (alive) setUri(u);
+    setSrc(null);
+    load(slideId, tier)
+      .then((s) => {
+        if (alive) setSrc(s);
       })
       .catch(() => {
-        if (alive) setUri(null);
+        if (alive) setSrc(null);
       });
     return () => {
       alive = false;
     };
-  }, [slideId, enabled]);
+  }, [slideId, tier, enabled]);
 
-  return uri;
-}
-
-/** The raw SVG string (not a data URI) — used by the peek modal / inspector for
- *  crisp inline rendering. */
-export function useRawSlideSvg(slideId: number | null | undefined) {
-  const [svg, setSvg] = useState<string | null>(null);
-  useEffect(() => {
-    if (slideId == null) {
-      setSvg(null);
-      return;
-    }
-    let alive = true;
-    setSvg(null);
-    getSlideSvg(slideId)
-      .then((s) => alive && setSvg(s))
-      .catch(() => alive && setSvg(null));
-    return () => {
-      alive = false;
-    };
-  }, [slideId]);
-  return svg;
+  return src;
 }

@@ -1,4 +1,4 @@
-import { useSlideSvg } from "../lib/useSlideSvg";
+import { useSlidePreview } from "../lib/useSlideSvg";
 import { cx } from "../lib/utils";
 
 interface ThumbnailProps {
@@ -22,7 +22,7 @@ export default function Thumbnail({
   enabled = true,
   rounded = true,
 }: ThumbnailProps) {
-  const uri = useSlideSvg(slideId, enabled);
+  const uri = useSlidePreview(slideId, "thumb", enabled);
   return (
     <div
       className={cx(
