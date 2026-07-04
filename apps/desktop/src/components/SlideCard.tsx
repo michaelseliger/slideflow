@@ -1,5 +1,4 @@
 import { memo, useState } from "react";
-import { motion } from "framer-motion";
 import { Eye, Plus, FolderOpen, Check, Star } from "lucide-react";
 import type { SearchHit } from "../lib/types";
 import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
@@ -93,12 +92,14 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
           setMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        <motion.div
-          layout={!reduce}
-          whileHover={reduce ? undefined : { y: -2 }}
-          transition={{ type: "spring", stiffness: 400, damping: 28 }}
+        <div
           className={cx(
-            "rounded-[8px] bg-surface p-1.5 shadow-tile transition-shadow duration-150 group-hover:shadow-tile-hover",
+            // Hover lift is a composited transform (cheap on WebView2); the
+            // shadow swaps without animating (shadow transitions repaint). The
+            // framer-motion `layout` prop was dropped — it forced a reflow on
+            // every virtualized mount, which is constant during scroll.
+            "rounded-[8px] bg-surface p-1.5 shadow-tile transition-transform duration-150 will-change-transform group-hover:shadow-tile-hover",
+            !reduce && "group-hover:-translate-y-0.5",
             selected && "ring-accent",
           )}
         >
@@ -188,7 +189,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
               </span>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
 
       {menu && (
@@ -219,10 +220,12 @@ function QuickBtn({
       title={title}
       onClick={onClick}
       className={cx(
-        "no-drag flex h-6 w-6 items-center justify-center rounded-[5px] backdrop-blur-md transition-colors",
+        // Solid translucent bg instead of backdrop-blur — backdrop-filter forces
+        // an expensive compositing layer, notably weaker on WebView2.
+        "no-drag flex h-6 w-6 items-center justify-center rounded-[5px] transition-colors",
         active
           ? "bg-accent text-white"
-          : "bg-black/45 text-white hover:bg-black/65",
+          : "bg-black/60 text-white hover:bg-black/75",
       )}
     >
       {children}

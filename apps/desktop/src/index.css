@@ -142,24 +142,21 @@ mark {
   background: transparent;
 }
 
-/* Skeleton shimmer for hydrating thumbnails. */
-@keyframes shimmer {
-  0% {
-    background-position: -200% 0;
-  }
+/* Skeleton pulse for hydrating thumbnails. Animates opacity only (composited,
+ * no per-frame repaint) instead of a moving background-position gradient —
+ * many skeletons are visible at once during a fast scroll. */
+@keyframes shimmer-pulse {
+  0%,
   100% {
-    background-position: 200% 0;
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
   }
 }
 .shimmer {
-  background: linear-gradient(
-    100deg,
-    rgb(var(--ink-rgb) / 0.05) 30%,
-    rgb(var(--ink-rgb) / 0.1) 50%,
-    rgb(var(--ink-rgb) / 0.05) 70%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.4s ease-in-out infinite;
+  background: rgb(var(--ink-rgb) / 0.06);
+  animation: shimmer-pulse 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
