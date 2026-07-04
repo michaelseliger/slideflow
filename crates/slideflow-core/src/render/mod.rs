@@ -46,11 +46,13 @@ use crate::error::{Error, Result};
 use crate::pptx::PresentationFile;
 
 mod color;
+mod effects;
 mod fill;
 mod geometry;
 mod image;
 mod placeholder;
 mod style;
+mod table;
 mod text;
 
 use color::Theme;
@@ -64,7 +66,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 1;
+pub const RENDER_VERSION: u32 = 2;
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
@@ -210,6 +212,7 @@ pub fn render_slide_svg(
         clip_id: 0,
         grad_id: 0,
         grad_cache: HashMap::new(),
+        shadow_cache: HashMap::new(),
     };
 
     // Background: the first of slide → layout → master that declares a `<p:bg>`
@@ -341,6 +344,9 @@ struct Ctx<'a> {
     grad_id: usize,
     /// Serialized-gradient → def-id, so repeated gradients emit one `<defs>`.
     grad_cache: HashMap<String, String>,
+    /// Serialized-shadow → filter-id (`sh0`, `sh1`, …), so identical outer
+    /// shadows emit one `<filter>` def.
+    shadow_cache: HashMap<String, String>,
 }
 
 impl Ctx<'_> {
@@ -351,7 +357,9 @@ impl Ctx<'_> {
             "grpSp" => self.render_group(node, tf),
             // cxnSp (connectors) etc. — draw as plain shapes if they carry geom.
             "cxnSp" => self.render_sp(node, tf),
-            _ => {} // graphicFrame (tables/charts) and unknowns: skip gracefully.
+            // graphicFrame: tables render; charts/SmartArt/OLE skip gracefully.
+            "graphicFrame" => self.render_graphic_frame(node, tf),
+            _ => {} // unknowns: skip gracefully.
         }
     }
 
@@ -470,11 +478,21 @@ impl Ctx<'_> {
             self.body.push_str(&format!(r#"<g transform="{transform}">"#));
         }
 
+        // An outer drop-shadow (spPr/a:effectLst/a:outerShdw) becomes a
+        // deduplicated SVG filter wrapping the shape's geometry.
+        let shadow = sp_pr.and_then(|s| self.resolve_shadow_filter(s));
+
         // Draw geometry only when there's something visible to draw.
         let has_fill = matches!(fill, Fill::Solid(_) | Fill::Gradient { .. });
         let has_stroke = stroke.is_some();
         if geom_node.is_some() || has_fill || has_stroke || blip_fill.is_some() {
+            if let Some(f) = &shadow {
+                self.body.push_str(&format!(r#"<g filter="url(#{f})">"#));
+            }
             self.draw_geometry(geom_node, &rect, &fill, stroke.as_ref());
+            if shadow.is_some() {
+                self.body.push_str("</g>");
+            }
         }
         if let Some(bf) = blip_fill {
             self.emit_blip_fill(bf, &rect);
@@ -482,7 +500,7 @@ impl Ctx<'_> {
 
         // Text body.
         if let Some(tx_body) = ch(node, "txBody") {
-            self.render_text(node, tx_body, &rect, ph.as_ref());
+            self.render_text(Some(node), tx_body, &rect, ph.as_ref());
         }
 
         if open_g {
@@ -1548,5 +1566,111 @@ mod tests {
         let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert_eq!(svg.matches("<text ").count(), 1, "wrap=none → single line: {svg}");
+    }
+
+    // --- R4 Feature 3: pattFill approximation --------------------------------
+
+    #[test]
+    fn pattfill_bgclr_fills_solid() {
+        // A hatch pattern with a red background approximates to a red solid fill.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="P"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:pattFill prst="ltUpDiag"><a:fgClr><a:srgbClr val="FFFFFF"/></a:fgClr><a:bgClr><a:srgbClr val="CC0000"/></a:bgClr></a:pattFill></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#CC0000""##), "pattFill bgClr → solid: {svg}");
+    }
+
+    // --- R4 Feature 2: outer drop shadows ------------------------------------
+
+    #[test]
+    fn outer_shadow_emits_drop_shadow_filter() {
+        // dir=5400000 (90°) pushes the shadow straight down; dist=127000 EMU=10pt.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1000000" y="1000000"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="336699"/></a:solidFill><a:effectLst><a:outerShdw blurRad="50800" dist="127000" dir="5400000"><a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr></a:outerShdw></a:effectLst></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<filter").count(), 1, "one filter def: {svg}");
+        assert!(svg.contains("feDropShadow"), "expected feDropShadow: {svg}");
+        assert!(svg.contains(r#"dx="0""#) && svg.contains(r#"dy="10""#), "dir 90° → down: {svg}");
+        assert!(svg.contains(r#"flood-opacity="0.4""#), "alpha → flood-opacity: {svg}");
+        assert!(svg.contains(r#"filter="url(#sh0)""#), "geometry references filter: {svg}");
+    }
+
+    #[test]
+    fn identical_shadows_are_deduplicated() {
+        let one = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="336699"/></a:solidFill><a:effectLst><a:outerShdw blurRad="50800" dist="127000" dir="2700000"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst></p:spPr></p:sp>"#;
+        let shapes = format!("{one}{one}");
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<filter").count(), 1, "shadow def deduped: {svg}");
+        assert_eq!(svg.matches(r#"filter="url(#sh0)""#).count(), 2, "both shapes reuse it: {svg}");
+    }
+
+    // --- R4 Feature 1: basic tables ------------------------------------------
+
+    fn table_frame(xfrm_ext: &str, tbl: &str) -> String {
+        format!(
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="5" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/>{xfrm_ext}</p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">{tbl}</a:graphicData></a:graphic></p:graphicFrame>"#
+        )
+    }
+
+    #[test]
+    fn table_renders_cells_with_fills_and_text() {
+        // 2×2 grid: frame 200pt×100pt, columns/rows split evenly (100pt / 50pt).
+        let cell = |txt: &str, col: &str| {
+            format!(
+                r#"<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{txt}</a:t></a:r></a:p></a:txBody><a:tcPr><a:solidFill><a:srgbClr val="{col}"/></a:solidFill></a:tcPr></a:tc>"#
+            )
+        };
+        let tbl = format!(
+            r#"<a:tbl><a:tblGrid><a:gridCol w="1270000"/><a:gridCol w="1270000"/></a:tblGrid><a:tr h="635000">{}{}</a:tr><a:tr h="635000">{}{}</a:tr></a:tbl>"#,
+            cell("C11", "AA0001"),
+            cell("C12", "AA0002"),
+            cell("C21", "AA0003"),
+            cell("C22", "AA0004"),
+        );
+        let shapes = table_frame(r#"<a:ext cx="2540000" cy="1270000"/>"#, &tbl);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        for c in ["AA0001", "AA0002", "AA0003", "AA0004"] {
+            assert!(svg.contains(&format!(r##"fill="#{c}""##)), "cell fill {c}: {svg}");
+        }
+        for t in ["C11", "C12", "C21", "C22"] {
+            assert!(svg.contains(t), "cell text {t}: {svg}");
+        }
+        // Cumulative offsets: right column at x=100, bottom row at y=50.
+        assert!(svg.contains(r#"x="100""#), "right column offset: {svg}");
+        assert!(svg.contains(r#"y="50""#), "bottom row offset: {svg}");
+        // No tableStyleId → subtle default gridline drawn.
+        assert!(svg.contains(r##"stroke="#D0D0D0""##), "default gridline: {svg}");
+        assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn table_gridspan_spans_two_columns() {
+        // A gridSpan=2 master cell (followed by its hMerge continuation) fills the
+        // whole 200pt frame width; the continuation cell draws nothing.
+        let tbl = r#"<a:tbl><a:tblGrid><a:gridCol w="1270000"/><a:gridCol w="1270000"/></a:tblGrid><a:tr h="635000"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Wide</a:t></a:r></a:p></a:txBody><a:tcPr><a:solidFill><a:srgbClr val="BB0001"/></a:solidFill></a:tcPr></a:tc><a:tc hMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#;
+        let shapes = table_frame(r#"<a:ext cx="2540000" cy="635000"/>"#, tbl);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches(r##"fill="#BB0001""##).count(), 1, "one spanning fill: {svg}");
+        assert!(svg.contains(r##"<rect x="0" y="0" width="200" height="50" fill="#BB0001""##), "spans both columns: {svg}");
+        assert!(svg.contains("Wide"), "cell text: {svg}");
+    }
+
+    #[test]
+    fn chart_graphic_frame_renders_nothing() {
+        // A graphicFrame carrying a chart (non-table uri) draws no table content;
+        // the only rect is the slide background.
+        let shapes = table_frame(r#"<a:ext cx="2540000" cy="1270000"/>"#, "");
+        // Swap the table uri for a chart uri.
+        let shapes = shapes.replace(
+            "http://schemas.openxmlformats.org/drawingml/2006/table",
+            "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        );
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<rect").count(), 1, "only the background rect: {svg}");
+        assert!(!svg.contains("<line"), "no table gridlines: {svg}");
+        assert!(!svg.contains("<text"), "no cell text: {svg}");
     }
 }

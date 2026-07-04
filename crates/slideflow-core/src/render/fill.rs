@@ -205,7 +205,19 @@ impl Ctx<'_> {
                 }
                 "noFill" => return Fill::None,
                 "gradFill" => return parse_gradient(child, &self.theme, None),
-                "pattFill" | "blipFill" => return Fill::Unspecified,
+                "pattFill" => {
+                    // Approximate a hatch/pattern with its background color — a
+                    // flat fill reads better than an invisible shape. Without a
+                    // usable `bgClr`, leave it to a style reference.
+                    if let Some(c) = ch(child, "bgClr")
+                        .and_then(|bg| bg.children().find(|n| n.is_element()))
+                        .and_then(|cn| self.theme.parse_color(cn))
+                    {
+                        return Fill::Solid(c);
+                    }
+                    return Fill::Unspecified;
+                }
+                "blipFill" => return Fill::Unspecified,
                 _ => {}
             }
         }

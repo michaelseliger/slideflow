@@ -53,7 +53,7 @@ struct Autofit {
 }
 
 impl Ctx<'_> {
-    pub(crate) fn render_text(&mut self, sp: Node, tx_body: Node, rect: &Rect, ph: Option<&Placeholder>) {
+    pub(crate) fn render_text(&mut self, sp: Option<Node>, tx_body: Node, rect: &Rect, ph: Option<&Placeholder>) {
         // A placeholder with no explicit `type` defaults to "body" (OOXML), so it
         // uses the body style bucket and the default bullet; a non-placeholder
         // shape stays `None` (no bucket bullet).
@@ -159,9 +159,10 @@ impl Ctx<'_> {
     }
 
     /// Resolve a shape's `p:style/a:fontRef`: its `idx` selects major/minor font
-    /// and its color child becomes the shape's default text color.
-    fn font_ref(&self, sp: Node) -> (Option<Rgba>, Option<String>) {
-        let Some(fr) = ch(sp, "style").and_then(|s| ch(s, "fontRef")) else {
+    /// and its color child becomes the shape's default text color. Table cells
+    /// pass `None` (no shape node), so the reference is simply absent.
+    fn font_ref(&self, sp: Option<Node>) -> (Option<Rgba>, Option<String>) {
+        let Some(fr) = sp.and_then(|s| ch(s, "style")).and_then(|s| ch(s, "fontRef")) else {
             return (None, None);
         };
         let color = fr
