@@ -294,8 +294,52 @@ impl Ctx<'_> {
             tx: abs_off_x - ch_off_x * nsx,
             ty: abs_off_y - ch_off_y * nsy,
         };
+
+        // A group can carry its own rotation/flip; children are positioned in
+        // absolute root space by `inner`, so wrap them in a transform about the
+        // group's absolute center. (Non-uniform child scale × rotation isn't
+        // exact, but it's a close approximation.)
+        let group_tf = if x.rot != 0 || x.flip_h || x.flip_v {
+            let cx = (abs_off_x + abs_ext_cx / 2.0) / EMU_PER_PT;
+            let cy = (abs_off_y + abs_ext_cy / 2.0) / EMU_PER_PT;
+            let mut t = String::new();
+            if x.rot != 0 {
+                t.push_str(&format!(
+                    "rotate({} {} {})",
+                    fnum(x.rot as f64 / 60000.0),
+                    fnum(cx),
+                    fnum(cy)
+                ));
+            }
+            if x.flip_h || x.flip_v {
+                let sx = if x.flip_h { -1.0 } else { 1.0 };
+                let sy = if x.flip_v { -1.0 } else { 1.0 };
+                if !t.is_empty() {
+                    t.push(' ');
+                }
+                t.push_str(&format!(
+                    "translate({} {}) scale({} {}) translate({} {})",
+                    fnum(cx),
+                    fnum(cy),
+                    fnum(sx),
+                    fnum(sy),
+                    fnum(-cx),
+                    fnum(-cy)
+                ));
+            }
+            Some(t)
+        } else {
+            None
+        };
+
+        if let Some(t) = &group_tf {
+            self.body.push_str(&format!(r#"<g transform="{t}">"#));
+        }
         for child in node.children().filter(|n| n.is_element()) {
             self.render_shape(child, inner);
+        }
+        if group_tf.is_some() {
+            self.body.push_str("</g>");
         }
     }
 
@@ -315,10 +359,7 @@ impl Ctx<'_> {
 
         let fill = sp_pr.map(|s| self.resolve_fill(s)).unwrap_or(Fill::Unspecified);
         let stroke = sp_pr.and_then(|s| self.resolve_stroke(s));
-        let geom = sp_pr
-            .and_then(|s| ch(s, "prstGeom"))
-            .and_then(|g| a(g, "prst"))
-            .map(|p| p.to_string());
+        let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom"));
 
         let transform = rect.svg_transform(&x);
         let open_g = !transform.is_empty();
@@ -329,8 +370,8 @@ impl Ctx<'_> {
         // Draw geometry only when there's something visible to draw.
         let has_fill = matches!(fill, Fill::Solid(_));
         let has_stroke = stroke.is_some();
-        if geom.is_some() || has_fill || has_stroke {
-            self.draw_geometry(geom.as_deref(), &rect, &fill, stroke.as_ref());
+        if geom_node.is_some() || has_fill || has_stroke {
+            self.draw_geometry(geom_node, &rect, &fill, stroke.as_ref());
         }
 
         // Text body.
@@ -628,6 +669,40 @@ mod tests {
         // Inner rect fills the group's right half: x=480, width=480.
         assert!(svg.contains(r##"fill="#00FF00""##), "svg: {svg}");
         assert!(svg.contains(r#"x="480""#), "group-scaled x: {svg}");
+    }
+
+    #[test]
+    fn line_preset_emits_line_element() {
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="L"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></p:spPr></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<line "), "expected a <line> element: {svg}");
+        assert!(svg.contains(r##"stroke="#FF0000""##), "line stroke color: {svg}");
+    }
+
+    #[test]
+    fn roundrect_adj_controls_radius() {
+        let sp = |adj: &str| {
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="R"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="2000000"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val {adj}"/></a:avLst></a:prstGeom><a:solidFill><a:srgbClr val="445566"/></a:solidFill></p:spPr></p:sp>"#
+            )
+        };
+        let render = |adj: &str| {
+            let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &sp(adj));
+            render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap()
+        };
+        // adj=0 → square corners (rx=0); adj=50000 → half the side (rounded).
+        assert!(render("0").contains(r#"rx="0""#), "adj=0 should be square");
+        assert!(!render("50000").contains(r#"rx="0""#), "adj=50000 should round");
+    }
+
+    #[test]
+    fn group_rotation_wraps_children() {
+        let shapes = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm rot="5400000"><a:off x="0" y="0"/><a:ext cx="6096000" cy="6858000"/><a:chOff x="0" y="0"/><a:chExt cx="6096000" cy="6858000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="21" name="Inner"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:spPr></p:sp></p:grpSp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        // 5400000/60000 = 90 degrees, about the group's center.
+        assert!(svg.contains("rotate(90 "), "group rotation transform: {svg}");
     }
 
     #[test]

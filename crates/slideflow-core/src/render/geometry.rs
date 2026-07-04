@@ -99,7 +99,14 @@ impl Rect {
 }
 
 impl Ctx<'_> {
-    pub(crate) fn draw_geometry(&mut self, geom: Option<&str>, rect: &Rect, fill: &Fill, stroke: Option<&Stroke>) {
+    pub(crate) fn draw_geometry(
+        &mut self,
+        geom_node: Option<Node>,
+        rect: &Rect,
+        fill: &Fill,
+        stroke: Option<&Stroke>,
+    ) {
+        let prst = geom_node.and_then(|g| a(g, "prst"));
         let fill_attrs = fill.svg_attrs();
         let mut stroke_attrs = String::new();
         if let Some(s) = stroke {
@@ -109,7 +116,7 @@ impl Ctx<'_> {
                 fnum(s.width_pt.max(0.25))
             );
         }
-        match geom.unwrap_or("rect") {
+        match prst.unwrap_or("rect") {
             "ellipse" => {
                 self.body.push_str(&format!(
                     r#"<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}"{fill}{stroke}/>"#,
@@ -121,8 +128,13 @@ impl Ctx<'_> {
                     stroke = stroke_attrs
                 ));
             }
-            "roundRect" => {
-                let r = (rect.w.min(rect.h) * 0.1).max(0.0);
+            "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect" => {
+                // Corner radius from the `adj` guide (fraction of the shorter
+                // side, in 1/100000), clamped to half the shorter side; default
+                // ≈1/6 as PowerPoint uses.
+                let adj = geom_node.and_then(gd_adj).unwrap_or(16667.0);
+                let short = rect.w.min(rect.h);
+                let r = (short * (adj / 100_000.0)).clamp(0.0, short / 2.0);
                 self.body.push_str(&format!(
                     r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{r}" ry="{r}"{fill}{stroke}/>"#,
                     x = fnum(rect.x),
@@ -134,7 +146,25 @@ impl Ctx<'_> {
                     stroke = stroke_attrs
                 ));
             }
-            // rect and any unknown preset fall back to a plain rectangle.
+            // Straight lines / connectors: the main diagonal of the bounding box.
+            // flipH/flipV (applied by the wrapping <g transform>) mirror it to
+            // the correct diagonal, so we always draw top-left → bottom-right.
+            "line" | "straightConnector1" | "bentConnector2" | "bentConnector3"
+            | "curvedConnector2" | "curvedConnector3" => {
+                let (color, width) = stroke
+                    .map(|s| (s.color.hex(), s.width_pt.max(0.75)))
+                    .unwrap_or_else(|| ("#595959".to_string(), 1.0));
+                self.body.push_str(&format!(
+                    r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{w}"/>"#,
+                    x1 = fnum(rect.x),
+                    y1 = fnum(rect.y),
+                    x2 = fnum(rect.x + rect.w),
+                    y2 = fnum(rect.y + rect.h),
+                    c = color,
+                    w = fnum(width)
+                ));
+            }
+            // rect and any unimplemented preset fall back to a plain rectangle.
             _ => {
                 self.body.push_str(&format!(
                     r#"<rect x="{x}" y="{y}" width="{w}" height="{h}"{fill}{stroke}/>"#,
@@ -148,4 +178,16 @@ impl Ctx<'_> {
             }
         }
     }
+}
+
+/// The `adj` adjust value (1/100000 units) from a preset geometry's `a:avLst`,
+/// if present as a literal `fmla="val N"`.
+fn gd_adj(geom: Node) -> Option<f64> {
+    let av = ch(geom, "avLst")?;
+    av.children()
+        .filter(|c| c.is_element() && c.tag_name().name() == "gd")
+        .find(|g| a(*g, "name") == Some("adj"))
+        .and_then(|g| a(g, "fmla"))
+        .and_then(|f| f.strip_prefix("val "))
+        .and_then(|v| v.trim().parse::<f64>().ok())
 }
