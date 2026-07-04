@@ -4,6 +4,7 @@ use roxmltree::{Document, Node};
 
 use super::color::Theme;
 use super::geometry::{parse_xfrm, Xfrm};
+use super::style::LstStyle;
 use super::{a, ch};
 
 #[derive(Clone)]
@@ -11,6 +12,9 @@ pub(crate) struct Placeholder {
     pub(crate) typ: Option<String>,
     pub(crate) idx: Option<String>,
     pub(crate) xfrm: Option<Xfrm>,
+    /// The placeholder's own `txBody/lstStyle`, parsed for the style chain.
+    /// Empty for slide-shape placeholders (only layout/master ones carry style).
+    pub(crate) text_styles: LstStyle,
 }
 
 /// Read the `p:ph` of an `sp`/`pic`, if it is a placeholder.
@@ -25,28 +29,32 @@ pub(crate) fn shape_placeholder(node: Node) -> Option<Placeholder> {
         typ: a(ph, "type").map(|s| s.to_string()),
         idx: a(ph, "idx").map(|s| s.to_string()),
         xfrm: None,
+        text_styles: LstStyle::default(),
     })
 }
 
-pub(crate) fn collect_placeholders(doc: &Document, _theme: &Theme) -> Vec<Placeholder> {
+pub(crate) fn collect_placeholders(doc: &Document, theme: &Theme) -> Vec<Placeholder> {
     let mut out = Vec::new();
     let Some(tree) = ch(doc.root_element(), "cSld").and_then(|c| ch(c, "spTree")) else {
         return out;
     };
-    collect_placeholders_in(tree, &mut out);
+    collect_placeholders_in(tree, theme, &mut out);
     out
 }
 
-fn collect_placeholders_in(tree: Node, out: &mut Vec<Placeholder>) {
+fn collect_placeholders_in(tree: Node, theme: &Theme, out: &mut Vec<Placeholder>) {
     for shape in tree.children().filter(|n| n.is_element()) {
         match shape.tag_name().name() {
             "sp" | "pic" => {
                 if let Some(mut ph) = shape_placeholder(shape) {
                     ph.xfrm = ch(shape, "spPr").and_then(|s| ch(s, "xfrm")).map(parse_xfrm);
+                    if let Some(lst) = ch(shape, "txBody").and_then(|t| ch(t, "lstStyle")) {
+                        ph.text_styles = LstStyle::parse(lst, theme);
+                    }
                     out.push(ph);
                 }
             }
-            "grpSp" => collect_placeholders_in(shape, out),
+            "grpSp" => collect_placeholders_in(shape, theme, out),
             _ => {}
         }
     }

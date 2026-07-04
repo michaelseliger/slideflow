@@ -50,12 +50,14 @@ mod fill;
 mod geometry;
 mod image;
 mod placeholder;
+mod style;
 mod text;
 
 use color::Theme;
 use fill::{bg_blip_embed, collect_background, Fill};
 use geometry::{parse_xfrm, Transform, Xfrm};
 use placeholder::{collect_placeholders, match_placeholder, shape_placeholder, Placeholder};
+use style::LstStyle;
 
 /// Version of the SVG output format. Any change that alters the bytes produced
 /// for a given slide (renderer fidelity, image encoding, …) between *released*
@@ -65,11 +67,8 @@ use placeholder::{collect_placeholders, match_placeholder, shape_placeholder, Pl
 pub const RENDER_VERSION: u32 = 1;
 
 const EMU_PER_PT: f64 = 12700.0;
-// Default text insets (bodyPr lIns/tIns/rIns/bIns) in points.
-const L_INS: f64 = 7.2;
-const R_INS: f64 = 7.2;
-const T_INS: f64 = 3.6;
-// Per indent-level extra left padding, in points.
+// Per indent-level extra left padding, in points (fallback when a paragraph's
+// style chain provides no explicit `marL`).
 const LVL_INDENT: f64 = 24.0;
 
 #[derive(Debug, Clone)]
@@ -160,6 +159,33 @@ pub fn render_slide_svg(
         .map(|d| collect_placeholders(d, &theme))
         .unwrap_or_default();
 
+    // Master `p:txStyles` (title/body/other buckets) and the presentation-wide
+    // `p:defaultTextStyle` — the weakest layers of the run-style chain. Parsed
+    // once here into owned structures the text pass merges per paragraph.
+    let (title_style, body_style, other_style) = master_doc
+        .as_ref()
+        .and_then(|d| {
+            d.root_element()
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "txStyles")
+        })
+        .map(|tx| {
+            let bucket = |name: &str| {
+                ch(tx, name).map(|n| LstStyle::parse(n, &theme)).unwrap_or_default()
+            };
+            (bucket("titleStyle"), bucket("bodyStyle"), bucket("otherStyle"))
+        })
+        .unwrap_or_default();
+    let pres_style = pf
+        .package
+        .part("ppt/presentation.xml")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .and_then(|x| Document::parse(x).ok())
+        .and_then(|doc| {
+            ch(doc.root_element(), "defaultTextStyle").map(|n| LstStyle::parse(n, &theme))
+        })
+        .unwrap_or_default();
+
     let w_pt = pf.slide_width_emu as f64 / EMU_PER_PT;
     let h_pt = pf.slide_height_emu as f64 / EMU_PER_PT;
 
@@ -175,6 +201,10 @@ pub fn render_slide_svg(
         content_types,
         layout_phs,
         master_phs,
+        title_style,
+        body_style,
+        other_style,
+        pres_style,
         defs: String::new(),
         body: String::new(),
         clip_id: 0,
@@ -298,6 +328,12 @@ struct Ctx<'a> {
     content_types: Option<crate::opc::ContentTypes>,
     layout_phs: Vec<Placeholder>,
     master_phs: Vec<Placeholder>,
+    /// Master `p:txStyles` buckets and presentation `p:defaultTextStyle`: the
+    /// weakest layers of the per-run style-inheritance chain (see `style.rs`).
+    title_style: LstStyle,
+    body_style: LstStyle,
+    other_style: LstStyle,
+    pres_style: LstStyle,
     defs: String,
     body: String,
     clip_id: usize,
@@ -1258,5 +1294,259 @@ mod tests {
             "layout picture background painted full-slide: {svg}"
         );
         assert!(svg.contains("data:image/png;base64,"), "resolved against layout rels: {svg}");
+    }
+
+    // --- Feature R3: text rendering overhaul --------------------------------
+
+    /// A plain (non-placeholder) text box shape with the given `a:xfrm` inner
+    /// XML, full `a:bodyPr` element, and paragraph XML.
+    fn textbox(xfrm: &str, body_pr: &str, paras: &str) -> String {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="TB"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm>{xfrm}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody>{body_pr}<a:lstStyle/>{paras}</p:txBody></p:sp>"#
+        )
+    }
+
+    /// Order-preserving list of every `y="…"` on a `<text>` element.
+    fn text_baselines(svg: &str) -> Vec<f64> {
+        svg.match_indices("<text ")
+            .map(|(i, _)| {
+                let rest = &svg[i..];
+                let y0 = rest.find(r#"y=""#).unwrap() + 3;
+                let y1 = rest[y0..].find('"').unwrap();
+                rest[y0..y0 + y1].parse::<f64>().unwrap()
+            })
+            .collect()
+    }
+
+    fn master_txstyles(txstyles: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {NS}><p:cSld><p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>{txstyles}</p:sldMaster>"#
+        )
+    }
+
+    /// Deck whose slide1 is `shapes` and whose master is overridden.
+    fn pf_slide_master(shapes: &str, master: &str) -> PresentationFile {
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x")).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", wrap_slide(shapes).into_bytes());
+        pkg.insert_part("ppt/slideMasters/slideMaster1.xml", master.to_string().into_bytes());
+        PresentationFile::from_package(pkg).unwrap()
+    }
+
+    /// Deck whose slide1 is `shapes` and whose layout is overridden (accent
+    /// #FF00AA so scheme colors are checkable).
+    fn pf_slide_layout(shapes: &str, layout: &str) -> PresentationFile {
+        let bytes = DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", wrap_slide(shapes).into_bytes());
+        pkg.insert_part("ppt/slideLayouts/slideLayout1.xml", layout.to_string().into_bytes());
+        PresentationFile::from_package(pkg).unwrap()
+    }
+
+    // Step 1 — per-run spans.
+
+    #[test]
+    fn per_run_spans_emit_distinct_tspans() {
+        // plain + bold-teal + plain → three tspans; only the middle is bold and
+        // carries the teal fill.
+        let paras = r#"<a:p><a:r><a:rPr lang="de-DE" sz="2000"/><a:t>Wir sind </a:t></a:r><a:r><a:rPr lang="de-DE" sz="2000" b="1"><a:solidFill><a:srgbClr val="2FA190"/></a:solidFill></a:rPr><a:t>Spezialisten</a:t></a:r><a:r><a:rPr lang="de-DE" sz="2000"/><a:t> hier</a:t></a:r></a:p>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="11000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<tspan").count(), 3, "one tspan per run: {svg}");
+        // The bold run carries the teal fill and font-weight; the plain runs do not.
+        assert!(
+            svg.contains(r##"<tspan fill="#2FA190" font-weight="bold"> Spezialisten</tspan>"##),
+            "middle run bold + teal: {svg}"
+        );
+        assert!(svg.contains("<tspan>Wir sind</tspan>"), "plain run unstyled: {svg}");
+    }
+
+    #[test]
+    fn wrap_respects_larger_span_size() {
+        // Same two words; when the second run is huge it no longer fits beside
+        // the first and wraps onto a second line.
+        let two = |sz2: &str| {
+            let paras = format!(
+                r#"<a:p><a:r><a:rPr sz="1200"/><a:t>one</a:t></a:r><a:r><a:rPr sz="{sz2}"/><a:t> TWO</a:t></a:r></a:p>"#
+            );
+            let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="1300000" cy="2000000"/>"#, "<a:bodyPr/>", &paras);
+            let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+            let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+            svg.matches("<text ").count()
+        };
+        assert_eq!(two("1200"), 1, "small second span fits on one line");
+        assert_eq!(two("6000"), 2, "large second span forces a wrap");
+    }
+
+    // Step 2 — style inheritance chain.
+
+    #[test]
+    fn master_bodystyle_size_applies_without_rpr() {
+        let master = master_txstyles(
+            r#"<p:txStyles><p:titleStyle/><p:bodyStyle><a:lvl1pPr><a:defRPr sz="2000"/></a:lvl1pPr></p:bodyStyle><p:otherStyle/></p:txStyles>"#,
+        );
+        let body = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1000000" y="1000000"/><a:ext cx="8000000" cy="3000000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Body</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = pf_slide_master(body, &master);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"font-size="20""#), "master bodyStyle sz=2000 → 20pt: {svg}");
+    }
+
+    #[test]
+    fn shape_rpr_overrides_layout_lststyle_size() {
+        let layout = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody"><p:cSld name="L"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="838200" y="1825625"/><a:ext cx="10515600" cy="4351338"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:defRPr sz="4000"/></a:lvl1pPr></a:lstStyle><a:p><a:endParaRPr/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        );
+        // buNone so no default bullet (which would size from the 40pt paragraph
+        // default) muddies the check — this isolates the run-vs-layout size.
+        let body = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr lang="en-US" sz="1200"/><a:t>Small</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = pf_slide_layout(body, &layout);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"font-size="12""#), "run sz=1200 wins: {svg}");
+        assert!(!svg.contains(r#"font-size="40""#), "layout lstStyle sz must be overridden: {svg}");
+    }
+
+    #[test]
+    fn layout_lststyle_color_applies_to_unstyled_run() {
+        let layout = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody"><p:cSld name="L"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="838200" y="1825625"/><a:ext cx="10515600" cy="4351338"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:srgbClr val="00AA55"/></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p><a:endParaRPr/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        );
+        let body = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Colored</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = pf_slide_layout(body, &layout);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#00AA55""##), "layout lstStyle color on unstyled run: {svg}");
+    }
+
+    // Step 3 — fonts + fontRef.
+
+    #[test]
+    fn run_typeface_emitted_first_in_font_family() {
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="Custom Font"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(r#"font-family="Custom Font, Helvetica, Arial, sans-serif""#),
+            "run typeface first, fallbacks after: {svg}"
+        );
+    }
+
+    #[test]
+    fn fontref_color_shows_on_unstyled_run() {
+        // fontRef color (accent1 = #FF00AA) becomes the shape's default text color.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="accent1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Hi</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#FF00AA""##), "fontRef color on text: {svg}");
+    }
+
+    // Step 4 — real bullets.
+
+    #[test]
+    fn buchar_renders_literal_character() {
+        let paras = r#"<a:p><a:pPr><a:buFont typeface="Arial"/><a:buChar char="–"/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>Item</a:t></a:r></a:p>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="6000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<tspan>– </tspan>"), "buChar en-dash bullet: {svg}");
+    }
+
+    #[test]
+    fn buautonum_numbers_consecutive_paragraphs() {
+        let p = |t: &str| format!(r#"<a:p><a:pPr><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:rPr/><a:t>{t}</a:t></a:r></a:p>"#);
+        let paras = format!("{}{}{}", p("a"), p("b"), p("c"));
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="6000000" cy="4000000"/>"#, "<a:bodyPr/>", &paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        let (a, b, c) = (svg.find("1. ").unwrap(), svg.find("2. ").unwrap(), svg.find("3. ").unwrap());
+        assert!(a < b && b < c, "auto-numbered 1./2./3. in order: {svg}");
+    }
+
+    #[test]
+    fn buautonum_resets_per_level() {
+        // lvl0(→1.), lvl1(→1., a fresh counter), lvl0(→2., continues).
+        let p = |lvl: &str, t: &str| {
+            format!(r#"<a:p><a:pPr lvl="{lvl}"><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:rPr/><a:t>{t}</a:t></a:r></a:p>"#)
+        };
+        let paras = format!("{}{}{}", p("0", "a"), p("1", "b"), p("0", "c"));
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="8000000" cy="4000000"/>"#, "<a:bodyPr/>", &paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.matches("1. ").count() >= 2, "level 1 restarts at 1.: {svg}");
+        assert!(svg.contains("2. "), "level 0 continues past the nested level: {svg}");
+    }
+
+    #[test]
+    fn bunone_suppresses_body_bullet() {
+        // A body placeholder normally defaults to "•"; buNone removes it.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="2000000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>NoBullet</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("NoBullet"), "text present: {svg}");
+        assert!(!svg.contains('\u{2022}'), "buNone suppresses the bullet: {svg}");
+    }
+
+    #[test]
+    fn title_placeholder_has_no_bullet() {
+        let deck = DeckSpec::new("Deck").slide(SlideSpec::new("Just a title"));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("Just a title"));
+        assert!(!svg.contains('\u{2022}'), "title gets no bullet: {svg}");
+    }
+
+    // Step 5 — spacing, insets, autofit.
+
+    #[test]
+    fn normautofit_fontscale_scales_run_sizes() {
+        let paras = r#"<a:p><a:r><a:rPr sz="4000"/><a:t>Big</a:t></a:r></a:p>"#;
+        let body_pr = r#"<a:bodyPr><a:normAutofit fontScale="62500"/></a:bodyPr>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="9000000" cy="2000000"/>"#, body_pr, paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"font-size="25""#), "40pt × 0.625 = 25pt: {svg}");
+    }
+
+    #[test]
+    fn lnspc_pct_scales_line_advance() {
+        // One paragraph, two lines (a:br). The baseline delta is the line advance.
+        let render = |ln_spc: &str| {
+            let paras = format!(
+                r#"<a:p><a:pPr>{ln_spc}</a:pPr><a:r><a:rPr sz="1800"/><a:t>A</a:t></a:r><a:br/><a:r><a:rPr sz="1800"/><a:t>B</a:t></a:r></a:p>"#
+            );
+            let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="9000000" cy="4000000"/>"#, "<a:bodyPr/>", &paras);
+            let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+            let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+            let ys = text_baselines(&svg);
+            ys[1] - ys[0]
+        };
+        let base = render("");
+        let wide = render(r#"<a:lnSpc><a:spcPct val="150000"/></a:lnSpc>"#);
+        assert!((wide / base - 1.5).abs() < 0.02, "150% line advance: base={base} wide={wide}");
+    }
+
+    #[test]
+    fn custom_lins_shifts_text_left_edge() {
+        // lIns=360000 EMU = 28.35pt; left-aligned text starts there.
+        let paras = r#"<a:p><a:r><a:rPr sz="1800"/><a:t>Hi</a:t></a:r></a:p>"#;
+        let body_pr = r#"<a:bodyPr lIns="360000"/>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="9000000" cy="2000000"/>"#, body_pr, paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r#"<text x="28.35""#), "custom lIns honored: {svg}");
+    }
+
+    #[test]
+    fn wrap_none_yields_single_line() {
+        // A narrow box whose long text would wrap several times, but wrap="none".
+        let paras = r#"<a:p><a:r><a:rPr sz="1800"/><a:t>alpha bravo charlie delta echo</a:t></a:r></a:p>"#;
+        let body_pr = r#"<a:bodyPr wrap="none"/>"#;
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="600000" cy="2000000"/>"#, body_pr, paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("<text ").count(), 1, "wrap=none → single line: {svg}");
     }
 }
