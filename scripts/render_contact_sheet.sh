@@ -18,6 +18,11 @@
 #     tier: thumb | preview | full   (default: preview)
 #
 # Then open  <out_dir>/contact_sheet.html  in a browser.
+#
+# CAVEAT: rows are paired PDF-page-N ⟷ deck-slide-N. If the deck has HIDDEN
+# slides, LibreOffice omits them from the PDF while render_demo renders every
+# slide, so rows drift out of alignment after the first hidden slide. Check the
+# slide-number burned into the LibreOffice render if a row looks mismatched.
 
 set -euo pipefail
 
