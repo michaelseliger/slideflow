@@ -9,7 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Semaphore;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -40,7 +42,22 @@ pub struct AppState {
     pub thumbs_dir: PathBuf,
     /// Guards against two concurrent scans stepping on each other.
     pub scanning: AtomicBool,
+    /// Bounds how many slide renders run at once. Rendering fully inflates a
+    /// deck's zip and is CPU-bound, so a scroll burst of ~20 tile requests must
+    /// not spawn 20 parallel 100 MB decompressions. Two keeps the pipeline fed
+    /// without thrashing.
+    pub render_permits: Semaphore,
+    /// Tiny MRU cache of opened presentations, so scrolling one big deck's grid
+    /// inflates its zip once instead of once per cache-missed slide. Keyed by
+    /// `(deck_path, content_hash)`; a hash mismatch (file changed) reopens.
+    pub deck_cache: Mutex<Vec<(String, String, Arc<PresentationFile>)>>,
 }
+
+/// Concurrent renders permitted at once (see `render_permits`).
+const RENDER_CONCURRENCY: usize = 2;
+/// Opened presentations kept resident. A 100 MB deck fully inflates to several
+/// hundred MB, so this is deliberately tiny.
+const DECK_CACHE_SLOTS: usize = 2;
 
 impl AppState {
     pub fn new(library: Library, scan_library: Library, thumbs_dir: PathBuf) -> Self {
@@ -49,6 +66,30 @@ impl AppState {
             scan_library: Mutex::new(scan_library),
             thumbs_dir,
             scanning: AtomicBool::new(false),
+            render_permits: Semaphore::new(RENDER_CONCURRENCY),
+            deck_cache: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// An already-opened deck matching `(path, hash)`, promoted to most-recently
+    /// used. A hash mismatch (the file changed on disk) misses so the caller
+    /// reopens it.
+    fn deck_lookup(&self, path: &str, hash: &str) -> Option<Arc<PresentationFile>> {
+        let mut cache = self.deck_cache.lock().ok()?;
+        let pos = cache.iter().position(|(p, h, _)| p == path && h == hash)?;
+        let entry = cache.remove(pos);
+        let arc = Arc::clone(&entry.2);
+        cache.insert(0, entry);
+        Some(arc)
+    }
+
+    /// Insert (or refresh) an opened deck at the front, dropping any stale entry
+    /// for the same path and capping the cache to [`DECK_CACHE_SLOTS`].
+    fn deck_insert(&self, path: String, hash: String, pf: Arc<PresentationFile>) {
+        if let Ok(mut cache) = self.deck_cache.lock() {
+            cache.retain(|(p, _, _)| p != &path);
+            cache.insert(0, (path, hash, pf));
+            cache.truncate(DECK_CACHE_SLOTS);
         }
     }
 }
@@ -205,17 +246,43 @@ pub async fn get_slide_preview(
     let cache_path = state.thumbs_dir.join(&file_name);
 
     // Fast path: a present, non-empty cache file is served straight from disk —
-    // no read, no render.
+    // no permit, no open, no render. Kept ahead of the semaphore so cache hits
+    // never queue behind in-flight renders.
     if cache_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
         return Ok(cache_path.to_string_lossy().into_owned());
     }
 
+    // Bound how many renders inflate a deck + rasterize at once.
+    let _permit = state.render_permits.acquire().await.map_err(e)?;
+
+    // Reuse an already-open deck when possible; otherwise inflate it off the
+    // async runtime (a 100 MB zip) and cache it.
+    let pf = match state.deck_lookup(&deck_path, &content_hash) {
+        Some(pf) => pf,
+        None => {
+            let dp = deck_path.clone();
+            let opened = tauri::async_runtime::spawn_blocking(move || {
+                PresentationFile::open(Path::new(&dp)).map_err(e)
+            })
+            .await
+            .map_err(e)??;
+            let arc = Arc::new(opened);
+            state.deck_insert(deck_path.clone(), content_hash.clone(), Arc::clone(&arc));
+            arc
+        }
+    };
+
+    // Render off the async runtime too — it's CPU-bound.
     let options = match tier {
         ThumbTier::Thumb => RenderOptions::thumb(),
         ThumbTier::Full => RenderOptions::preview(),
     };
-    let pf = PresentationFile::open(Path::new(&deck_path)).map_err(e)?;
-    let svg = render_slide_svg(&pf, slide_index as usize, &options).map_err(e)?;
+    let idx = slide_index as usize;
+    let svg = tauri::async_runtime::spawn_blocking(move || {
+        render_slide_svg(&pf, idx, &options).map_err(e)
+    })
+    .await
+    .map_err(e)??;
 
     write_cache_atomic(&state.thumbs_dir, &cache_path, svg.as_bytes());
 

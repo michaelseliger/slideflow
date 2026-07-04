@@ -29,6 +29,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Async primitives for bounding concurrent renders (Semaphore). Tauri already
+# pulls tokio; we only need the sync module directly.
+tokio = { version = "1", features = ["sync"] }
 
 [profile.release]
 lto = "thin"
