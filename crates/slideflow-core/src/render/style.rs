@@ -25,6 +25,8 @@ pub(crate) struct RunProps {
     pub(crate) color: Option<Rgba>,
     /// Resolved typeface (`+mj-lt`/`+mn-lt` already mapped to the theme fonts).
     pub(crate) typeface: Option<String>,
+    /// `a:highlight` marker color, drawn as a box behind the run's text.
+    pub(crate) highlight: Option<Rgba>,
 }
 
 impl RunProps {
@@ -47,6 +49,9 @@ impl RunProps {
         }
         if o.typeface.is_some() {
             self.typeface = o.typeface.clone();
+        }
+        if o.highlight.is_some() {
+            self.highlight = o.highlight;
         }
     }
 }
@@ -195,6 +200,9 @@ pub(crate) fn parse_rpr(rpr: Node, theme: &Theme) -> RunProps {
         underline,
         color: run_fill_color(rpr, theme),
         typeface,
+        highlight: ch(rpr, "highlight")
+            .and_then(|h| h.children().find(|n| n.is_element()))
+            .and_then(|c| theme.parse_color(c)),
     }
 }
 

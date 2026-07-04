@@ -9,12 +9,14 @@ use super::{a, ch, fnum, Ctx, EMU_PER_PT};
 /// out of the theme, without its inherited `xmlns:a`) re-parses on its own.
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
+#[derive(Clone)]
 pub(crate) enum GradKind {
     /// `angle_deg` is measured clockwise from due east (DrawingML `a:lin@ang`).
     Linear { angle_deg: f64 },
     Radial,
 }
 
+#[derive(Clone)]
 pub(crate) enum Fill {
     Solid(Rgba),
     Gradient { stops: Vec<(f64, Rgba)>, kind: GradKind },
@@ -218,11 +220,25 @@ impl Ctx<'_> {
                     return Fill::Unspecified;
                 }
                 "blipFill" => return Fill::Unspecified,
+                // Inherit the innermost containing group's fill (kept as a
+                // stack on Ctx by render_group).
+                "grpFill" => {
+                    return self.group_fills.last().cloned().unwrap_or(Fill::Unspecified);
+                }
                 _ => {}
             }
         }
         // No direct fill child: leave it to the caller to try a style reference.
         Fill::Unspecified
+    }
+
+    /// Whether `spPr` carries an explicit `<a:ln><a:noFill/></a:ln>` — "no
+    /// outline, period". This must SUPPRESS a `p:style/a:lnRef` fallback, not
+    /// fall through to it (a plain missing `a:ln` is what lets the ref apply).
+    pub(crate) fn explicit_no_line(sp_pr: Node) -> bool {
+        ch(sp_pr, "ln").is_some_and(|ln| {
+            ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill")
+        })
     }
 
     pub(crate) fn resolve_stroke(&self, sp_pr: Node) -> Option<Stroke> {

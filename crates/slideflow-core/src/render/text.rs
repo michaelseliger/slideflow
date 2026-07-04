@@ -19,6 +19,8 @@ struct Span {
     underline: bool,
     color: Rgba,
     typeface: Option<String>,
+    /// `a:highlight` marker color — a box drawn behind the line.
+    highlight: Option<Rgba>,
 }
 
 impl Span {
@@ -31,6 +33,7 @@ impl Span {
             underline: p.underline.unwrap_or(false),
             color: p.color.unwrap_or(default_color),
             typeface: p.typeface.clone(),
+            highlight: p.highlight,
         }
     }
 }
@@ -45,11 +48,10 @@ struct Line {
     space_before: f64,
 }
 
-/// Body-text autofit knobs from `a:bodyPr` (`normAutofit`/`spAutoFit`).
+/// Body-text autofit knobs from `a:bodyPr` (`normAutofit`).
 struct Autofit {
     font_scale: f64,
     ln_spc_reduction: f64,
-    sp_auto: bool,
 }
 
 impl Ctx<'_> {
@@ -89,6 +91,7 @@ impl Ctx<'_> {
             underline: Some(false),
             color: Some(fr_color.unwrap_or_else(|| self.theme.text_default())),
             typeface: Some(fr_font.unwrap_or(default_font)),
+            highlight: None,
         };
         let default_color = self.theme.text_default();
         let shape_lst = ch(tx_body, "lstStyle").map(|l| LstStyle::parse(l, &self.theme)).unwrap_or_default();
@@ -127,35 +130,46 @@ impl Ctx<'_> {
             _ => rect.y + t_ins,
         };
 
-        // Clip to the shape; a spAutoFit box may have wrapped more coarsely than
-        // PowerPoint, so pad its clip vertically to avoid clipping the last line.
-        let (clip_y, clip_h) = if fit.sp_auto {
-            (rect.y - rect.h * 0.1, rect.h * 1.2)
-        } else {
-            (rect.y, rect.h)
-        };
-        self.clip_id += 1;
-        let clip = format!("clip{}", self.clip_id);
-        self.defs.push_str(&format!(
-            r#"<clipPath id="{clip}"><rect x="{x}" y="{y}" width="{w}" height="{h}"/></clipPath>"#,
-            x = fnum(rect.x),
-            y = fnum(clip_y),
-            w = fnum(rect.w),
-            h = fnum(clip_h)
-        ));
-        self.body.push_str(&format!(r#"<g clip-path="url(#{clip})">"#));
-
+        // Deliberately NO clipPath: PowerPoint's default is overflow-visible
+        // (text simply spills out of its box unless autofit shrinks it), and our
+        // width estimates run slightly wide of the real fonts — clipping to the
+        // shape rect cut words mid-glyph where PowerPoint shows them whole.
         let mut cursor = block_top;
         for line in &lines {
             cursor += line.space_before;
             if !line.spans.is_empty() {
                 let max_size = line.spans.iter().map(|s| s.size_pt).fold(0.0_f64, f64::max);
+                self.emit_line_highlight(line, rect, r_ins, cursor, max_size);
                 let baseline = cursor + max_size * 0.8;
                 self.emit_line(line, rect, r_ins, baseline);
             }
             cursor += line.advance;
         }
-        self.body.push_str("</g>");
+    }
+
+    /// Draw an `a:highlight` marker box behind a line. SVG lays the tspans out
+    /// itself, so exact per-span x positions aren't known — one box is drawn for
+    /// the whole line (decks overwhelmingly highlight full lines), sized from
+    /// the same width estimate the wrapper used, in the first highlighted span's
+    /// color.
+    fn emit_line_highlight(&mut self, line: &Line, rect: &Rect, r_ins: f64, top: f64, max_size: f64) {
+        let Some(color) = line.spans.iter().find_map(|s| s.highlight) else {
+            return;
+        };
+        let est_w: f64 = line.spans.iter().map(|s| span_text_width(&s.text, s)).sum();
+        let x = match line.algn.as_str() {
+            "ctr" => rect.x + (rect.w - est_w) / 2.0,
+            "r" => rect.x + rect.w - r_ins - est_w,
+            _ => rect.x + line.left,
+        };
+        self.body.push_str(&format!(
+            r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{c}"/>"#,
+            x = fnum(x - max_size * 0.08),
+            y = fnum(top),
+            w = fnum(est_w + max_size * 0.16),
+            h = fnum(max_size * 1.1),
+            c = color.hex()
+        ));
     }
 
     /// Resolve a shape's `p:style/a:fontRef`: its `idx` selects major/minor font
@@ -250,7 +264,15 @@ impl Ctx<'_> {
         *pending_gap = spacing_pts(pp.spc_aft, para_size);
 
         // Split runs into segments (an `a:br` starts a new segment/line).
-        let segments = build_segments(para, &self.theme, run_def, default_size, default_color, fit.font_scale);
+        let segments = build_segments(
+            para,
+            &self.theme,
+            run_def,
+            default_size,
+            default_color,
+            fit.font_scale,
+            self.slide_no,
+        );
         let has_text = segments.iter().any(|s| s.iter().any(|sp| !sp.text.is_empty()));
 
         if !has_text {
@@ -325,6 +347,7 @@ impl Ctx<'_> {
             underline: false,
             color,
             typeface: font.or_else(|| run_def.typeface.clone()),
+            highlight: None,
         };
         match &pp.bullet {
             Some(Bullet::None) => None,
@@ -412,6 +435,7 @@ impl Ctx<'_> {
 
 /// Build a paragraph's runs into segments; each `a:br` starts a new segment
 /// (a hard line break). `a:r` and `a:fld` contribute styled text.
+#[allow(clippy::too_many_arguments)]
 fn build_segments(
     para: Node,
     theme: &super::color::Theme,
@@ -419,15 +443,25 @@ fn build_segments(
     default_size: f64,
     default_color: Rgba,
     scale: f64,
+    slide_no: usize,
 ) -> Vec<Vec<Span>> {
     let mut segments: Vec<Vec<Span>> = vec![Vec::new()];
     for child in para.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "r" | "fld" => {
-                let Some(t) = ch(child, "t").and_then(|n| n.text()) else { continue };
-                if t.is_empty() {
-                    continue;
-                }
+                // A slide-number field renders the ACTUAL slide number; its
+                // cached <a:t> often still holds the layout's "‹Nr.›" prompt.
+                let slidenum = child.tag_name().name() == "fld"
+                    && a(child, "type").is_some_and(|t| t.starts_with("slidenum"));
+                let cached = ch(child, "t").and_then(|n| n.text());
+                let t: String = if slidenum {
+                    slide_no.to_string()
+                } else {
+                    match cached {
+                        Some(t) if !t.is_empty() => t.to_string(),
+                        _ => continue,
+                    }
+                };
                 let mut props = run_def.clone();
                 if let Some(rpr) = ch(child, "rPr") {
                     props.overlay(&parse_rpr(rpr, theme));
@@ -435,7 +469,7 @@ fn build_segments(
                 segments
                     .last_mut()
                     .unwrap()
-                    .push(Span::from_props(t.to_string(), &props, default_size, default_color, scale));
+                    .push(Span::from_props(t, &props, default_size, default_color, scale));
             }
             "br" => segments.push(Vec::new()),
             _ => {}
@@ -472,7 +506,7 @@ fn wrap_segment(spans: &[Span], avail: f64, wrap_none: bool) -> Vec<Vec<Span>> {
     }
 
     let word_w = |w: &[(usize, String)]| -> f64 {
-        w.iter().map(|(si, t)| text_width(t, spans[*si].size_pt)).sum()
+        w.iter().map(|(si, t)| span_text_width(t, &spans[*si])).sum()
     };
     let push_piece = |line: &mut Vec<(usize, String)>, si: usize, t: &str| {
         if let Some(last) = line.last_mut().filter(|l| l.0 == si) {
@@ -494,7 +528,7 @@ fn wrap_segment(spans: &[Span], avail: f64, wrap_none: bool) -> Vec<Vec<Span>> {
             cur_w = ww;
             continue;
         }
-        let sp_w = text_width(" ", spans[word[0].0].size_pt);
+        let sp_w = span_text_width(" ", &spans[word[0].0]);
         if cur_w + sp_w + ww > avail {
             lines.push(std::mem::take(&mut cur));
             for (si, t) in word {
@@ -550,7 +584,7 @@ fn spacing_pts(sp: Option<Spacing>, size: f64) -> f64 {
 /// Read `a:normAutofit` (fontScale/lnSpcReduction) and `a:spAutoFit` from a
 /// `bodyPr`.
 fn autofit(body_pr: Option<Node>) -> Autofit {
-    let mut fit = Autofit { font_scale: 1.0, ln_spc_reduction: 0.0, sp_auto: false };
+    let mut fit = Autofit { font_scale: 1.0, ln_spc_reduction: 0.0 };
     let Some(bp) = body_pr else { return fit };
     if let Some(na) = ch(bp, "normAutofit") {
         if let Some(fs) = a(na, "fontScale").and_then(|v| v.parse::<f64>().ok()) {
@@ -560,9 +594,8 @@ fn autofit(body_pr: Option<Node>) -> Autofit {
             fit.ln_spc_reduction = (lr / 100_000.0).clamp(0.0, 0.9);
         }
     }
-    if ch(bp, "spAutoFit").is_some() {
-        fit.sp_auto = true;
-    }
+    // spAutoFit ("shape grows to fit") needs no handling here: the stored xfrm
+    // already reflects the grown shape, and text is never clipped anyway.
     fit
 }
 
@@ -675,6 +708,18 @@ pub(crate) fn wrap(text: &str, font_size: f64, avail_width: f64) -> Vec<String> 
 /// Estimated text width in points, summing per-glyph advances.
 fn text_width(s: &str, size: f64) -> f64 {
     s.chars().map(|c| glyph_em(c) * size).sum()
+}
+
+/// Span-aware width estimate: bold glyphs run ~5% wider than the regular
+/// Helvetica advances in the table, which was enough to make bold-heavy lines
+/// wrap later than PowerPoint does.
+fn span_text_width(s: &str, span: &Span) -> f64 {
+    let w = text_width(s, span.size_pt);
+    if span.bold {
+        w * 1.05
+    } else {
+        w
+    }
 }
 
 /// Approximate glyph advance in em units (Helvetica metrics / 1000). Non-ASCII

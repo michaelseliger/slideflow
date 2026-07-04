@@ -66,7 +66,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 2;
+pub const RENDER_VERSION: u32 = 3;
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
@@ -198,6 +198,8 @@ pub fn render_slide_svg(
         pf,
         options,
         theme,
+        slide_no: slide_index,
+        group_fills: Vec::new(),
         cur_part: slide_part.clone(),
         cur_rels: slide_rels,
         content_types,
@@ -322,6 +324,11 @@ struct Ctx<'a> {
     pf: &'a PresentationFile,
     options: &'a RenderOptions,
     theme: Theme,
+    /// 1-based slide number being rendered (feeds `a:fld type="slidenum"`).
+    slide_no: usize,
+    /// Fills of the groups currently being descended into (innermost last);
+    /// a shape's `a:grpFill` resolves to the top of this stack.
+    group_fills: Vec<Fill>,
     /// The part currently being walked (slide, layout, or master) and its
     /// relationships. Blip/image rels resolve against THIS part, so the
     /// master/layout passes point these at their own part for the pass's
@@ -365,6 +372,20 @@ impl Ctx<'_> {
 
     fn render_group(&mut self, node: Node, tf: Transform) {
         let Some(grp_pr) = ch(node, "grpSpPr") else { return };
+        // Track the group's own fill so children with `a:grpFill` inherit it.
+        // A group without a concrete fill passes the enclosing group's through.
+        let gf = match self.resolve_fill(grp_pr) {
+            Fill::Unspecified => {
+                self.group_fills.last().cloned().unwrap_or(Fill::Unspecified)
+            }
+            f => f,
+        };
+        self.group_fills.push(gf);
+        self.render_group_inner(node, grp_pr, tf);
+        self.group_fills.pop();
+    }
+
+    fn render_group_inner(&mut self, node: Node, grp_pr: Node, tf: Transform) {
         let Some(xfrm) = ch(grp_pr, "xfrm") else {
             // No transform: pass through unchanged.
             for child in node.children().filter(|n| n.is_element()) {
@@ -464,7 +485,9 @@ impl Ctx<'_> {
             }
         }
         let mut stroke = sp_pr.and_then(|s| self.resolve_stroke(s));
-        if stroke.is_none() {
+        // An explicit <a:ln><a:noFill/> means "no outline, period" — it must
+        // suppress the lnRef style fallback, not fall through to it.
+        if stroke.is_none() && !sp_pr.is_some_and(Ctx::explicit_no_line) {
             stroke = self.resolve_style_stroke(node);
         }
         let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom").or_else(|| ch(s, "custGeom")));
@@ -862,8 +885,10 @@ mod tests {
         let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert!(svg.contains("Inherited"), "text rendered via inherited geom: {svg}");
-        // Layout title off x=838200 → 66pt; clip rect should start near there.
-        assert!(svg.contains(r#"x="66""#), "inherited x offset: {svg}");
+        // Layout title off x=838200 → 66pt; text starts there + 7.2pt left inset.
+        // (Was asserted via the text clipPath's x="66" until text clipping was
+        // removed to match PowerPoint's overflow-visible default.)
+        assert!(svg.contains(r#"x="73.2""#), "inherited x offset: {svg}");
     }
 
     #[test]
@@ -947,6 +972,60 @@ mod tests {
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert!(svg.contains(r##"fill="#00CC00""##), "explicit fill wins: {svg}");
         assert!(!svg.contains(r##"fill="#FF00AA""##), "style ref must not apply: {svg}");
+    }
+
+    #[test]
+    fn explicit_noline_suppresses_lnref() {
+        // <a:ln><a:noFill/> means "no outline, period" — the lnRef style
+        // fallback must NOT apply (this drew spurious black borders on layout
+        // decoration shapes).
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:ln><a:noFill/></a:ln></p:spPr><p:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef></p:style></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").accent("FF00AA").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#FF00AA""##), "fillRef still applies: {svg}");
+        assert!(!svg.contains("stroke="), "explicit noFill line suppresses lnRef: {svg}");
+    }
+
+    #[test]
+    fn slidenum_field_renders_actual_number() {
+        // The cached <a:t> of a slidenum field often still holds the layout's
+        // "‹Nr.›" prompt — the real slide number must render instead.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="N"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="500000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="{X}" type="slidenum"><a:rPr lang="de-DE"/><a:t>&#8249;Nr.&#8250;</a:t></a:fld></a:p></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<tspan>1</tspan>"), "field resolves to slide number: {svg}");
+        assert!(!svg.contains("Nr."), "cached prompt must not render: {svg}");
+    }
+
+    #[test]
+    fn run_highlight_draws_marker_box() {
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="H"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE"><a:highlight><a:srgbClr val="FFFF00"/></a:highlight></a:rPr><a:t>Marked</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        let marker = svg.find(r##"fill="#FFFF00""##).expect("highlight box present");
+        let text = svg.find("Marked").expect("text present");
+        assert!(marker < text, "marker box drawn behind (before) the text: {svg}");
+    }
+
+    #[test]
+    fn grpfill_inherits_group_fill() {
+        // A shape with a:grpFill takes the containing group's fill (white boxes
+        // behind text on photo slides work this way).
+        let shapes = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6096000" cy="3000000"/><a:chOff x="0" y="0"/><a:chExt cx="6096000" cy="3000000"/></a:xfrm><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="21" name="Inner"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:grpFill/></p:spPr></p:sp></p:grpSp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains(r##"fill="#ABCDEF""##), "grpFill inherits group fill: {svg}");
+    }
+
+    #[test]
+    fn text_is_not_clipped_to_its_shape() {
+        // PowerPoint's default is overflow-visible; a text body must not emit a
+        // clipPath (our width estimates run slightly wide and used to cut words).
+        let deck = DeckSpec::new("Deck")
+            .slide(SlideSpec::new("Hello Title").bullets(&["First point", "Second point"]));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(!svg.contains("<clipPath"), "no text clipPath expected: {svg}");
     }
 
     // --- Feature 4: bgRef backgrounds ---------------------------------------
