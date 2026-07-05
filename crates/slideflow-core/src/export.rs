@@ -81,17 +81,67 @@ pub fn system_fonts() -> Arc<fontdb::Database> {
         .get_or_init(|| {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
-            // Generic-family fallbacks. The render SVG always ends its
-            // font-family lists with a CSS generic, so these are the last
-            // resort when neither the authored font nor Helvetica/Arial exist.
-            db.set_sans_serif_family("Helvetica");
-            db.set_serif_family("Times New Roman");
-            db.set_monospace_family("Courier New");
-            db.set_cursive_family("Apple Chancery");
-            db.set_fantasy_family("Papyrus");
+            set_generic_families(&mut db);
             Arc::new(db)
         })
         .clone()
+}
+
+/// Whether any loaded face carries this family name (case-insensitive).
+fn family_exists(db: &fontdb::Database, name: &str) -> bool {
+    db.faces()
+        .any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(name)))
+}
+
+/// First candidate family that actually exists in `db`, if any.
+fn first_present<'a>(db: &fontdb::Database, candidates: &[&'a str]) -> Option<&'a str> {
+    candidates.iter().copied().find(|c| family_exists(db, c))
+}
+
+/// Map the CSS generic families to fonts that **actually exist** in `db`.
+///
+/// The render SVG always ends its `font-family` lists with a CSS generic, so
+/// these mappings are the last resort when neither the authored font nor the
+/// Helvetica/Arial fallbacks are installed. Pointing a generic at a nonexistent
+/// family (e.g. "Helvetica" on a stock Linux box) makes that text silently
+/// vanish from PDF/PNG exports — so each generic probes a cross-platform
+/// candidate list (macOS → Windows → Linux staples) and takes the first hit.
+/// serif/monospace/cursive/fantasy fall back to the chosen sans-serif rather
+/// than dangling; a database with no candidates at all is left untouched.
+pub fn set_generic_families(db: &mut fontdb::Database) {
+    let sans = first_present(
+        db,
+        &["Helvetica Neue", "Helvetica", "Arial", "Liberation Sans", "DejaVu Sans", "Noto Sans"],
+    );
+    let serif = first_present(
+        db,
+        &["Times New Roman", "Times", "Liberation Serif", "DejaVu Serif", "Noto Serif"],
+    )
+    .or(sans);
+    let mono = first_present(
+        db,
+        &["Menlo", "Courier New", "Liberation Mono", "DejaVu Sans Mono", "Noto Sans Mono"],
+    )
+    .or(sans);
+    let cursive =
+        first_present(db, &["Apple Chancery", "Comic Sans MS", "Segoe Script"]).or(sans);
+    let fantasy = first_present(db, &["Papyrus", "Impact"]).or(sans);
+
+    if let Some(f) = sans {
+        db.set_sans_serif_family(f);
+    }
+    if let Some(f) = serif {
+        db.set_serif_family(f);
+    }
+    if let Some(f) = mono {
+        db.set_monospace_family(f);
+    }
+    if let Some(f) = cursive {
+        db.set_cursive_family(f);
+    }
+    if let Some(f) = fantasy {
+        db.set_fantasy_family(f);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,5 +535,56 @@ fn unique_png_name(used: &mut Vec<String>, seq: usize, pptx_path: &str, slide_in
             return candidate;
         }
         n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stock Linux box has neither Helvetica nor Arial, so the generic
+    /// mappings must probe what is actually loaded instead of hardcoding
+    /// macOS names — otherwise generic-fallback text silently vanishes from
+    /// exports. With a database holding ONLY the bundled DejaVu Sans, every
+    /// generic (sans-serif directly; the rest via the sans fallback) must
+    /// resolve to that face.
+    #[test]
+    fn generic_families_probe_what_is_actually_loaded() {
+        static FONT: &[u8] = include_bytes!("../fixtures/fonts/DejaVuSans.ttf");
+        let mut db = fontdb::Database::new();
+        db.load_font_data(FONT.to_vec());
+        set_generic_families(&mut db);
+
+        let id = db
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::SansSerif],
+                ..fontdb::Query::default()
+            })
+            .expect("sans-serif generic resolves in a DejaVu-only database");
+        let face = db.face(id).expect("queried face exists");
+        assert!(
+            face.families.iter().any(|(f, _)| f == "DejaVu Sans"),
+            "sans-serif resolved to {:?}, expected DejaVu Sans",
+            face.families
+        );
+
+        for fam in [
+            fontdb::Family::Serif,
+            fontdb::Family::Monospace,
+            fontdb::Family::Cursive,
+            fontdb::Family::Fantasy,
+        ] {
+            let got = db.query(&fontdb::Query { families: &[fam], ..fontdb::Query::default() });
+            assert_eq!(got, Some(id), "{fam:?} falls back to the sans-serif choice");
+        }
+    }
+
+    /// An empty database must not panic and must leave the defaults untouched
+    /// (there is simply nothing to map).
+    #[test]
+    fn generic_families_probe_tolerates_empty_database() {
+        let mut db = fontdb::Database::new();
+        set_generic_families(&mut db);
+        assert!(db.is_empty());
     }
 }
