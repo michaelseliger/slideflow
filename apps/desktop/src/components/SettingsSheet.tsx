@@ -1,9 +1,23 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { X, Monitor, Sun, Moon, Minus, Plus, Folder, FolderPlus, Trash2 } from "lucide-react";
+import {
+  X,
+  Monitor,
+  Sun,
+  Moon,
+  Minus,
+  Plus,
+  Folder,
+  FolderPlus,
+  FolderOpen,
+  Download,
+  Trash2,
+} from "lucide-react";
 import { useApp, type ThemeMode } from "../stores/useApp";
 import { useUpdater } from "../stores/useUpdater";
 import { useSemantic } from "../stores/useSemantic";
+import { useFonts } from "../stores/useFonts";
+import type { FontFamily } from "../lib/types";
 import { prefersReducedMotion, basename, cx } from "../lib/utils";
 import * as api from "../lib/api";
 import { UpdateStatus } from "./AboutSheet";
@@ -63,6 +77,7 @@ export default function SettingsSheet() {
             <div className="max-h-[70vh] space-y-6 overflow-y-auto px-5 py-5">
               <AppearanceSection />
               <LibrarySection />
+              <FontsSection />
               <UpdatesSection />
               <SemanticSection />
             </div>
@@ -271,6 +286,165 @@ function Switch({ checked, onToggle }: { checked: boolean; onToggle: () => void 
         )}
       />
     </button>
+  );
+}
+
+/** Fonts: the families the indexed library names, each with an availability
+ *  status. Missing families can be added (a licensed .ttf/.otf) or downloaded
+ *  (curated, with per-download consent); app-provided fonts can be removed. All
+ *  fonts live under <app_data>/fonts and are never installed system-wide. */
+function FontsSection() {
+  const fonts = useFonts((s) => s.fonts);
+  const loaded = useFonts((s) => s.loaded);
+  const downloading = useFonts((s) => s.downloading);
+  const dir = useFonts((s) => s.dir);
+
+  // Refresh when the sheet opens so the list reflects the latest scan/harvest.
+  useEffect(() => {
+    void useFonts.getState().refresh();
+  }, []);
+
+  const confirmDownload = (family: string, source: string | null) =>
+    useApp.getState().requestConfirm({
+      title: `Download ${family}?`,
+      message: `Slideflow will download ${family} from its official source${
+        source ? `:\n\n${source}` : ""
+      }.\n\nIt's stored only for this app, never installed system-wide.`,
+      confirmLabel: "Download",
+      onConfirm: () => void useFonts.getState().download(family),
+    });
+
+  const confirmRemove = (family: string) =>
+    useApp.getState().requestConfirm({
+      title: `Remove ${family}?`,
+      message: `This deletes Slideflow's copy of ${family}. Decks that use it fall back to a substitute until you re-add or re-download it.`,
+      confirmLabel: "Remove",
+      destructive: true,
+      onConfirm: () => void useFonts.getState().remove(family),
+    });
+
+  return (
+    <div>
+      <SectionLabel>Fonts</SectionLabel>
+
+      {loaded && fonts.length === 0 ? (
+        <p className="text-caption text-subtle">
+          No fonts detected yet. Add a folder of decks and scan to build the list.
+        </p>
+      ) : (
+        <div className="space-y-0.5">
+          {fonts.map((f) => (
+            <FontRow
+              key={f.family}
+              font={f}
+              downloading={downloading === f.family}
+              onDownload={() => confirmDownload(f.family, f.download_source)}
+              onRemove={() => confirmRemove(f.family)}
+            />
+          ))}
+        </div>
+      )}
+
+      <button
+        onClick={() => void useFonts.getState().addFonts()}
+        className="mt-2 flex items-center gap-2 rounded-[6px] px-2 py-1.5 text-body text-subtle hover:text-ink"
+      >
+        <FolderPlus size={15} /> Add font…
+      </button>
+
+      {dir && (
+        <div className="mt-2 flex items-center gap-2 px-2">
+          <div className="min-w-0 flex-1 truncate text-caption text-subtle" title={dir}>
+            {dir}
+          </div>
+          <button
+            onClick={() => void useFonts.getState().revealFolder()}
+            className="flex shrink-0 items-center gap-1 rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
+          >
+            <FolderOpen size={13} /> Reveal
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One font row: a status dot + family + source, and the applicable action
+ *  (Download / Add… / Remove). */
+function FontRow({
+  font,
+  downloading,
+  onDownload,
+  onRemove,
+}: {
+  font: FontFamily;
+  downloading: boolean;
+  onDownload: () => void;
+  onRemove: () => void;
+}) {
+  const statusLabel =
+    font.status === "available"
+      ? `Available${font.source ? ` · ${font.source}` : ""}`
+      : font.status === "downloadable"
+        ? "Downloadable"
+        : "Not installed";
+  const dotClass =
+    font.status === "available"
+      ? "bg-green-500"
+      : font.status === "downloadable"
+        ? "bg-accent"
+        : "bg-ink/30";
+
+  return (
+    <div className="flex items-center gap-2 rounded-[6px] px-2 py-1.5 hover:bg-ink/5">
+      <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-body text-ink">
+          {font.family}
+          {font.embedded && (
+            <span className="ml-1.5 align-middle text-caption text-subtle">embedded</span>
+          )}
+        </div>
+        <div className="truncate text-caption text-subtle">{statusLabel}</div>
+      </div>
+
+      {font.status === "downloadable" &&
+        (downloading ? (
+          <button
+            onClick={() => void useFonts.getState().cancelDownload()}
+            className="rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onDownload}
+            aria-label={`Download ${font.family}`}
+            className="flex shrink-0 items-center gap-1 rounded-[6px] px-2 py-1 text-caption font-medium text-accent hover:bg-accent/10"
+          >
+            <Download size={13} /> Download
+          </button>
+        ))}
+
+      {font.status === "missing" && (
+        <button
+          onClick={() => void useFonts.getState().addFonts()}
+          className="shrink-0 rounded-[6px] px-2 py-1 text-caption text-subtle hover:text-ink"
+        >
+          Add…
+        </button>
+      )}
+
+      {font.removable && (
+        <button
+          onClick={onRemove}
+          aria-label={`Remove ${font.family}`}
+          className="shrink-0 rounded-[6px] p-1 text-subtle hover:text-ink"
+        >
+          <Trash2 size={14} />
+        </button>
+      )}
+    </div>
   );
 }
 

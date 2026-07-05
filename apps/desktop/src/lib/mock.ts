@@ -10,6 +10,8 @@ import type {
   ExportRecord,
   ExportReport,
   FitMode,
+  FontDownloadEvent,
+  FontFamily,
   RootRecord,
   SavedSearch,
   SearchFilters,
@@ -712,6 +714,88 @@ export const mock = {
     mockEmbeddedSlides = mockSlides.length;
   },
 
+  // --- fonts -------------------------------------------------------------
+
+  listLibraryFonts: async (): Promise<FontFamily[]> => structuredClone(mockFonts),
+
+  fontsDir: async (): Promise<string> =>
+    "/Users/you/Library/Application Support/com.slideflow.app/fonts",
+
+  addUserFonts: async (paths: string[]): Promise<FontFamily[]> => {
+    for (const p of paths) {
+      const base = (p.split("/").pop() ?? "Font.ttf").replace(/\.(ttf|otf)$/i, "");
+      const family = base.replace(/[-_].*$/, "");
+      const existing = mockFonts.find((f) => f.family.toLowerCase() === family.toLowerCase());
+      if (existing) {
+        existing.status = "available";
+        existing.source = "user";
+        existing.removable = true;
+        existing.download_source = null;
+      } else {
+        mockFonts.push({
+          family,
+          status: "available",
+          source: "user",
+          embedded: false,
+          removable: true,
+          download_source: null,
+        });
+      }
+    }
+    emitMockFontsChanged();
+    return structuredClone(mockFonts);
+  },
+
+  removeAppFont: async (family: string): Promise<FontFamily[]> => {
+    const row = mockFonts.find((f) => f.family === family && f.removable);
+    if (row) {
+      // Revert to the pre-install state: curated families become downloadable
+      // again, everything else falls back to missing (or drops if it was an
+      // extra font no deck names — here we keep named ones).
+      const curated = MOCK_DOWNLOADABLE[family];
+      row.removable = false;
+      row.source = "";
+      row.status = curated ? "downloadable" : "missing";
+      row.download_source = curated ?? null;
+    }
+    emitMockFontsChanged();
+    return structuredClone(mockFonts);
+  },
+
+  downloadFont: async (family: string): Promise<boolean> => {
+    mockFontDownloadCanceled = false;
+    emitMockFontDownload({ kind: "started", family });
+    await mockSleep(700);
+    if (mockFontDownloadCanceled) {
+      emitMockFontDownload({ kind: "canceled", family });
+      return true;
+    }
+    const row = mockFonts.find((f) => f.family === family);
+    if (row) {
+      row.status = "available";
+      row.source = "downloaded";
+      row.removable = true;
+      row.download_source = null;
+    }
+    emitMockFontDownload({ kind: "done", family });
+    emitMockFontsChanged();
+    return true;
+  },
+
+  cancelFontDownload: async (): Promise<void> => {
+    mockFontDownloadCanceled = true;
+  },
+
+  onFontDownloadEvent: (handler: (ev: FontDownloadEvent) => void): (() => void) => {
+    mockFontDownloadListeners.add(handler);
+    return () => mockFontDownloadListeners.delete(handler);
+  },
+
+  onFontsChanged: (handler: () => void): (() => void) => {
+    mockFontsChangedListeners.add(handler);
+    return () => mockFontsChangedListeners.delete(handler);
+  },
+
   getSimilarSlides: async (slideId: number, limit: number): Promise<SimilarSlide[]> => {
     if (!mockSemanticEnabled || !mockModelDownloaded) return [];
     const anchor = mockSlides.find((s) => s.id === slideId);
@@ -787,6 +871,34 @@ let mockSemanticEnabled = false;
 let mockModelDownloaded = false;
 let mockModelDownloading = false;
 let mockEmbeddedSlides = 0;
+
+const mockSleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The source labels the curated resolver reports for its downloadable families;
+// also used to revert a removed download back to "downloadable".
+const MOCK_DOWNLOADABLE: Record<string, string> = {
+  Karla: "Google Fonts (OFL) · github.com/google/fonts",
+  Aptos: "Microsoft (free download) · microsoft.com/download id=106087",
+};
+
+// A plausible font inventory exercising every status/source the panel renders.
+let mockFonts: FontFamily[] = [
+  { family: "Aptos", status: "downloadable", source: "", embedded: false, removable: false, download_source: MOCK_DOWNLOADABLE.Aptos },
+  { family: "Arial", status: "available", source: "system", embedded: false, removable: false, download_source: null },
+  { family: "Calibri", status: "available", source: "bundled", embedded: false, removable: false, download_source: null },
+  { family: "Grafton", status: "available", source: "harvested", embedded: true, removable: true, download_source: null },
+  { family: "Karla", status: "downloadable", source: "", embedded: false, removable: false, download_source: MOCK_DOWNLOADABLE.Karla },
+  { family: "VilleroyBoch", status: "missing", source: "", embedded: false, removable: false, download_source: null },
+];
+let mockFontDownloadCanceled = false;
+const mockFontDownloadListeners = new Set<(ev: FontDownloadEvent) => void>();
+const mockFontsChangedListeners = new Set<() => void>();
+function emitMockFontDownload(ev: FontDownloadEvent) {
+  for (const l of mockFontDownloadListeners) l(ev);
+}
+function emitMockFontsChanged() {
+  for (const l of mockFontsChangedListeners) l();
+}
 
 const mockSearches: SearchHistoryEntry[] = [];
 const mockExports: ExportRecord[] = [];

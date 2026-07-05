@@ -303,3 +303,31 @@ export type EmbedEvent =
   | { kind: "progress"; done: number; total: number }
   | { kind: "finished" }
   | { kind: "error"; message: string };
+
+/** One row of the Fonts settings panel: a font family the indexed library
+ *  names, with its availability. Mirrors the desktop `FontFamily` command
+ *  struct (`src-tauri/src/fonts.rs`). */
+export interface FontFamily {
+  family: string;
+  /** "available" (system/bundled/harvested/user/downloaded), "downloadable"
+   *  (the curated resolver can fetch it), or "missing". */
+  status: "available" | "downloadable" | "missing";
+  /** Provenance of an available font, or "" otherwise: one of "system",
+   *  "bundled", "harvested", "user", "downloaded". */
+  source: string;
+  /** Whether some indexed deck actually embeds this family. */
+  embedded: boolean;
+  /** Whether this row can be removed (app-provided: harvested/user/downloaded). */
+  removable: boolean;
+  /** For a downloadable family: the source shown in the consent dialog. */
+  download_source: string | null;
+}
+
+/** Font-download lifecycle events streamed on `font:download`. Mirrors the
+ *  `FontDownloadEvent` enum in `src-tauri/src/fonts.rs`
+ *  (serde `#[serde(tag = "kind", rename_all = "snake_case")]`). */
+export type FontDownloadEvent =
+  | { kind: "started"; family: string }
+  | { kind: "done"; family: string }
+  | { kind: "canceled"; family: string }
+  | { kind: "error"; family: string; message: string };

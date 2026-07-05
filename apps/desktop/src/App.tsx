@@ -3,6 +3,7 @@ import { useApp, applyTheme } from "./stores/useApp";
 import { useTray } from "./stores/useTray";
 import { useUpdater } from "./stores/useUpdater";
 import { useSemantic } from "./stores/useSemantic";
+import { useFonts } from "./stores/useFonts";
 import * as api from "./lib/api";
 import { cmdKey } from "./lib/utils";
 
@@ -59,6 +60,7 @@ export default function App() {
     void useApp.getState().init();
     void useUpdater.getState().init();
     void useSemantic.getState().init();
+    void useFonts.getState().init();
     const unlisteners: Array<() => void> = [];
     api
       .onScanEvent((ev) => useApp.getState().handleScanEvent(ev))

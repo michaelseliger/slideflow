@@ -13,6 +13,8 @@ import type {
   ExportEvent,
   ExportReport,
   FitMode,
+  FontDownloadEvent,
+  FontFamily,
   ModelDownloadEvent,
   RootRecord,
   SavedSearch,
@@ -682,6 +684,86 @@ async function mockStartBackfill(): Promise<boolean> {
   mock.setAllEmbedded();
   emitMockEmbed({ kind: "finished" });
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Fonts (harvested / user-added / downloaded, under <app_data>/fonts)
+//
+// The Rust side (`src-tauri/src/fonts.rs`) owns the fonts dir, the curated
+// download resolver, and harvesting; the frontend mirrors the family list and
+// listens on `font:download` (per-download progress) and `fonts:changed` (any
+// set change → drop the preview cache + re-render).
+// ---------------------------------------------------------------------------
+
+/** Every font family the indexed library names, with availability + source. */
+export function listLibraryFonts(): Promise<FontFamily[]> {
+  return isTauri() ? tauriInvoke("list_library_fonts") : mock.listLibraryFonts();
+}
+
+/** The `<app_data>/fonts` directory path (for "Reveal in Finder"). */
+export function fontsDir(): Promise<string> {
+  return isTauri() ? tauriInvoke("fonts_dir") : mock.fontsDir();
+}
+
+/** Copy validated .ttf/.otf files into the user fonts folder; returns the
+ *  refreshed list. */
+export function addUserFonts(paths: string[]): Promise<FontFamily[]> {
+  return isTauri() ? tauriInvoke("add_user_fonts", { paths }) : mock.addUserFonts(paths);
+}
+
+/** Remove an app-added (harvested/user/downloaded) family; returns the list. */
+export function removeAppFont(family: string): Promise<FontFamily[]> {
+  return isTauri() ? tauriInvoke("remove_app_font", { family }) : mock.removeAppFont(family);
+}
+
+/** Start a curated font download (consent is obtained by the caller first).
+ *  Resolves false when one is already running. Progress on `font:download`. */
+export function downloadFont(family: string): Promise<boolean> {
+  return isTauri() ? tauriInvoke("download_font", { family }) : mock.downloadFont(family);
+}
+
+export function cancelFontDownload(): Promise<void> {
+  if (isTauri()) return tauriInvoke("cancel_font_download");
+  return mock.cancelFontDownload();
+}
+
+/** Subscribe to `font:download` lifecycle events. Returns an unlisten fn. */
+export async function onFontDownloadEvent(
+  handler: (ev: FontDownloadEvent) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen<FontDownloadEvent>("font:download", (e) => handler(e.payload));
+    return un;
+  }
+  return mock.onFontDownloadEvent(handler);
+}
+
+/** Subscribe to `fonts:changed` (fired after any font-set change so the caller
+ *  can drop its preview cache and re-render). Returns an unlisten fn. */
+export async function onFontsChanged(handler: () => void): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen("fonts:changed", () => handler());
+    return un;
+  }
+  return mock.onFontsChanged(handler);
+}
+
+/** Native picker for one or more .ttf/.otf files; browser mode returns canned
+ *  paths so the Settings flow is demoable. */
+export async function pickFontFiles(): Promise<string[]> {
+  if (!isTauri()) {
+    return [`/Users/you/Fonts/VilleroyBoch-${Math.floor(Math.random() * 900 + 100)}.ttf`];
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const result = await open({
+    directory: false,
+    multiple: true,
+    filters: [{ name: "Fonts", extensions: ["ttf", "otf"] }],
+  });
+  if (Array.isArray(result)) return result;
+  return typeof result === "string" ? [result] : [];
 }
 
 // ---------------------------------------------------------------------------
