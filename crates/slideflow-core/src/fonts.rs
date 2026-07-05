@@ -95,12 +95,15 @@ pub static BUNDLED_FONTS: &[BundledFace] = &[
 
 /// The bundled family that metric-clones `typeface`, if we ship one (case- and
 /// whitespace-insensitive). `Calibri`/`Calibri Light` → `Carlito`;
-/// `Cambria`/`Cambria Math` → `Caladea`; anything else → `None`.
+/// `Cambria`/`Cambria Math` → `Caladea`; anything else → `None`. The clone names
+/// self-map (`Carlito` → `Carlito`, `Caladea` → `Caladea`) because LibreOffice
+/// decks author the clone name outright — the full-tier preview then embeds the
+/// bundled bytes for it, matching the exporter (which carries them in fontdb).
 pub fn bundled_substitute(typeface: &str) -> Option<&'static str> {
     let f = typeface.trim().to_ascii_lowercase();
-    if f.contains("calibri") {
+    if f.contains("calibri") || f.contains("carlito") {
         Some("Carlito")
-    } else if f.contains("cambria") {
+    } else if f.contains("cambria") || f.contains("caladea") {
         Some("Caladea")
     } else {
         None
@@ -135,8 +138,16 @@ pub fn fallback_families(typeface: &str) -> Option<&'static [&'static str]> {
     // full-tier preview embeds them, so the clone wins on any machine.
     if f.contains("calibri") {
         Some(&["Carlito", "Helvetica Neue", "Arial", "sans-serif"])
+    } else if f.contains("carlito") {
+        // A deck that authors the Calibri clone by name (LibreOffice writes
+        // "Carlito"). The authored name already leads the emitted font-family
+        // list, so the chain must NOT repeat it — go straight to the staples.
+        Some(&["Helvetica Neue", "Arial", "sans-serif"])
     } else if f.contains("cambria") {
         Some(&["Caladea", "Georgia", "Times New Roman", "serif"])
+    } else if f.contains("caladea") {
+        // Same, for the directly-authored Cambria clone.
+        Some(&["Georgia", "Times New Roman", "serif"])
     } else if f.contains("constantia") {
         // Constantia — a warm transitional serif; Georgia is the closest staple.
         Some(&["Georgia", "Times New Roman", "serif"])
@@ -362,8 +373,10 @@ mod tests {
             Some(&["Caladea", "Georgia", "Times New Roman", "serif"][..])
         );
         // Every chain ends in a CSS generic so exports never dangle.
-        for probe in ["Calibri", "Cambria", "Segoe UI", "Consolas", "Constantia", "Candara", "Aptos"]
-        {
+        for probe in [
+            "Calibri", "Carlito", "Cambria", "Caladea", "Segoe UI", "Consolas", "Constantia",
+            "Candara", "Aptos",
+        ] {
             let chain = fallback_families(probe).unwrap_or_else(|| panic!("{probe} has a chain"));
             let last = chain.last().copied().unwrap();
             assert!(
@@ -371,6 +384,36 @@ mod tests {
                 "{probe} chain must end in a CSS generic, got {last:?}"
             );
         }
+    }
+
+    #[test]
+    fn directly_authored_carlito_and_caladea_self_map_to_bundled_bytes() {
+        // LibreOffice decks author the clone name outright ("Carlito"/"Caladea").
+        // The substitute map must self-map them so the full-tier preview embeds the
+        // bundled bytes (matching the exporter, which carries them in fontdb)
+        // instead of embedding nothing and falling to Helvetica.
+        assert_eq!(bundled_substitute("Carlito"), Some("Carlito"));
+        assert_eq!(bundled_substitute("carlito"), Some("Carlito"));
+        assert_eq!(bundled_substitute("Caladea"), Some("Caladea"));
+        assert_eq!(bundled_substitute("CALADEA"), Some("Caladea"));
+        // The bundled bytes for the authored variant resolve.
+        assert!(bundled_face("Carlito", true, false).is_some());
+        assert!(bundled_face("Caladea", false, true).is_some());
+
+        // The named chain must NOT repeat the authored clone name — the renderer
+        // emits "Carlito, <chain>", so a self-reference would dupe it.
+        let carlito = fallback_families("Carlito").expect("Carlito has a chain");
+        assert_eq!(carlito, &["Helvetica Neue", "Arial", "sans-serif"]);
+        assert!(
+            !carlito.iter().any(|f| f.eq_ignore_ascii_case("carlito")),
+            "Carlito chain must not self-reference"
+        );
+        let caladea = fallback_families("Caladea").expect("Caladea has a chain");
+        assert_eq!(caladea, &["Georgia", "Times New Roman", "serif"]);
+        assert!(
+            !caladea.iter().any(|f| f.eq_ignore_ascii_case("caladea")),
+            "Caladea chain must not self-reference"
+        );
     }
 
     #[test]

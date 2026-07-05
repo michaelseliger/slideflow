@@ -2240,6 +2240,31 @@ mod tests {
         assert!(!thumb.contains("@font-face"), "thumb embeds no substitute font: {thumb}");
     }
 
+    /// A deck that AUTHORS the clone name directly (LibreOffice writes "Carlito"
+    /// / "Caladea"): the full tier must embed the bundled bytes so the preview
+    /// matches the exporter (which resolves "Carlito" from its fontdb) instead of
+    /// embedding nothing and falling to Helvetica. The emitted chain must not
+    /// repeat the authored name.
+    #[test]
+    fn full_tier_embeds_bundled_bytes_for_directly_authored_carlito() {
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="Carlito"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes =
+            textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+
+        let full = render_slide_svg(&pf, 1, &RenderOptions::preview()).unwrap();
+        assert!(
+            full.contains(r#"font-family="Carlito, Helvetica Neue, Arial, sans-serif""#),
+            "authored Carlito keeps a non-self-referential chain: {full}"
+        );
+        assert!(
+            full.contains("font-family:&quot;Carlito&quot;"),
+            "full tier embeds a Carlito @font-face: {full}"
+        );
+        assert!(full.contains("src:url(data:font/ttf;base64,"), "Carlito bytes embedded: {full}");
+        assert_no_external_refs(&full);
+    }
+
     /// When a deck actually embeds Calibri, the real embedded bytes win — the
     /// bundled Carlito clone is suppressed even on the full tier.
     #[test]
