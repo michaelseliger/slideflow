@@ -204,6 +204,13 @@ function TagEditor({ slideId }: { slideId: number }) {
   );
 }
 
+// The last find-similar nonce we scrolled for, kept at MODULE scope (not a ref)
+// so a nonce is consumed exactly once across the whole app. similarRequestNonce
+// persists in the store, but this component unmounts/remounts constantly
+// (deselect, inspector toggle, refresh) — a per-instance ref would reset to 0 and
+// re-fire scrollIntoView on a plain selection.
+let lastConsumedSimilarNonce = 0;
+
 /** "Similar slides" (AI): the top semantic neighbors of the inspected slide.
  *  Rendered only while the model is ready; loads lazily per selection. An
  *  explicit "Find similar" bumps `similarRequestNonce`, which re-runs the fetch
@@ -233,11 +240,11 @@ function SimilarSlides({ slideId }: { slideId: number }) {
 
   // Scroll into view only for an EXPLICIT find-similar request (nonce ≥ 1),
   // never on a normal inspector open (nonce 0), so we don't yank the scroll
-  // position. Each nonce triggers at most one scroll.
-  const scrolledFor = useRef(0);
+  // position. Each nonce triggers at most one scroll, globally — the marker is
+  // module-scoped so a remount on a plain selection can't re-consume it.
   useEffect(() => {
-    if (!ready || nonce === 0 || scrolledFor.current === nonce) return;
-    scrolledFor.current = nonce;
+    if (!ready || nonce === 0 || lastConsumedSimilarNonce === nonce) return;
+    lastConsumedSimilarNonce = nonce;
     sectionRef.current?.scrollIntoView({
       behavior: prefersReducedMotion() ? "auto" : "smooth",
       block: "nearest",
