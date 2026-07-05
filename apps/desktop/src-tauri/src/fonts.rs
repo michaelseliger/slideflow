@@ -427,7 +427,7 @@ pub async fn list_library_fonts(app: AppHandle) -> Result<Vec<FontFamily>, Strin
         });
     }
 
-    rows.sort_by(|a, b| a.family.to_ascii_lowercase().cmp(&b.family.to_ascii_lowercase()));
+    rows.sort_by_key(|r| r.family.to_ascii_lowercase());
     Ok(rows)
 }
 
