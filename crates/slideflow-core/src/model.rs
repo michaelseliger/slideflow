@@ -75,6 +75,20 @@ pub struct SearchFilters {
     pub sort: Option<String>,
 }
 
+/// A user-saved search: a named query plus the filters that were active when it
+/// was saved. Selecting one restores both into the search box.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub id: i64,
+    pub name: String,
+    /// The advanced-syntax query string (may be empty for a filters-only search).
+    pub query: String,
+    /// Filters to re-apply alongside the query.
+    pub filters: SearchFilters,
+    /// When it was saved (unix seconds).
+    pub created_unix: i64,
+}
+
 /// A watched root folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootRecord {

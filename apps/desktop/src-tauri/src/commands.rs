@@ -19,7 +19,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::index::Library;
 use slideflow_core::model::{
-    ComposeReport, DeckRecord, FitMode, RootRecord, SearchFilters, SearchHit, SlidePick,
+    ComposeReport, DeckRecord, FitMode, RootRecord, SavedSearch, SearchFilters, SearchHit,
+    SlidePick,
     SlideRecord, StatsOverview,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
@@ -263,6 +264,43 @@ pub async fn get_deck_slides(
 ) -> Result<Vec<SlideRecord>, String> {
     let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
     lib.slides_for_deck(deck_id).map_err(e)
+}
+
+// ---------------------------------------------------------------------------
+// Saved searches
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_saved_searches(state: State<'_, AppState>) -> Result<Vec<SavedSearch>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.list_saved_searches().map_err(e)
+}
+
+#[tauri::command]
+pub async fn save_search(
+    state: State<'_, AppState>,
+    name: String,
+    query: String,
+    filters: SearchFilters,
+) -> Result<SavedSearch, String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.save_search(&name, &query, &filters).map_err(e)
+}
+
+#[tauri::command]
+pub async fn rename_saved_search(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.rename_saved_search(id, &name).map_err(e)
+}
+
+#[tauri::command]
+pub async fn delete_saved_search(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.delete_saved_search(id).map_err(e)
 }
 
 // ---------------------------------------------------------------------------

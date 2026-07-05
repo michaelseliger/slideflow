@@ -44,8 +44,8 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    DeckRecord, ExportRecord, RenderDropStat, RootRecord, ScanEvent, ScanIssue, ScanRecord,
-    SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord, StatsOverview,
+    DeckRecord, ExportRecord, RenderDropStat, RootRecord, SavedSearch, ScanEvent, ScanIssue,
+    ScanRecord, SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord, StatsOverview,
 };
 use crate::pptx::PresentationFile;
 
@@ -179,6 +179,7 @@ impl Library {
             let tx = self.conn.transaction()?;
             match next {
                 1 => tx.execute_batch(MIGRATIONS_V1)?,
+                2 => tx.execute_batch(MIGRATIONS_V2)?,
                 _ => unreachable!("no migration for schema v{next}"),
             }
             // PRAGMA cannot bind params — format the (internal, trusted) integer.
@@ -655,6 +656,72 @@ impl Library {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(hits)
+    }
+
+    // --- saved searches ------------------------------------------------------
+
+    /// All saved searches, in sidebar order (position, then insertion order).
+    pub fn list_saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, query, filters_json, created_unix \
+             FROM saved_searches ORDER BY position ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let filters_json: String = r.get(3)?;
+                Ok(SavedSearch {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    query: r.get(2)?,
+                    // Tolerate legacy/garbled JSON by falling back to no filters.
+                    filters: serde_json::from_str(&filters_json).unwrap_or_default(),
+                    created_unix: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Persist a new saved search at the end of the list; returns the stored row.
+    pub fn save_search(
+        &mut self,
+        name: &str,
+        query: &str,
+        filters: &SearchFilters,
+    ) -> Result<SavedSearch> {
+        let filters_json = serde_json::to_string(filters).unwrap_or_else(|_| "{}".into());
+        let created_unix = now_unix();
+        let position: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM saved_searches",
+            [],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO saved_searches(name, query, filters_json, position, created_unix) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![name, query, filters_json, position, created_unix],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(SavedSearch {
+            id,
+            name: name.to_string(),
+            query: query.to_string(),
+            filters: filters.clone(),
+            created_unix,
+        })
+    }
+
+    /// Rename a saved search (no-op if the id is unknown).
+    pub fn rename_saved_search(&mut self, id: i64, name: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE saved_searches SET name = ?2 WHERE id = ?1", params![id, name])?;
+        Ok(())
+    }
+
+    /// Delete a saved search (no-op if the id is unknown).
+    pub fn delete_saved_search(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM saved_searches WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     fn browse(&self, filters: &SearchFilters, limit: i64) -> Result<Vec<SearchHit>> {
@@ -1229,7 +1296,7 @@ const INDEX_VERSION: u32 = 2;
 /// user_version` tracks the DB's current level; [`Library::migrate`] applies
 /// each `MIGRATIONS_V*` step in order until the DB reaches this. Distinct from
 /// INDEX_VERSION: a schema migration is not a re-parse trigger.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// v1 additive migration: new deck/scan/root columns and the diagnostics tables
 /// (scan_issues/render_issues/export_picks). ADD COLUMN NOT NULL all carry a
@@ -1263,6 +1330,22 @@ CREATE TABLE IF NOT EXISTS export_picks(
     slide_index INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_export_picks_deck ON export_picks(deck_path);
+"#;
+
+/// v2 additive migration. Each wave-2 workstream appends its own clearly-marked
+/// block here; keep it a single appendable batch (applied once per DB when
+/// user_version < 2). As with v1, everything is idempotent (`IF NOT EXISTS`) and
+/// must never also appear in the frozen v0 SCHEMA const.
+const MIGRATIONS_V2: &str = r#"
+-- WS-A: saved searches
+CREATE TABLE IF NOT EXISTS saved_searches(
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    query        TEXT NOT NULL,
+    filters_json TEXT NOT NULL DEFAULT '{}',
+    position     INTEGER NOT NULL DEFAULT 0,
+    created_unix INTEGER NOT NULL
+);
 "#;
 
 fn content_hash(mtime: i64, size: i64) -> String {
@@ -2361,6 +2444,142 @@ mod tests {
         let roots = lib.roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert!(roots[0].exclude_globs.is_empty());
+    }
+
+    #[test]
+    fn saved_searches_crud_round_trip() {
+        let mut lib = Library::open_in_memory().unwrap();
+        assert!(lib.list_saved_searches().unwrap().is_empty());
+
+        let f1 = SearchFilters {
+            deck_query: Some("finance".into()),
+            modified_from: Some(1_700_000_000),
+            ..Default::default()
+        };
+        let a = lib.save_search("Finance decks", "title:revenue", &f1).unwrap();
+        let b = lib
+            .save_search(
+                "Starred",
+                "",
+                &SearchFilters { favorites_only: Some(true), ..Default::default() },
+            )
+            .unwrap();
+        assert_ne!(a.id, b.id);
+
+        let list = lib.list_saved_searches().unwrap();
+        assert_eq!(list.len(), 2);
+        // Insertion order preserved via `position`.
+        assert_eq!(list[0].id, a.id);
+        assert_eq!(list[0].name, "Finance decks");
+        assert_eq!(list[0].query, "title:revenue");
+        assert_eq!(list[0].filters.deck_query.as_deref(), Some("finance"));
+        assert_eq!(list[0].filters.modified_from, Some(1_700_000_000));
+        assert_eq!(list[1].name, "Starred");
+        assert_eq!(list[1].filters.favorites_only, Some(true));
+
+        lib.rename_saved_search(a.id, "Finance").unwrap();
+        assert_eq!(lib.list_saved_searches().unwrap()[0].name, "Finance");
+
+        lib.delete_saved_search(a.id).unwrap();
+        let list = lib.list_saved_searches().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, b.id);
+    }
+
+    #[test]
+    fn saved_searches_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+        let saved_id;
+        {
+            let mut lib = Library::open(&db_path).unwrap();
+            let f = SearchFilters {
+                path_prefix: Some("/Users/you/Decks".into()),
+                ..Default::default()
+            };
+            saved_id = lib.save_search("My folder", "deck:roadmap", &f).unwrap().id;
+        }
+        // Reopen the same file: the saved search survives.
+        let lib = Library::open(&db_path).unwrap();
+        let list = lib.list_saved_searches().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, saved_id);
+        assert_eq!(list[0].name, "My folder");
+        assert_eq!(list[0].query, "deck:roadmap");
+        assert_eq!(list[0].filters.path_prefix.as_deref(), Some("/Users/you/Decks"));
+    }
+
+    #[test]
+    fn migration_v1_to_v2_creates_saved_searches_preserving_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+
+        // Build a genuine v1 database: baseline + v1 migration, stamped at
+        // user_version 1 so the v2 migration has not yet run.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(MIGRATIONS_V1).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+
+            conn.execute("INSERT INTO roots(path) VALUES(?1)", params!["/decks/root"]).unwrap();
+            let root_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO decks(root_id, path, file_name, title, author, slide_count, \
+                 modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash, \
+                 first_seen_unix) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    root_id,
+                    "/decks/root/a.pptx",
+                    "a.pptx",
+                    "A",
+                    Option::<String>::None,
+                    1i64,
+                    1_700_000_000i64,
+                    1000i64,
+                    12_192_000i64,
+                    6_858_000i64,
+                    "hash",
+                    1_700_000_000i64,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO deck_favorites(deck_path, added_unix) VALUES(?1,?2)",
+                params!["/decks/root/a.pptx", 111i64],
+            )
+            .unwrap();
+
+            // saved_searches must not exist yet at v1.
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name='saved_searches'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0);
+        }
+
+        // Opening through Library runs the v1→v2 migration.
+        let mut lib = Library::open(&db_path).unwrap();
+        let version: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // Existing rows preserved across the migration.
+        assert_eq!(lib.decks().unwrap().len(), 1);
+        let df: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM deck_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(df, 1);
+
+        // The new table exists and is usable.
+        assert!(lib.list_saved_searches().unwrap().is_empty());
+        let s = lib.save_search("After migration", "revenue", &SearchFilters::default()).unwrap();
+        let list = lib.list_saved_searches().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, s.id);
     }
 
     #[test]
