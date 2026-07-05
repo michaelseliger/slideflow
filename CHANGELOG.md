@@ -6,6 +6,17 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 
 ### Added
 
+- **Semantic search (optional, fully local).** Enable AI search in Settings to find slides by meaning — "customer churn" finds the deck that says "Kundenabwanderung". A one-time ≈490 MB model download (multilingual, English + German); everything runs and stays on your machine, off by default. Search modes: exact, semantic, or hybrid. Each slide card gains *Find similar (AI)*, and the Inspector shows similar slides.
+- **Duplicate detection.** A new *Duplicates* view groups identical slides across decks (and, with AI enabled, near-identical ones), highlighting the newest copy. The tray warns when two picks are the same slide.
+- **Advanced search syntax.** `title:`, `deck:`, `notes:`, `body:` field scoping, `"exact phrases"`, `OR`, `NOT`/`-term`, and `before:`/`after:` date bounds — see the `?` help in the search box.
+- **Saved searches.** Bookmark the current query + filters from the search box; saved searches live in the sidebar with rename/delete.
+- **Multiple named trays.** Build several compositions in parallel: create, rename, switch, and delete trays from the tray header; undo/redo is tracked per tray. Your existing tray carries over as "Tray 1".
+- **Slide tags.** Tag slides from the Inspector (with autocomplete), browse tags in the sidebar, and filter search results by tag. Tags survive rescans and *Clear index & rebuild*.
+- **PDF and image export.** The export sheet now offers PowerPoint, PDF (selectable text, one page per slide), or PNG images (1280/1920/3840 px wide) — with real progress. Decks' embedded fonts are used when rasterizing.
+- **Mixed slide sizes, fixed on export.** Slides from differently-sized decks are now scaled onto the output canvas: same aspect ratio scales automatically; mixed aspect ratios ask — *Ensure fit* (letterbox) or *Maximize* (fill, may crop). Fonts, line widths, tables, and effects scale along, like PowerPoint itself does.
+- **Drag a slide out of the app** (macOS-first). Hold ⌥ and drag any slide card to Finder or an open PowerPoint window — it lands as a single-slide .pptx with full formatting. Or right-click → *Save slide as .pptx…* on any platform.
+- **Embedded fonts in previews.** Decks that embed their fonts now render previews with the real typefaces instead of fallbacks.
+- **`slideflow` CLI.** A companion command-line tool: `slideflow index/search/compose/render/stats` — scriptable library indexing, advanced-syntax search (`--json`), and deck composition without the app.
 - **Settings.** A proper preferences sheet (`⌘,`, command palette, or *Slideflow → Settings…* in the macOS menu bar): theme, grid density, library folders, per-folder exclude patterns, and update preferences. *About* is also reachable from the menu bar now.
 - **Clear index & rebuild.** One action (Settings or command palette) wipes the search index and preview cache and re-scans from scratch — the recovery tool for stale previews or a corrupted index. Starred slides and decks survive.
 - **Scan problems.** Files that fail to index no longer disappear silently: skip reasons are stored and listed in Statistics, and the sidebar shows a live skip count while scanning.
