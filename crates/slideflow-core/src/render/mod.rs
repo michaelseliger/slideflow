@@ -342,8 +342,10 @@ fn dedup_sorted(mut v: Vec<&'static str>) -> Vec<String> {
 }
 
 /// Escape a font-family name for use inside a CSS double-quoted string (the
-/// `@font-face` `font-family`). Real font names contain no XML/CSS specials, so
-/// this only guards the backslash and quote that would corrupt the string.
+/// `@font-face` `font-family`): guards the backslash and quote that would
+/// corrupt the CSS string. This is the CSS layer only — XML safety of the
+/// whole `<style>` content (`&`, `<`, …) is handled separately at assembly
+/// ([`Ctx::font_face_defs`] runs the finished CSS through `xml_escape`).
 fn css_font_family(name: &str) -> String {
     name.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -475,7 +477,12 @@ impl Ctx<'_> {
         if css.is_empty() {
             String::new()
         } else {
-            format!("<style>{css}</style>")
+            // XML-escape the assembled CSS: typeface names come from untrusted
+            // .pptx files, and a raw `&`/`<` inside <style> would make the whole
+            // SVG unparseable. The XML parser decodes entities in element
+            // content before the CSS parser ever sees it, so CSS semantics are
+            // unchanged (and base64 contains no escapable characters).
+            format!("<style>{}</style>", crate::fixtures::xml_escape(&css))
         }
     }
 
@@ -2078,10 +2085,65 @@ mod tests {
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
 
         assert_eq!(svg.matches("@font-face").count(), 1, "exactly one @font-face: {svg}");
-        assert!(svg.contains(r#"font-family:"Grafton""#), "font-face names the family: {svg}");
+        // The <style> content is XML-escaped, so the CSS quotes appear as &quot;.
+        assert!(
+            svg.contains("font-family:&quot;Grafton&quot;"),
+            "font-face names the family: {svg}"
+        );
         assert!(svg.contains("src:url(data:font/ttf;base64,"), "base64 payload embedded: {svg}");
         assert!(svg.contains("<style>@font-face"), "@font-face lives in a <style> in <defs>: {svg}");
         assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn embedded_font_family_with_xml_specials_stays_parseable() {
+        // Typeface names come from untrusted decks: a family containing XML
+        // specials must not corrupt the SVG. The run references it via a:latin
+        // (entity-encoded, as a real pptx stores it).
+        let family = r#"A&B "Narrow" <X>"#;
+        let deck = DeckSpec::new("Deck")
+            .embed_font(family, vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("x"));
+        let paras = format!(
+            r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="{}"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#,
+            crate::fixtures::xml_escape(family)
+        );
+        let shapes = textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", &paras);
+        let pf = deck_with_slide1(deck, &shapes);
+
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches("@font-face").count(), 1, "one @font-face: {svg}");
+
+        // The whole SVG must remain well-formed XML…
+        let doc = roxmltree::Document::parse(&svg).expect("SVG with escaped @font-face parses");
+
+        // …the raw <style> content must carry no unescaped specials…
+        let start = svg.find("<style>").unwrap() + "<style>".len();
+        let end = svg.find("</style>").unwrap();
+        let raw = &svg[start..end];
+        assert!(!raw.contains('<'), "raw '<' inside <style>: {raw}");
+        for (i, _) in raw.match_indices('&') {
+            let rest = &raw[i..];
+            assert!(
+                rest.starts_with("&amp;")
+                    || rest.starts_with("&lt;")
+                    || rest.starts_with("&gt;")
+                    || rest.starts_with("&quot;"),
+                "raw '&' inside <style> at byte {i}: {raw}"
+            );
+        }
+
+        // …and the decoded content must be the intended CSS (family quoted,
+        // inner quotes CSS-escaped, XML specials restored verbatim).
+        let style_text = doc
+            .descendants()
+            .find(|n| n.has_tag_name("style"))
+            .and_then(|n| n.text())
+            .expect("style element with text content");
+        assert!(
+            style_text.contains(r#"font-family:"A&B \"Narrow\" <X>""#),
+            "decoded CSS carries the exact family: {style_text}"
+        );
     }
 
     #[test]
