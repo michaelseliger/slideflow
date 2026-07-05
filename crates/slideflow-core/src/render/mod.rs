@@ -66,7 +66,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 3;
+pub const RENDER_VERSION: u32 = 4;
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
@@ -470,10 +470,26 @@ impl Ctx<'_> {
             .map(parse_xfrm)
             .or_else(|| ph.as_ref().and_then(|p| self.inherited_xfrm(p)));
         let Some(x) = xfrm else { return };
-        let rect = tf.apply(&x);
-        if rect.w <= 0.0 || rect.h <= 0.0 {
-            // Still may carry text with inherited geometry; skip if truly empty.
+        let mut rect = tf.apply(&x);
+        let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom").or_else(|| ch(s, "custGeom")));
+        // Purely horizontal/vertical connectors legitimately have zero extent
+        // along one axis — they're stroked, not filled. Anything else with a
+        // degenerate rect is skipped.
+        let line_like = geom_node
+            .and_then(|g| a(g, "prst"))
+            .is_some_and(geometry::is_line_preset);
+        if (rect.w <= 0.0 || rect.h <= 0.0) && !line_like {
             return;
+        }
+
+        // spAutoFit: PowerPoint recomputes the shape extent from the laid-out
+        // text whenever a deck is opened; the STORED extent reflects the
+        // author's fonts. With substituted (usually wider) fonts our layout can
+        // exceed it, leaving the fill short of the text — so grow, never shrink.
+        if let Some(tb) = ch(node, "txBody") {
+            if ch(tb, "bodyPr").is_some_and(|b| ch(b, "spAutoFit").is_some()) {
+                rect = self.autofit_grow(Some(node), tb, &rect, ph.as_ref());
+            }
         }
 
         // Explicit spPr fill/line wins; otherwise fall back to the shape's
@@ -490,9 +506,8 @@ impl Ctx<'_> {
         if stroke.is_none() && !sp_pr.is_some_and(Ctx::explicit_no_line) {
             stroke = self.resolve_style_stroke(node);
         }
-        let geom_node = sp_pr.and_then(|s| ch(s, "prstGeom").or_else(|| ch(s, "custGeom")));
         // A picture fill (`a:blipFill`) is painted after the geometry, clipped
-        // to the shape rect.
+        // to the shape geometry (rect, or a dedicated clip for fancier shapes).
         let blip_fill = sp_pr.and_then(|s| ch(s, "blipFill"));
 
         let transform = rect.svg_transform(&x);
@@ -518,7 +533,8 @@ impl Ctx<'_> {
             }
         }
         if let Some(bf) = blip_fill {
-            self.emit_blip_fill(bf, &rect);
+            let geom_clip = self.geometry_clip(geom_node, &rect);
+            self.emit_blip_fill(bf, &rect, geom_clip);
         }
 
         // Text body.
@@ -562,6 +578,20 @@ impl Ctx<'_> {
             if let Some(m) = match_placeholder(src, ph) {
                 if let Some(x) = &m.xfrm {
                     return Some(x.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// The raw `a:custGeom`/`a:prstGeom` XML of the matching layout/master
+    /// placeholder — placeholder pictures inherit their (often diagonal-cut)
+    /// shape from the layout exactly like they inherit their xfrm.
+    pub(crate) fn inherited_geom_xml(&self, ph: &Placeholder) -> Option<String> {
+        for src in [&self.layout_phs, &self.master_phs] {
+            if let Some(m) = match_placeholder(src, ph) {
+                if let Some(g) = &m.geom_xml {
+                    return Some(g.clone());
                 }
             }
         }
@@ -851,6 +881,113 @@ mod tests {
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert!(svg.contains("<line "), "expected a <line> element: {svg}");
         assert!(svg.contains(r##"stroke="#FF0000""##), "line stroke color: {svg}");
+    }
+
+    #[test]
+    fn zero_extent_connector_draws_dotted_line_with_end_dot() {
+        // A purely vertical leader line: cx=0 (previously dropped as degenerate),
+        // 2pt white sysDot dash with round caps and an oval tail dot.
+        let shapes = r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="9" name="Leader"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x="914400" y="0"/><a:ext cx="0" cy="1828800"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="25400" cap="rnd"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:prstDash val="sysDot"/><a:headEnd type="none"/><a:tailEnd type="oval"/></a:ln></p:spPr></p:cxnSp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(r#"<line x1="72" y1="0" x2="72" y2="144""#),
+            "vertical zero-width connector renders: {svg}"
+        );
+        // sysDot (1,1)×2pt with round caps → dashes shrink, gaps grow by one width.
+        assert!(svg.contains(r#"stroke-dasharray="0.1 4""#), "dash pattern: {svg}");
+        assert!(svg.contains(r#"stroke-linecap="round""#), "round cap: {svg}");
+        assert!(
+            svg.contains(r##"<circle cx="72" cy="144" r="3" fill="#FF0000"/>"##),
+            "oval tail end dot: {svg}"
+        );
+        assert!(!svg.contains(r#"cy="0" r="3""#), "no head dot (type=none): {svg}");
+    }
+
+    #[test]
+    fn spautofit_grows_fill_rect_to_fit_text() {
+        // Stored extent fits ONE 18pt line (authored with narrower fonts); our
+        // layout wraps the text to several lines. The white fill must grow with
+        // it instead of leaving text spilling out of a one-line bar.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="H"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></p:spPr><p:txBody><a:bodyPr wrap="square" anchor="ctr"><a:spAutoFit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE" sz="1800"/><a:t>Wir sind Spezialisten für digitale Strategieprojekte und mehr</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        // Heights of every white-filled rect (slide background = 540 is one).
+        let heights: Vec<f64> = svg
+            .match_indices(r##" fill="#FFFFFF""##)
+            .filter_map(|(i, _)| {
+                let pre = &svg[..i];
+                let h = pre.rfind("height=\"")? + 8;
+                pre[h..].trim_end_matches('"').parse().ok()
+            })
+            .collect();
+        // Stored: 400000 EMU ≈ 31.5pt for one 18pt line. Grown: ≥3 lines.
+        assert!(
+            !heights.iter().any(|h| (*h - 31.5).abs() < 1.0),
+            "stored one-line height must be replaced (heights={heights:?}): {svg}"
+        );
+        assert!(
+            heights.iter().any(|h| *h > 60.0 && *h < 400.0),
+            "spAutoFit grew the fill rect (heights={heights:?}): {svg}"
+        );
+    }
+
+    #[test]
+    fn narrow_typeface_gets_narrow_fallbacks_and_tighter_wrap() {
+        let render = |face: &str| {
+            let paras = format!(
+                r#"<a:p><a:r><a:rPr sz="2000"><a:latin typeface="{face}"/></a:rPr><a:t>MMMMM MMMMM</a:t></a:r></a:p>"#
+            );
+            let shapes = textbox(
+                r#"<a:off x="0" y="0"/><a:ext cx="2151380" cy="4000000"/>"#,
+                "<a:bodyPr/>",
+                &paras,
+            );
+            let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+            render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap()
+        };
+        let narrow = render("Aptos Narrow");
+        let regular = render("Aptos");
+        assert!(
+            narrow.contains("Aptos Narrow, Arial Narrow,"),
+            "narrow faces fall back through narrow families: {narrow}"
+        );
+        assert!(
+            !regular.contains("Arial Narrow"),
+            "regular faces keep the plain fallback stack: {regular}"
+        );
+        // Same text, same box: the regular-width estimate wraps into two lines,
+        // the ~18% tighter narrow estimate keeps it on one.
+        assert_eq!(narrow.matches("<text ").count(), 1, "narrow fits one line: {narrow}");
+        assert_eq!(regular.matches("<text ").count(), 2, "regular wraps: {regular}");
+    }
+
+    #[test]
+    fn placeholder_pic_inherits_layout_custgeom_clip() {
+        // Layout: picture placeholder idx=7 with a triangular custGeom (the
+        // "diagonal photo cut" pattern). Slide: placeholder pic with neither
+        // xfrm nor geometry of its own — both inherit, and the image is
+        // clipped to the triangle.
+        let layout = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {NS} type="titleAndBody"><p:cSld name="Pic"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="image"/><p:cNvSpPr/><p:nvPr><p:ph type="pic" sz="quarter" idx="7"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="0" y="100"/></a:moveTo><a:lnTo><a:pt x="50" y="0"/></a:lnTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+        );
+        let pic = r#"<p:pic><p:nvPicPr><p:cNvPr id="5" name="Bild 4"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr><p:ph type="pic" sz="quarter" idx="7"/></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr/></p:pic>"#;
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x").image()).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", wrap_slide(pic).into_bytes());
+        pkg.insert_part("ppt/slideLayouts/slideLayout1.xml", layout.into_bytes());
+        let pf = PresentationFile::from_package(pkg).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains(r#"<clipPath id="geomclip0"><path d="M0 100L50 0L100 100Z""#),
+            "triangle clip from the layout placeholder: {svg}"
+        );
+        assert!(
+            svg.contains(r##"<g clip-path="url(#geomclip0)">"##),
+            "image wrapped in the geometry clip: {svg}"
+        );
+        assert!(svg.contains("data:image/png;base64,"), "image embedded: {svg}");
     }
 
     #[test]

@@ -3,8 +3,23 @@
 
 use roxmltree::Node;
 
+use super::color::Rgba;
 use super::fill::{Fill, Stroke};
 use super::{a, ch, f_attr, fnum, Ctx, EMU_PER_PT};
+
+/// Stroke-only straight/bent connector presets: legitimately zero-extent
+/// along one axis (a purely horizontal/vertical line has `cx`/`cy` = 0).
+pub(crate) fn is_line_preset(prst: &str) -> bool {
+    matches!(
+        prst,
+        "line"
+            | "straightConnector1"
+            | "bentConnector2"
+            | "bentConnector3"
+            | "curvedConnector2"
+            | "curvedConnector3"
+    )
+}
 
 #[derive(Clone)]
 pub(crate) struct Xfrm {
@@ -61,6 +76,7 @@ impl Transform {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Rect {
     pub(crate) x: f64,
     pub(crate) y: f64,
@@ -111,9 +127,10 @@ impl Ctx<'_> {
         let mut stroke_attrs = String::new();
         if let Some(s) = stroke {
             stroke_attrs = format!(
-                r#" stroke="{}" stroke-width="{}""#,
+                r#" stroke="{}" stroke-width="{}"{}"#,
                 s.color.hex(),
-                fnum(s.width_pt.max(0.25))
+                fnum(s.width_pt.max(0.25)),
+                s.deco_attrs()
             );
         }
 
@@ -301,13 +318,12 @@ impl Ctx<'_> {
             // Straight lines / connectors: the main diagonal of the bounding box.
             // flipH/flipV (applied by the wrapping <g transform>) mirror it to
             // the correct diagonal, so we always draw top-left → bottom-right.
-            "line" | "straightConnector1" | "bentConnector2" | "bentConnector3"
-            | "curvedConnector2" | "curvedConnector3" => {
-                let (color, width) = stroke
-                    .map(|s| (s.color.hex(), s.width_pt.max(0.75)))
-                    .unwrap_or_else(|| ("#595959".to_string(), 1.0));
+            p if is_line_preset(p) => {
+                let (color, width, deco) = stroke
+                    .map(|s| (s.color.hex(), s.width_pt.max(0.75), s.deco_attrs()))
+                    .unwrap_or_else(|| ("#595959".to_string(), 1.0, String::new()));
                 self.body.push_str(&format!(
-                    r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{w}"/>"#,
+                    r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{w}"{deco}/>"#,
                     x1 = fnum(rect.x),
                     y1 = fnum(rect.y),
                     x2 = fnum(rect.x + rect.w),
@@ -315,6 +331,25 @@ impl Ctx<'_> {
                     c = color,
                     w = fnum(width)
                 ));
+                // Oval head/tail ends become filled dots (medium oval ≈ 3×width).
+                if let Some(s) = stroke.filter(|s| s.head_oval || s.tail_oval) {
+                    let r = 1.5 * width;
+                    let mut dot = |x: f64, y: f64| {
+                        self.body.push_str(&format!(
+                            r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c}"/>"#,
+                            cx = fnum(x),
+                            cy = fnum(y),
+                            r = fnum(r),
+                            c = s.color.hex()
+                        ));
+                    };
+                    if s.head_oval {
+                        dot(rect.x, rect.y);
+                    }
+                    if s.tail_oval {
+                        dot(rect.x + rect.w, rect.y + rect.h);
+                    }
+                }
             }
             // rect and any unimplemented preset fall back to a plain rectangle.
             _ => {
@@ -329,6 +364,31 @@ impl Ctx<'_> {
                 ));
             }
         }
+    }
+
+    /// Intern a `<clipPath>` shaped like `geom_node` scaled to `rect` and return
+    /// its id — pictures clip to it so non-rectangular shapes (custGeom diagonal
+    /// cuts, roundRects, …) crop their image instead of painting a full rect.
+    /// Plain rects return `None`: the caller's rectangular clip suffices.
+    pub(crate) fn geometry_clip(&mut self, geom_node: Option<Node>, rect: &Rect) -> Option<String> {
+        let g = geom_node?;
+        if g.tag_name().name() != "custGeom"
+            && matches!(a(g, "prst"), None | Some("rect"))
+        {
+            return None;
+        }
+        // Reuse the geometry renderer: draw fill-only into a scratch buffer
+        // (clipPath children contribute their geometry; paint attrs are moot).
+        let saved = std::mem::take(&mut self.body);
+        self.draw_geometry(Some(g), rect, &Fill::Solid(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }), None);
+        let shapes = std::mem::replace(&mut self.body, saved);
+        if shapes.is_empty() {
+            return None;
+        }
+        let id = format!("geomclip{}", self.clip_id);
+        self.clip_id += 1;
+        self.defs.push_str(&format!(r#"<clipPath id="{id}">{shapes}</clipPath>"#));
+        Some(id)
     }
 }
 

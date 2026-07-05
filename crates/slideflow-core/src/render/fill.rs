@@ -7,7 +7,7 @@ use super::{a, ch, fnum, Ctx, EMU_PER_PT};
 
 /// Namespace-carrying wrapper so a raw `fmtScheme` template substring (sliced
 /// out of the theme, without its inherited `xmlns:a`) re-parses on its own.
-const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+pub(crate) const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
 #[derive(Clone)]
 pub(crate) enum GradKind {
@@ -51,6 +51,83 @@ fn solid_attr(c: &Rgba) -> String {
 pub(crate) struct Stroke {
     pub(crate) color: Rgba,
     pub(crate) width_pt: f64,
+    /// `stroke-dasharray` values in points, derived from `a:prstDash`.
+    pub(crate) dash: Option<String>,
+    /// `stroke-linecap` for a non-butt `a:ln/@cap`.
+    pub(crate) cap: Option<&'static str>,
+    /// `a:headEnd`/`a:tailEnd type="oval"` — dot decorations on line ends.
+    pub(crate) head_oval: bool,
+    pub(crate) tail_oval: bool,
+}
+
+impl Stroke {
+    /// A plain solid stroke with no dash/cap/end decorations.
+    pub(crate) fn solid(color: Rgba, width_pt: f64) -> Stroke {
+        Stroke { color, width_pt, dash: None, cap: None, head_oval: false, tail_oval: false }
+    }
+
+    /// The dash/linecap attribute tail shared by every stroked element.
+    pub(crate) fn deco_attrs(&self) -> String {
+        let mut s = String::new();
+        if let Some(d) = &self.dash {
+            s.push_str(&format!(r#" stroke-dasharray="{d}""#));
+        }
+        if let Some(c) = self.cap {
+            s.push_str(&format!(r#" stroke-linecap="{c}""#));
+        }
+        s
+    }
+}
+
+/// Dash/cap/line-end properties of an `a:ln` element. The dash pattern is in
+/// multiples of the line width (PowerPoint's model); with round caps SVG
+/// extends each dash by half a width on both ends, so dashes shrink and gaps
+/// grow by one width to keep the drawn pattern PowerPoint-sized (a `sysDot`
+/// then degenerates to pure round dots, as intended).
+fn parse_ln_deco(ln: Node, width_pt: f64) -> (Option<String>, Option<&'static str>, bool, bool) {
+    let cap = match a(ln, "cap") {
+        Some("rnd") => Some("round"),
+        Some("sq") => Some("square"),
+        _ => None,
+    };
+    let round = cap == Some("round");
+    let dash = ch(ln, "prstDash")
+        .and_then(|d| a(d, "val"))
+        .and_then(|v| dash_array(v, width_pt, round));
+    let end_oval =
+        |name: &str| ch(ln, name).and_then(|e| a(e, "type")) == Some("oval");
+    (dash, cap, end_oval("headEnd"), end_oval("tailEnd"))
+}
+
+/// An `ST_PresetLineDashVal` as an SVG dash array (points). `solid`/unknown → None.
+fn dash_array(val: &str, width_pt: f64, round_cap: bool) -> Option<String> {
+    let pat: &[f64] = match val {
+        "dash" => &[4.0, 3.0],
+        "lgDash" => &[8.0, 3.0],
+        "dot" => &[1.0, 3.0],
+        "sysDash" => &[3.0, 1.0],
+        "sysDot" => &[1.0, 1.0],
+        "dashDot" => &[4.0, 3.0, 1.0, 3.0],
+        "lgDashDot" => &[8.0, 3.0, 1.0, 3.0],
+        "lgDashDotDot" => &[8.0, 3.0, 1.0, 3.0, 1.0, 3.0],
+        "sysDashDot" => &[3.0, 1.0, 1.0, 1.0],
+        "sysDashDotDot" => &[3.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        _ => return None,
+    };
+    let w = width_pt.max(0.75);
+    let parts: Vec<String> = pat
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let v = if round_cap {
+                if i % 2 == 0 { (v - 1.0).max(0.05) } else { v + 1.0 }
+            } else {
+                *v
+            };
+            fnum(v * w)
+        })
+        .collect();
+    Some(parts.join(" "))
 }
 
 /// Parse an `a:gradFill` element into a real gradient (or `Unspecified` if it
@@ -138,7 +215,8 @@ fn resolve_template_stroke(
     let color = ch(ln, "solidFill")
         .and_then(|f| f.children().find(|n| n.is_element()))
         .and_then(|cn| theme.parse_color_ph(cn, Some(ph)))?;
-    Some(Stroke { color, width_pt })
+    let (dash, cap, head_oval, tail_oval) = parse_ln_deco(ln, width_pt);
+    Some(Stroke { color, width_pt, dash, cap, head_oval, tail_oval })
 }
 
 /// The `r:embed` of a `<p:bg>`'s `bgPr/blipFill/blip` picture background, if any.
@@ -254,7 +332,8 @@ impl Ctx<'_> {
             .and_then(|w| w.parse::<f64>().ok())
             .map(|w| w / EMU_PER_PT)
             .unwrap_or(1.0);
-        Some(Stroke { color, width_pt })
+        let (dash, cap, head_oval, tail_oval) = parse_ln_deco(ln, width_pt);
+        Some(Stroke { color, width_pt, dash, cap, head_oval, tail_oval })
     }
 
     /// Resolve a shape's `p:style/a:fillRef` into a `Fill` (used when `spPr`

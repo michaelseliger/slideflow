@@ -25,7 +25,7 @@ base64 = "0.22"
 imagesize = "0.13"
 # Pure-Rust decode/resize/re-encode for downscaling grid thumbnails. No system
 # libraries, so the core crate still builds on Linux CI without GUI deps.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 
 [profile.release]
 lto = "thin"

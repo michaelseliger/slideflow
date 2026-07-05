@@ -54,8 +54,75 @@ struct Autofit {
     ln_spc_reduction: f64,
 }
 
+/// The result of the (pure) layout stage: placed lines plus the body-level
+/// knobs the emit stage and the autofit measurer both need.
+struct TextLayout {
+    lines: Vec<Line>,
+    anchor: String,
+    t_ins: f64,
+    b_ins: f64,
+    r_ins: f64,
+    wrap_none: bool,
+}
+
 impl Ctx<'_> {
     pub(crate) fn render_text(&mut self, sp: Option<Node>, tx_body: Node, rect: &Rect, ph: Option<&Placeholder>) {
+        let tl = self.layout_text(sp, tx_body, rect, ph);
+        if tl.lines.is_empty() {
+            return;
+        }
+
+        let total_h: f64 = tl.lines.iter().map(|l| l.space_before + l.advance).sum();
+        let block_top = match tl.anchor.as_str() {
+            "ctr" => rect.y + (rect.h - total_h) / 2.0,
+            "b" => rect.y + rect.h - total_h - tl.b_ins,
+            _ => rect.y + tl.t_ins,
+        };
+
+        // Deliberately NO clipPath: PowerPoint's default is overflow-visible
+        // (text simply spills out of its box unless autofit shrinks it), and our
+        // width estimates run slightly wide of the real fonts — clipping to the
+        // shape rect cut words mid-glyph where PowerPoint shows them whole.
+        let mut cursor = block_top;
+        for line in &tl.lines {
+            cursor += line.space_before;
+            if !line.spans.is_empty() {
+                let max_size = line.spans.iter().map(|s| s.size_pt).fold(0.0_f64, f64::max);
+                self.emit_line_highlight(line, rect, tl.r_ins, cursor, max_size);
+                let baseline = cursor + max_size * 0.8;
+                self.emit_line(line, rect, tl.r_ins, baseline);
+            }
+            cursor += line.advance;
+        }
+    }
+
+    /// For `a:spAutoFit` shapes: the stored extent, grown to hold the laid-out
+    /// text. PowerPoint re-runs this fit on open, so the stored extent reflects
+    /// the *author's* fonts; substituted (wider) fonts overflow it. Height grows
+    /// for wrapped text; width too when the box hugs a single unwrapped line
+    /// (`wrap="none"`). Never shrinks — when the text fits, the stored extent
+    /// is authoritative.
+    pub(crate) fn autofit_grow(&self, sp: Option<Node>, tx_body: Node, rect: &Rect, ph: Option<&Placeholder>) -> Rect {
+        let tl = self.layout_text(sp, tx_body, rect, ph);
+        if tl.lines.is_empty() {
+            return *rect;
+        }
+        let total_h: f64 = tl.lines.iter().map(|l| l.space_before + l.advance).sum();
+        let mut r = *rect;
+        r.h = r.h.max(total_h + tl.t_ins + tl.b_ins);
+        if tl.wrap_none {
+            let needed = tl
+                .lines
+                .iter()
+                .map(|l| l.left + l.spans.iter().map(|s| span_text_width(&s.text, s)).sum::<f64>())
+                .fold(0.0_f64, f64::max)
+                + tl.r_ins;
+            r.w = r.w.max(needed);
+        }
+        r
+    }
+
+    fn layout_text(&self, sp: Option<Node>, tx_body: Node, rect: &Rect, ph: Option<&Placeholder>) -> TextLayout {
         // A placeholder with no explicit `type` defaults to "body" (OOXML), so it
         // uses the body style bucket and the default bullet; a non-placeholder
         // shape stays `None` (no bucket bullet).
@@ -119,32 +186,7 @@ impl Ctx<'_> {
                 &mut lines,
             );
         }
-        if lines.is_empty() {
-            return;
-        }
-
-        let total_h: f64 = lines.iter().map(|l| l.space_before + l.advance).sum();
-        let block_top = match anchor.as_str() {
-            "ctr" => rect.y + (rect.h - total_h) / 2.0,
-            "b" => rect.y + rect.h - total_h - b_ins,
-            _ => rect.y + t_ins,
-        };
-
-        // Deliberately NO clipPath: PowerPoint's default is overflow-visible
-        // (text simply spills out of its box unless autofit shrinks it), and our
-        // width estimates run slightly wide of the real fonts — clipping to the
-        // shape rect cut words mid-glyph where PowerPoint shows them whole.
-        let mut cursor = block_top;
-        for line in &lines {
-            cursor += line.space_before;
-            if !line.spans.is_empty() {
-                let max_size = line.spans.iter().map(|s| s.size_pt).fold(0.0_f64, f64::max);
-                self.emit_line_highlight(line, rect, r_ins, cursor, max_size);
-                let baseline = cursor + max_size * 0.8;
-                self.emit_line(line, rect, r_ins, baseline);
-            }
-            cursor += line.advance;
-        }
+        TextLayout { lines, anchor, t_ins, b_ins, r_ins, wrap_none }
     }
 
     /// Draw an `a:highlight` marker box behind a line. SVG lays the tspans out
@@ -712,14 +754,38 @@ fn text_width(s: &str, size: f64) -> f64 {
 
 /// Span-aware width estimate: bold glyphs run ~5% wider than the regular
 /// Helvetica advances in the table, which was enough to make bold-heavy lines
-/// wrap later than PowerPoint does.
+/// wrap later than PowerPoint does. The family factor corrects for typefaces
+/// that run tighter than the Helvetica table — without it, decks authored in
+/// e.g. Aptos wrap lines the author fit on one, and text bursts out of
+/// author-hugged (`spAutoFit`) boxes.
 fn span_text_width(s: &str, span: &Span) -> f64 {
-    let w = text_width(s, span.size_pt);
+    let mut w = text_width(s, span.size_pt);
     if span.bold {
-        w * 1.05
-    } else {
-        w
+        w *= 1.05;
     }
+    w * span.typeface.as_deref().map_or(1.0, family_width_factor)
+}
+
+/// Advance-width correction vs the Helvetica table for families whose average
+/// advances differ notably. Narrow/condensed cuts run ~18% tighter; the modern
+/// Microsoft UI grotesques (Aptos, Segoe) ~5%; Calibri/Candara ~9%.
+fn family_width_factor(family: &str) -> f64 {
+    let f = family.to_ascii_lowercase();
+    if is_condensed(&f) {
+        0.82
+    } else if f.contains("calibri") || f.contains("candara") {
+        0.91
+    } else if f.contains("aptos") || f.contains("segoe") {
+        0.95
+    } else {
+        1.0
+    }
+}
+
+/// Narrow/condensed typeface family (Aptos Narrow, Arial Narrow, …).
+fn is_condensed(family: &str) -> bool {
+    let f = family.to_ascii_lowercase();
+    f.contains("narrow") || f.contains("condensed")
 }
 
 /// Approximate glyph advance in em units (Helvetica metrics / 1000). Non-ASCII
@@ -743,8 +809,15 @@ fn glyph_em(c: char) -> f64 {
 }
 
 /// Emit an SVG `font-family` list: the run's typeface first, then fallbacks.
+/// Narrow faces (Aptos Narrow ships only with Office 2024+) fall back through
+/// the widely available narrow families before any regular-width font — a
+/// regular fallback is ~20% wider and overflows author-fitted boxes.
 fn font_family(font: Option<&str>) -> String {
     match font.filter(|f| !f.is_empty()) {
+        Some(f) if is_condensed(f) => format!(
+            "{}, Arial Narrow, Liberation Sans Narrow, Helvetica Neue Condensed, Helvetica, Arial, sans-serif",
+            esc(f)
+        ),
         Some(f) => format!("{}, Helvetica, Arial, sans-serif", esc(f)),
         None => "Helvetica, Arial, sans-serif".to_string(),
     }

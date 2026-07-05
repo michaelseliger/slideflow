@@ -3,22 +3,25 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use roxmltree::Node;
+use roxmltree::{Document, Node};
 
 use crate::opc::resolve_target;
 
+use super::fill::A_NS;
 use super::geometry::{parse_xfrm, Rect, Transform};
 use super::{a, ch, fnum, Ctx};
 
 impl Ctx<'_> {
     pub(crate) fn render_pic(&mut self, node: Node, tf: Transform) {
         let sp_pr = ch(node, "spPr");
+        let ph = super::placeholder::shape_placeholder(node);
         // Placeholder pictures (p:ph type="pic") often carry no xfrm of their
         // own — geometry comes from the matching layout/master placeholder,
         // exactly like placeholder text shapes.
-        let xfrm = sp_pr.and_then(|s| ch(s, "xfrm")).map(parse_xfrm).or_else(|| {
-            super::placeholder::shape_placeholder(node).and_then(|ph| self.inherited_xfrm(&ph))
-        });
+        let xfrm = sp_pr
+            .and_then(|s| ch(s, "xfrm"))
+            .map(parse_xfrm)
+            .or_else(|| ph.as_ref().and_then(|p| self.inherited_xfrm(p)));
         let Some(x) = xfrm else { return };
         let rect = tf.apply(&x);
         if rect.w <= 0.0 || rect.h <= 0.0 {
@@ -28,6 +31,25 @@ impl Ctx<'_> {
         let open_g = !transform.is_empty();
         if open_g {
             self.body.push_str(&format!(r#"<g transform="{transform}">"#));
+        }
+
+        // Non-rectangular geometry — the picture's own, or inherited from the
+        // layout placeholder (templates cut photo placeholders into diagonals
+        // via custGeom) — clips the image.
+        let own_geom = sp_pr.and_then(|s| ch(s, "custGeom").or_else(|| ch(s, "prstGeom")));
+        let inh_xml: Option<String> = if own_geom.is_none() {
+            ph.as_ref()
+                .and_then(|p| self.inherited_geom_xml(p))
+                .map(|g| format!(r#"<sf xmlns:a="{A_NS}">{g}</sf>"#))
+        } else {
+            None
+        };
+        let inh_doc = inh_xml.as_deref().and_then(|xml| Document::parse(xml).ok());
+        let geom_node = own_geom
+            .or_else(|| inh_doc.as_ref().and_then(|d| d.root_element().first_element_child()));
+        let geom_clip = self.geometry_clip(geom_node, &rect);
+        if let Some(id) = &geom_clip {
+            self.body.push_str(&format!(r#"<g clip-path="url(#{id})">"#));
         }
 
         let data_uri = if self.options.embed_images {
@@ -40,6 +62,9 @@ impl Ctx<'_> {
             None => self.draw_image_placeholder(&rect),
         }
 
+        if geom_clip.is_some() {
+            self.body.push_str("</g>");
+        }
         if open_g {
             self.body.push_str("</g>");
         }
@@ -127,8 +152,13 @@ impl Ctx<'_> {
             return svg_is_safe(bytes)
                 .then(|| format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
         }
+        // EMF can't be rendered by browsers, but photo EMFs are metafile
+        // wrappers around one big embedded bitmap — extract and embed that.
+        if ct == "image/x-emf" || ct == "image/emf" {
+            return self.emf_data_uri(bytes);
+        }
         if !(ct == "image/png" || ct == "image/jpeg" || ct == "image/gif") {
-            return None; // unsupported raster (EMF/WMF/…): skip gracefully.
+            return None; // unsupported raster (WMF/TIFF/…): skip gracefully.
         }
         // Downscale oversized rasters for lightweight thumbnails; on any decode
         // failure fall through and embed the original bytes (never drop the image).
@@ -140,11 +170,34 @@ impl Ctx<'_> {
         Some(format!("data:{};base64,{}", ct, B64.encode(bytes)))
     }
 
+    /// Extract the embedded bitmap from an EMF and encode it as a data URI,
+    /// transcoding uncompressed DIBs to PNG and applying the thumbnail cap.
+    fn emf_data_uri(&self, bytes: &[u8]) -> Option<String> {
+        let (mime, mut data) = emf_embedded_bitmap(bytes)?;
+        let mut mime = mime.to_string();
+        if mime == "image/bmp" {
+            // Browsers would render BMP, but uncompressed DIBs are huge.
+            let img = image::load_from_memory(&data).ok()?;
+            let mut png = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+            data = png;
+            mime = "image/png".to_string();
+        }
+        if let Some(cap) = self.options.max_image_px {
+            if let Some((small_ct, small)) = downscale_raster(&data, cap) {
+                return Some(format!("data:{small_ct};base64,{}", B64.encode(&small)));
+            }
+        }
+        Some(format!("data:{mime};base64,{}", B64.encode(&data)))
+    }
+
     /// Paint a shape's `blipFill` as a clipped image filling `rect` (PowerPoint
-    /// stretches/crops a picture fill to the shape bounds — approximated here as
-    /// a rect-clipped `slice` image). Falls back to the gray photo placeholder
-    /// when not embedding or when the image can't be resolved.
-    pub(crate) fn emit_blip_fill(&mut self, blip_fill: Node, rect: &Rect) {
+    /// stretches/crops a picture fill to the shape bounds — approximated as a
+    /// clipped `slice` image). `geom_clip` (from [`Ctx::geometry_clip`]) clips
+    /// to non-rectangular shape geometry; otherwise a plain rect clip is used.
+    /// Falls back to the gray photo placeholder when not embedding or when the
+    /// image can't be resolved.
+    pub(crate) fn emit_blip_fill(&mut self, blip_fill: Node, rect: &Rect, geom_clip: Option<String>) {
         let uri = if self.options.embed_images {
             ch(blip_fill, "blip").and_then(|b| self.blip_data_uri(b))
         } else {
@@ -154,17 +207,20 @@ impl Ctx<'_> {
             self.draw_image_placeholder(rect);
             return;
         };
-        let cid = self.clip_id;
-        self.clip_id += 1;
-        self.defs.push_str(&format!(
-            r#"<clipPath id="blipclip{cid}"><rect x="{x}" y="{y}" width="{w}" height="{h}"/></clipPath>"#,
-            x = fnum(rect.x),
-            y = fnum(rect.y),
-            w = fnum(rect.w),
-            h = fnum(rect.h),
-        ));
+        let clip = geom_clip.unwrap_or_else(|| {
+            let cid = self.clip_id;
+            self.clip_id += 1;
+            self.defs.push_str(&format!(
+                r#"<clipPath id="blipclip{cid}"><rect x="{x}" y="{y}" width="{w}" height="{h}"/></clipPath>"#,
+                x = fnum(rect.x),
+                y = fnum(rect.y),
+                w = fnum(rect.w),
+                h = fnum(rect.h),
+            ));
+            format!("blipclip{cid}")
+        });
         self.body.push_str(&format!(
-            r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" clip-path="url(#blipclip{cid})" href="{uri}"/>"#,
+            r#"<image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" clip-path="url(#{clip})" href="{uri}"/>"#,
             x = fnum(rect.x),
             y = fnum(rect.y),
             w = fnum(rect.w),
@@ -293,6 +349,87 @@ fn mime_from_ext(part: &str) -> Option<String> {
         "png" => Some("image/png".into()),
         "jpg" | "jpeg" => Some("image/jpeg".into()),
         "gif" => Some("image/gif".into()),
+        "emf" => Some("image/x-emf".into()),
+        _ => None,
+    }
+}
+
+/// Find the largest bitmap embedded in an EMF's records. Photo EMFs are
+/// metafile wrappers around one big DIB drawn via `EMR_STRETCHDIBITS` (or
+/// siblings); the DIB's `biCompression` decides the payload: `BI_JPEG`/`BI_PNG`
+/// carry a ready-to-embed stream, `BI_RGB`/`BI_BITFIELDS` get a 14-byte
+/// `BITMAPFILEHEADER` prepended so the bits parse as a regular BMP. Vector-only
+/// EMFs yield `None` (the caller falls back to the gray placeholder).
+fn emf_embedded_bitmap(b: &[u8]) -> Option<(&'static str, Vec<u8>)> {
+    let u32_at = |o: usize| -> Option<u32> {
+        b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+    };
+    // EMR_HEADER: iType 1, " EMF" signature at offset 40.
+    if u32_at(0)? != 1 || b.get(40..44)? != b" EMF" {
+        return None;
+    }
+    let mut best: Option<(&'static str, Vec<u8>)> = None;
+    let mut best_len = 0usize;
+    let mut off = 0usize;
+    while off + 8 <= b.len() {
+        let (Some(typ), Some(size)) = (u32_at(off), u32_at(off + 4).map(|v| v as usize)) else {
+            break;
+        };
+        if size < 8 || size % 4 != 0 || off + size > b.len() {
+            break;
+        }
+        // (offBmiSrc, cbBmiSrc, offBitsSrc, cbBitsSrc) positions per record type.
+        let dib_fields = match typ {
+            80 | 81 => Some(48), // EMR_SETDIBITSTODEVICE / EMR_STRETCHDIBITS
+            76 | 77 => Some(84), // EMR_BITBLT / EMR_STRETCHBLT
+            14 => break,         // EMR_EOF
+            _ => None,
+        };
+        if let Some(f) = dib_fields {
+            let get = |i: usize| u32_at(off + f + i * 4).map(|v| v as usize);
+            if let (Some(off_bmi), Some(cb_bmi), Some(off_bits), Some(cb_bits)) =
+                (get(0), get(1), get(2), get(3))
+            {
+                let bmi = b.get(off + off_bmi..off + off_bmi + cb_bmi);
+                let bits = b.get(off + off_bits..off + off_bits + cb_bits);
+                if let (Some(bmi), Some(bits)) = (bmi, bits) {
+                    if bits.len() > best_len {
+                        if let Some(found) = dib_to_image(bmi, bits) {
+                            best_len = bits.len();
+                            best = Some(found);
+                        }
+                    }
+                }
+            }
+        }
+        off += size;
+    }
+    best
+}
+
+/// Convert a DIB (`BITMAPINFO` + bits) into an embeddable image, keyed by
+/// `biCompression`.
+fn dib_to_image(bmi: &[u8], bits: &[u8]) -> Option<(&'static str, Vec<u8>)> {
+    if bmi.len() < 20 || bits.is_empty() {
+        return None;
+    }
+    let compression = u32::from_le_bytes(bmi[16..20].try_into().unwrap());
+    match compression {
+        4 => Some(("image/jpeg", bits.to_vec())), // BI_JPEG
+        5 => Some(("image/png", bits.to_vec())),  // BI_PNG
+        0 | 3 => {
+            // BI_RGB / BI_BITFIELDS: prepend a BITMAPFILEHEADER → valid BMP.
+            let off_bits = 14 + bmi.len() as u32;
+            let file_size = off_bits + bits.len() as u32;
+            let mut bmp = Vec::with_capacity(file_size as usize);
+            bmp.extend_from_slice(b"BM");
+            bmp.extend_from_slice(&file_size.to_le_bytes());
+            bmp.extend_from_slice(&0u32.to_le_bytes());
+            bmp.extend_from_slice(&off_bits.to_le_bytes());
+            bmp.extend_from_slice(bmi);
+            bmp.extend_from_slice(bits);
+            Some(("image/bmp", bmp))
+        }
         _ => None,
     }
 }
@@ -332,8 +469,79 @@ pub(crate) fn downscale_raster(bytes: &[u8], cap: u32) -> Option<(String, Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_src_rect, svg_blip_embed, svg_is_safe};
+    use super::{emf_embedded_bitmap, parse_src_rect, svg_blip_embed, svg_is_safe};
     use roxmltree::Document;
+
+    /// Minimal EMF: EMR_HEADER + one EMR_STRETCHDIBITS carrying `bmi`+`bits`
+    /// + EMR_EOF.
+    fn emf_with_stretchdibits(bmi: &[u8], bits: &[u8]) -> Vec<u8> {
+        let mut hdr = vec![0u8; 88];
+        hdr[0..4].copy_from_slice(&1u32.to_le_bytes()); // EMR_HEADER
+        hdr[4..8].copy_from_slice(&88u32.to_le_bytes());
+        hdr[40..44].copy_from_slice(b" EMF");
+        let off_bmi = 80usize;
+        let off_bits = off_bmi + bmi.len();
+        let size = (80 + bmi.len() + bits.len() + 3) & !3;
+        let mut rec = vec![0u8; size];
+        rec[0..4].copy_from_slice(&81u32.to_le_bytes()); // EMR_STRETCHDIBITS
+        rec[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+        rec[48..52].copy_from_slice(&(off_bmi as u32).to_le_bytes());
+        rec[52..56].copy_from_slice(&(bmi.len() as u32).to_le_bytes());
+        rec[56..60].copy_from_slice(&(off_bits as u32).to_le_bytes());
+        rec[60..64].copy_from_slice(&(bits.len() as u32).to_le_bytes());
+        rec[off_bmi..off_bmi + bmi.len()].copy_from_slice(bmi);
+        rec[off_bits..off_bits + bits.len()].copy_from_slice(bits);
+        let mut eof = vec![0u8; 20];
+        eof[0..4].copy_from_slice(&14u32.to_le_bytes()); // EMR_EOF
+        eof[4..8].copy_from_slice(&20u32.to_le_bytes());
+        [hdr, rec, eof].concat()
+    }
+
+    /// A 40-byte BITMAPINFOHEADER with the given `biCompression`.
+    fn bmi(width: i32, height: i32, bit_count: u16, compression: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 40];
+        b[0..4].copy_from_slice(&40u32.to_le_bytes());
+        b[4..8].copy_from_slice(&width.to_le_bytes());
+        b[8..12].copy_from_slice(&height.to_le_bytes());
+        b[12..14].copy_from_slice(&1u16.to_le_bytes());
+        b[14..16].copy_from_slice(&bit_count.to_le_bytes());
+        b[16..20].copy_from_slice(&compression.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn emf_extracts_embedded_jpeg() {
+        let jpeg = b"\xFF\xD8\xFFfake jpeg payload\xFF\xD9".to_vec();
+        let emf = emf_with_stretchdibits(&bmi(100, 100, 24, 4 /* BI_JPEG */), &jpeg);
+        let (mime, data) = emf_embedded_bitmap(&emf).expect("bitmap found");
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(data, jpeg);
+    }
+
+    #[test]
+    fn emf_wraps_rgb_dib_as_decodable_bmp() {
+        // 1×1 24-bit BI_RGB: one BGR pixel padded to a 4-byte row.
+        let emf = emf_with_stretchdibits(&bmi(1, 1, 24, 0 /* BI_RGB */), &[0, 0, 255, 0]);
+        let (mime, data) = emf_embedded_bitmap(&emf).expect("bitmap found");
+        assert_eq!(mime, "image/bmp");
+        let img = image::load_from_memory(&data).expect("BMP decodes");
+        assert_eq!((img.width(), img.height()), (1, 1));
+    }
+
+    #[test]
+    fn emf_without_bitmap_yields_none() {
+        // Header + EOF only (a vector-only metafile).
+        let mut hdr = vec![0u8; 88];
+        hdr[0..4].copy_from_slice(&1u32.to_le_bytes());
+        hdr[4..8].copy_from_slice(&88u32.to_le_bytes());
+        hdr[40..44].copy_from_slice(b" EMF");
+        let mut eof = vec![0u8; 20];
+        eof[0..4].copy_from_slice(&14u32.to_le_bytes());
+        eof[4..8].copy_from_slice(&20u32.to_le_bytes());
+        let emf = [hdr, eof].concat();
+        assert!(emf_embedded_bitmap(&emf).is_none());
+        assert!(emf_embedded_bitmap(b"not an emf at all").is_none());
+    }
 
     #[test]
     fn parse_src_rect_reads_fractions() {

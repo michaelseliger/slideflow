@@ -214,7 +214,7 @@ impl Ctx<'_> {
             .and_then(|v| v.parse::<f64>().ok())
             .map(|w| w / EMU_PER_PT)
             .unwrap_or(1.0);
-        Some(Stroke { color, width_pt })
+        Some(Stroke::solid(color, width_pt))
     }
 }
 
