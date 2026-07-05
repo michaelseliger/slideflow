@@ -56,6 +56,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11
+      # Node 22 (latest 22.x, ≥ 22.6) is required: the tray-model test step below
+      # runs TypeScript directly via `node --experimental-strip-types`.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -70,6 +72,13 @@ jobs:
       - name: Build frontend
         working-directory: apps/desktop
         run: pnpm build
+      # Pure-logic tray-model tests (multi-tray migration, per-tray undo
+      # isolation, delete-active behaviour). No JS test framework is wired in
+      # this app; the file is plain assertions run straight by Node's
+      # type-stripping (requires Node ≥ 22.6).
+      - name: Tray model tests
+        working-directory: apps/desktop
+        run: pnpm test:tray
 
   # Lint. NON-BLOCKING (continue-on-error): slideflow-core currently trips a
   # handful of clippy lints (e.g. while_let_loop, enum_variant_names) that must
