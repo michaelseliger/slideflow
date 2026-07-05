@@ -190,6 +190,7 @@ impl Library {
             match next {
                 1 => tx.execute_batch(MIGRATIONS_V1)?,
                 2 => tx.execute_batch(MIGRATIONS_V2)?,
+                3 => tx.execute_batch(MIGRATIONS_V3)?,
                 _ => unreachable!("no migration for schema v{next}"),
             }
             // PRAGMA cannot bind params — format the (internal, trusted) integer.
@@ -1484,7 +1485,7 @@ const INDEX_VERSION: u32 = 2;
 /// user_version` tracks the DB's current level; [`Library::migrate`] applies
 /// each `MIGRATIONS_V*` step in order until the DB reaches this. Distinct from
 /// INDEX_VERSION: a schema migration is not a re-parse trigger.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// v1 additive migration: new deck/scan/root columns and the diagnostics tables
 /// (scan_issues/render_issues/export_picks). ADD COLUMN NOT NULL all carry a
@@ -1520,10 +1521,14 @@ CREATE TABLE IF NOT EXISTS export_picks(
 CREATE INDEX IF NOT EXISTS idx_export_picks_deck ON export_picks(deck_path);
 "#;
 
-/// v2 additive migration. Each wave-2 workstream appends its own clearly-marked
-/// block here; keep it a single appendable batch (applied once per DB when
-/// user_version < 2). As with v1, everything is idempotent (`IF NOT EXISTS`) and
-/// must never also appear in the frozen v0 SCHEMA const.
+/// v2 additive migration: saved searches.
+///
+/// RULE (learned the hard way mid-wave-2): a `MIGRATIONS_V*` batch is FROZEN
+/// the moment any database anywhere may have reached that version — never
+/// append to one; add a new version instead. A DB stamped at version N will
+/// never re-run batch N, so late additions to it silently never apply.
+/// Idempotent DDL (`IF NOT EXISTS`) is still required, so a DB that picked up
+/// parts of a later batch early heals instead of erroring.
 const MIGRATIONS_V2: &str = r#"
 -- WS-A: saved searches
 CREATE TABLE IF NOT EXISTS saved_searches(
@@ -1534,10 +1539,15 @@ CREATE TABLE IF NOT EXISTS saved_searches(
     position     INTEGER NOT NULL DEFAULT 0,
     created_unix INTEGER NOT NULL
 );
--- WS-E: tags. Slide tags are keyed by (deck_path, slide_index) — the favorites
--- convention — so they survive rescans (which delete + reinsert slide rows) and
--- Clear & Rebuild (which never touches this table). `tags.name` is UNIQUE and
--- case-insensitive; slide_tags cascades when a tag is deleted.
+"#;
+
+/// v3 additive migration: slide tags. Keyed by (deck_path, slide_index) — the
+/// favorites convention — so they survive rescans (which delete + reinsert
+/// slide rows) and Clear & Rebuild (which never touches these tables).
+/// `tags.name` is UNIQUE and case-insensitive; slide_tags cascades when a tag
+/// is deleted.
+const MIGRATIONS_V3: &str = r#"
+-- WS-E: tags
 CREATE TABLE IF NOT EXISTS tags(
     id           INTEGER PRIMARY KEY,
     name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -2834,10 +2844,9 @@ mod tests {
             assert_eq!(exists, 0);
         }
 
-        // Opening through Library runs the v1→v2 migration.
+        // Opening through Library runs every pending migration.
         let mut lib = Library::open(&db_path).unwrap();
         let version: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 2);
         assert_eq!(version, SCHEMA_VERSION);
 
         // Existing rows preserved across the migration.
@@ -3322,8 +3331,36 @@ mod tests {
         assert_eq!(lib.search("office", &SearchFilters::default()).unwrap().len(), 1);
     }
 
+    /// Simulates the mid-wave dev breakage that motivated the one-version-per-
+    /// change rule: a database stamped at user_version 2 (saved searches
+    /// applied) but WITHOUT the tags tables must gain them on reopen via the
+    /// v3 step — never crash on a missing table.
     #[test]
-    fn migration_v1_to_v2_creates_tags_and_keeps_data() {
+    fn reopening_heals_db_stamped_v2_without_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+        drop(Library::open(&db_path).unwrap()); // fresh DB, fully migrated
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_slide_tags_slide;
+                 DROP TABLE slide_tags;
+                 DROP TABLE tags;
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+
+        let lib = Library::open(&db_path).unwrap();
+        assert!(lib.list_tags().unwrap().is_empty(), "tags tables recreated by the v3 step");
+        let version: i64 =
+            lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_v1_to_latest_creates_tags_and_keeps_data() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lib.db");
 
@@ -3374,10 +3411,10 @@ mod tests {
             assert_eq!(v, 1);
         }
 
-        // Opening through Library runs the v1 -> v2 migration.
+        // Opening through Library runs every pending migration.
         let lib = Library::open(&db_path).unwrap();
         let version: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Tags tables now exist and are empty.
         for table in ["tags", "slide_tags"] {
