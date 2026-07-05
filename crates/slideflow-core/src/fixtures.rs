@@ -81,6 +81,14 @@ impl SlideSpec {
     }
 }
 
+/// One embedded font family for [`DeckSpec::embed_font`]: the declared
+/// `typeface` plus its `(bold, italic, bytes)` variants.
+#[derive(Debug, Clone)]
+pub struct EmbeddedFontSpec {
+    pub family: String,
+    pub variants: Vec<(bool, bool, Vec<u8>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeckSpec {
     pub title: String,
@@ -93,6 +101,8 @@ pub struct DeckSpec {
     pub slide_cx: i64,
     pub slide_cy: i64,
     pub slides: Vec<SlideSpec>,
+    /// Fonts embedded via `<p:embeddedFontLst>` + `/ppt/fonts/*.fntdata`.
+    pub embedded_fonts: Vec<EmbeddedFontSpec>,
 }
 
 impl DeckSpec {
@@ -105,6 +115,7 @@ impl DeckSpec {
             slide_cx: 12192000,
             slide_cy: 6858000,
             slides: Vec::new(),
+            embedded_fonts: Vec::new(),
         }
     }
     pub fn author(mut self, author: impl Into<String>) -> Self {
@@ -130,6 +141,16 @@ impl DeckSpec {
         self
     }
 
+    /// Embed a font family under `<p:embeddedFontLst>`. `variants` is a list of
+    /// `(bold, italic, bytes)`; each becomes a `regular`/`bold`/`italic`/
+    /// `boldItalic` element pointing at a `/ppt/fonts/*.fntdata` part holding
+    /// `bytes` verbatim (as PowerPoint stores raw TTF/OTF). See [`sample_ttf`]
+    /// for valid test bytes.
+    pub fn embed_font(mut self, family: impl Into<String>, variants: Vec<(bool, bool, Vec<u8>)>) -> Self {
+        self.embedded_fonts.push(EmbeddedFontSpec { family: family.into(), variants });
+        self
+    }
+
     pub fn write_to(&self, path: &Path) -> crate::Result<()> {
         std::fs::write(path, self.build()).map_err(|e| crate::Error::io(path, e))
     }
@@ -147,6 +168,9 @@ impl DeckSpec {
         ct.ensure_default("xml", "application/xml");
         if any_image {
             ct.ensure_default("png", "image/png");
+        }
+        if !self.embedded_fonts.is_empty() {
+            ct.ensure_default("fntdata", "application/x-fontdata");
         }
         ct.set_override("ppt/presentation.xml", CT_PRESENTATION);
         ct.set_override("ppt/slideMasters/slideMaster1.xml", CT_MASTER);
@@ -231,6 +255,37 @@ impl DeckSpec {
         } else {
             String::new()
         };
+        // Embedded fonts: one <p:embeddedFont> per family, a font relationship +
+        // `/ppt/fonts/fontN.fntdata` part per variant.
+        let mut embedded_font_lst = String::new();
+        if !self.embedded_fonts.is_empty() {
+            let mut k = 0usize;
+            embedded_font_lst.push_str("<p:embeddedFontLst>");
+            for ef in &self.embedded_fonts {
+                embedded_font_lst
+                    .push_str(&format!(r#"<p:embeddedFont><p:font typeface="{}"/>"#, xml_escape(&ef.family)));
+                for (bold, italic, bytes) in &ef.variants {
+                    k += 1;
+                    let rid = format!("rIdF{k}");
+                    let elem = match (*bold, *italic) {
+                        (false, false) => "regular",
+                        (true, false) => "bold",
+                        (false, true) => "italic",
+                        (true, true) => "boldItalic",
+                    };
+                    embedded_font_lst.push_str(&format!(r#"<p:{elem} r:id="{rid}"/>"#));
+                    pres_rels.push(Relationship {
+                        id: rid,
+                        rel_type: rel_type::FONT.into(),
+                        target: format!("fonts/font{k}.fntdata"),
+                        external: false,
+                    });
+                    pkg.insert_part(format!("ppt/fonts/font{k}.fntdata"), bytes.clone());
+                }
+                embedded_font_lst.push_str("</p:embeddedFont>");
+            }
+            embedded_font_lst.push_str("</p:embeddedFontLst>");
+        }
         pkg.set_rels("ppt/presentation.xml", &pres_rels);
         let slide_cx = self.slide_cx;
         let slide_cy = self.slide_cy;
@@ -238,7 +293,7 @@ impl DeckSpec {
             "ppt/presentation.xml",
             format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation {NS_DECL}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{sld_id_lst}</p:sldIdLst><p:sldSz cx="{slide_cx}" cy="{slide_cy}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
+<p:presentation {NS_DECL}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{sld_id_lst}</p:sldIdLst><p:sldSz cx="{slide_cx}" cy="{slide_cy}"/><p:notesSz cx="6858000" cy="9144000"/>{embedded_font_lst}</p:presentation>"#
             )
             .into_bytes(),
         );
@@ -352,6 +407,183 @@ pub fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// A minimal, self-contained TrueType font for tests.
+///
+/// Generated here rather than vendored, so it is public-domain test data with
+/// no third-party font license. It is a structurally coherent sfnt — correct
+/// table directory and consistent `head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/
+/// `cmap`/`name`/`post` tables with one empty `.notdef` glyph — that begins
+/// with the TrueType magic `00 01 00 00`. Its purpose is to exercise
+/// embedded-font *extraction* and `@font-face` emission; it is not intended to
+/// render real glyphs. (Table checksums and `head.checkSumAdjustment` are left
+/// zero; sfnt parsers do not verify them.)
+pub fn sample_ttf() -> Vec<u8> {
+    build_minimal_ttf("Slideflow Test")
+}
+
+fn build_minimal_ttf(family: &str) -> Vec<u8> {
+    fn push16(b: &mut Vec<u8>, v: u16) {
+        b.extend_from_slice(&v.to_be_bytes());
+    }
+    fn push32(b: &mut Vec<u8>, v: u32) {
+        b.extend_from_slice(&v.to_be_bytes());
+    }
+    fn pushi16(b: &mut Vec<u8>, v: i16) {
+        b.extend_from_slice(&v.to_be_bytes());
+    }
+
+    // head (54 bytes)
+    let mut head = Vec::new();
+    push32(&mut head, 0x0001_0000); // version 1.0
+    push32(&mut head, 0x0001_0000); // fontRevision
+    push32(&mut head, 0); // checkSumAdjustment (unverified)
+    push32(&mut head, 0x5F0F_3CF5); // magicNumber
+    push16(&mut head, 0); // flags
+    push16(&mut head, 1000); // unitsPerEm
+    head.extend_from_slice(&[0u8; 8]); // created
+    head.extend_from_slice(&[0u8; 8]); // modified
+    pushi16(&mut head, 0); // xMin
+    pushi16(&mut head, 0); // yMin
+    pushi16(&mut head, 0); // xMax
+    pushi16(&mut head, 0); // yMax
+    push16(&mut head, 0); // macStyle
+    push16(&mut head, 8); // lowestRecPPEM
+    pushi16(&mut head, 2); // fontDirectionHint
+    pushi16(&mut head, 0); // indexToLocFormat (short offsets)
+    pushi16(&mut head, 0); // glyphDataFormat
+
+    // hhea (36 bytes)
+    let mut hhea = Vec::new();
+    push32(&mut hhea, 0x0001_0000);
+    pushi16(&mut hhea, 800); // ascender
+    pushi16(&mut hhea, -200); // descender
+    pushi16(&mut hhea, 0); // lineGap
+    push16(&mut hhea, 1000); // advanceWidthMax
+    pushi16(&mut hhea, 0); // minLeftSideBearing
+    pushi16(&mut hhea, 0); // minRightSideBearing
+    pushi16(&mut hhea, 0); // xMaxExtent
+    pushi16(&mut hhea, 1); // caretSlopeRise
+    pushi16(&mut hhea, 0); // caretSlopeRun
+    pushi16(&mut hhea, 0); // caretOffset
+    for _ in 0..4 {
+        pushi16(&mut hhea, 0); // reserved
+    }
+    pushi16(&mut hhea, 0); // metricDataFormat
+    push16(&mut hhea, 1); // numberOfHMetrics
+
+    // maxp v1.0 (32 bytes)
+    let mut maxp = Vec::new();
+    push32(&mut maxp, 0x0001_0000);
+    push16(&mut maxp, 1); // numGlyphs
+    push16(&mut maxp, 0); // maxPoints
+    push16(&mut maxp, 0); // maxContours
+    push16(&mut maxp, 0); // maxCompositePoints
+    push16(&mut maxp, 0); // maxCompositeContours
+    push16(&mut maxp, 1); // maxZones
+    push16(&mut maxp, 0); // maxTwilightPoints
+    push16(&mut maxp, 0); // maxStorage
+    push16(&mut maxp, 0); // maxFunctionDefs
+    push16(&mut maxp, 0); // maxInstructionDefs
+    push16(&mut maxp, 0); // maxStackElements
+    push16(&mut maxp, 0); // maxSizeOfInstructions
+    push16(&mut maxp, 0); // maxComponentElements
+    push16(&mut maxp, 0); // maxComponentDepth
+
+    // hmtx (numberOfHMetrics = 1): one longHorMetric
+    let mut hmtx = Vec::new();
+    push16(&mut hmtx, 500); // advanceWidth
+    pushi16(&mut hmtx, 0); // leftSideBearing
+
+    // loca (short): numGlyphs+1 entries; glyph 0 is empty (0..0)
+    let mut loca = Vec::new();
+    push16(&mut loca, 0);
+    push16(&mut loca, 0);
+
+    // glyf: empty (glyph 0 has no outline)
+    let glyf: Vec<u8> = Vec::new();
+
+    // cmap: one format-0 subtable mapping every code to .notdef
+    let mut cmap = Vec::new();
+    push16(&mut cmap, 0); // version
+    push16(&mut cmap, 1); // numTables
+    push16(&mut cmap, 1); // platformID (Macintosh)
+    push16(&mut cmap, 0); // encodingID (Roman)
+    push32(&mut cmap, 12); // offset to subtable
+    push16(&mut cmap, 0); // format 0
+    push16(&mut cmap, 262); // length
+    push16(&mut cmap, 0); // language
+    cmap.extend_from_slice(&[0u8; 256]); // glyphIdArray
+
+    // name: family (id 1) + subfamily (id 2), Windows Unicode BMP, UTF-16BE
+    let fam: Vec<u8> = family.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let sub: Vec<u8> = "Regular".encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let mut name = Vec::new();
+    push16(&mut name, 0); // format
+    push16(&mut name, 2); // count
+    push16(&mut name, 6 + 2 * 12); // stringOffset (after header + 2 records)
+    let mut name_record = |id: u16, len: u16, off: u16| {
+        push16(&mut name, 3); // platformID (Windows)
+        push16(&mut name, 1); // encodingID (Unicode BMP)
+        push16(&mut name, 0x0409); // languageID (en-US)
+        push16(&mut name, id); // nameID
+        push16(&mut name, len);
+        push16(&mut name, off);
+    };
+    name_record(1, fam.len() as u16, 0);
+    name_record(2, sub.len() as u16, fam.len() as u16);
+    name.extend_from_slice(&fam);
+    name.extend_from_slice(&sub);
+
+    // post v3.0 (no glyph names) — 32 bytes
+    let mut post = Vec::new();
+    push32(&mut post, 0x0003_0000);
+    push32(&mut post, 0); // italicAngle
+    pushi16(&mut post, 0); // underlinePosition
+    pushi16(&mut post, 0); // underlineThickness
+    push32(&mut post, 0); // isFixedPitch
+    push32(&mut post, 0); // minMemType42
+    push32(&mut post, 0); // maxMemType42
+    push32(&mut post, 0); // minMemType1
+    push32(&mut post, 0); // maxMemType1
+
+    // Assemble: tables in ascending-tag order (required by the directory).
+    let tables: [(&[u8; 4], Vec<u8>); 9] = [
+        (b"cmap", cmap),
+        (b"glyf", glyf),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"loca", loca),
+        (b"maxp", maxp),
+        (b"name", name),
+        (b"post", post),
+    ];
+    let num_tables = tables.len();
+
+    let mut font = Vec::new();
+    push32(&mut font, 0x0001_0000); // sfnt version (TrueType)
+    push16(&mut font, num_tables as u16);
+    // searchRange/entrySelector/rangeShift for 9 tables (2^3 = 8 ≤ 9).
+    push16(&mut font, 128); // searchRange = 2^floor(log2(n)) * 16
+    push16(&mut font, 3); // entrySelector = floor(log2(n))
+    push16(&mut font, num_tables as u16 * 16 - 128); // rangeShift
+
+    let mut offset = 12 + 16 * num_tables;
+    let mut blob = Vec::new();
+    for (tag, data) in &tables {
+        font.extend_from_slice(*tag);
+        push32(&mut font, 0); // checksum (unverified)
+        push32(&mut font, offset as u32);
+        push32(&mut font, data.len() as u32);
+        blob.extend_from_slice(data);
+        let pad = (4 - (data.len() % 4)) % 4;
+        blob.resize(blob.len() + pad, 0);
+        offset += data.len() + pad;
+    }
+    font.extend_from_slice(&blob);
+    font
 }
 
 fn slide_xml(slide: &SlideSpec) -> String {

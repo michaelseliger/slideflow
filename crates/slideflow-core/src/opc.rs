@@ -48,6 +48,8 @@ pub mod rel_type {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
     pub const TABLE_STYLES: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
+    pub const FONT: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
