@@ -181,6 +181,76 @@ pub(crate) fn font_media_type(bytes: &[u8]) -> (&'static str, &'static str) {
     }
 }
 
+/// The OS/2 `fsType` embedding-permission word of a validated sfnt, or `None`
+/// when the font carries no `OS/2` table (older Mac TrueType) or the table
+/// directory can't be walked. A missing `OS/2` table declares no restriction, so
+/// callers treat `None` as the permissive default (installable).
+///
+/// Walks the sfnt offset table (unwrapping the first font of a `ttcf`
+/// collection) to the `OS/2` record, then reads the `fsType` `u16` at offset 8
+/// within that table (past `version`, `xAvgCharWidth`, `usWeightClass`,
+/// `usWidthClass`).
+pub fn sfnt_fs_type(bytes: &[u8]) -> Option<u16> {
+    let be16 = |off: usize| -> Option<u16> {
+        bytes.get(off..off + 2).map(|s| u16::from_be_bytes([s[0], s[1]]))
+    };
+    let be32 = |off: usize| -> Option<u32> {
+        bytes
+            .get(off..off + 4)
+            .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    };
+
+    // A TrueType collection points its records at the first embedded font's
+    // offset table; everything else starts its offset table at byte 0.
+    let table_base = if bytes.starts_with(b"ttcf") {
+        be32(12)? as usize
+    } else {
+        0
+    };
+
+    let num_tables = be16(table_base + 4)? as usize;
+    let records = table_base + 12;
+    for i in 0..num_tables {
+        let rec = records + i * 16;
+        let tag = bytes.get(rec..rec + 4)?;
+        if tag == b"OS/2" {
+            let off = be32(rec + 8)? as usize;
+            return be16(off + 8);
+        }
+    }
+    None
+}
+
+/// Whether a font's OS/2 `fsType` embedding permissions allow harvesting a copy
+/// for app-local reuse across other decks that name the same family. We keep
+/// only **Installable** (`0x0000`) and **Editable** (`0x0008`) fonts; a
+/// **Restricted License** (`0x0002`) or **Preview & Print only** (`0x0004`) font
+/// may render inside its own deck but must not be extracted for wider use, so it
+/// is skipped. Only the low licensing nibble is consulted (the higher
+/// `no-subsetting` / `bitmap-embedding-only` bits are irrelevant here).
+pub fn fs_type_allows_harvest(fs_type: u16) -> bool {
+    let level = fs_type & 0x000F;
+    if level & 0x0002 != 0 {
+        return false; // Restricted License embedding — never harvest.
+    }
+    // Installable (no bits) or Editable embedding (0x0008) — allowed. A lone
+    // Preview & Print bit (0x0004) falls through to false.
+    level == 0x0000 || level & 0x0008 != 0
+}
+
+/// Whether a validated sfnt may be harvested (see [`fs_type_allows_harvest`]). A
+/// font with no `OS/2` table declares no embedding restriction, so it is treated
+/// as installable and harvestable. Non-sfnt bytes are never harvestable.
+pub fn is_harvestable(bytes: &[u8]) -> bool {
+    if !is_supported_font(bytes) {
+        return false;
+    }
+    match sfnt_fs_type(bytes) {
+        Some(fs) => fs_type_allows_harvest(fs),
+        None => true,
+    }
+}
+
 fn local<'a>(n: &roxmltree::Node<'a, 'a>) -> &'a str {
     n.tag_name().name()
 }
@@ -282,5 +352,70 @@ mod tests {
         let pf = PresentationFile::from_bytes(&bytes).unwrap();
         let mut db = fontdb::Database::new();
         assert_eq!(register_embedded_fonts(&mut db, &pf), 2, "both variants handed to fontdb");
+    }
+
+    /// A minimal, structurally-coherent sfnt carrying just an `OS/2` table with
+    /// the given `fsType`. Enough to exercise the `fsType` walk + harvest gate
+    /// without a full font (mirrors the "synthesize just what the parser reads"
+    /// approach of `is_supported_font`'s tests).
+    fn sfnt_with_fs_type(fs_type: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Offset table: TrueType magic, a single table.
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // sfntVersion
+        out.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        out.extend_from_slice(&16u16.to_be_bytes()); // searchRange
+        out.extend_from_slice(&0u16.to_be_bytes()); // entrySelector
+        out.extend_from_slice(&0u16.to_be_bytes()); // rangeShift
+        // Table record for OS/2 pointing just past the record.
+        let os2_offset: u32 = 12 + 16;
+        out.extend_from_slice(b"OS/2");
+        out.extend_from_slice(&0u32.to_be_bytes()); // checksum
+        out.extend_from_slice(&os2_offset.to_be_bytes()); // offset
+        out.extend_from_slice(&10u32.to_be_bytes()); // length
+        // OS/2 table, up to fsType at offset 8.
+        out.extend_from_slice(&0u16.to_be_bytes()); // version
+        out.extend_from_slice(&0u16.to_be_bytes()); // xAvgCharWidth
+        out.extend_from_slice(&400u16.to_be_bytes()); // usWeightClass
+        out.extend_from_slice(&5u16.to_be_bytes()); // usWidthClass
+        out.extend_from_slice(&fs_type.to_be_bytes()); // fsType
+        out
+    }
+
+    #[test]
+    fn fs_type_gate_keeps_installable_and_editable_only() {
+        // Installable (0x0000) and Editable (0x0008) may be harvested.
+        assert!(fs_type_allows_harvest(0x0000), "installable");
+        assert!(fs_type_allows_harvest(0x0008), "editable");
+        // Editable stays allowed even alongside the print/subsetting bits.
+        assert!(fs_type_allows_harvest(0x0008 | 0x0004), "editable + preview bit");
+        assert!(fs_type_allows_harvest(0x0008 | 0x0100), "editable + no-subsetting bit");
+        // Restricted (0x0002) and Preview & Print only (0x0004) are skipped.
+        assert!(!fs_type_allows_harvest(0x0002), "restricted");
+        assert!(!fs_type_allows_harvest(0x0004), "preview & print only");
+        // Restricted wins even if a stray editable bit is also set.
+        assert!(!fs_type_allows_harvest(0x0002 | 0x0008), "restricted dominates");
+    }
+
+    #[test]
+    fn fs_type_is_read_from_the_os2_table() {
+        assert_eq!(sfnt_fs_type(&sfnt_with_fs_type(0x0004)), Some(0x0004));
+        assert_eq!(sfnt_fs_type(&sfnt_with_fs_type(0x0008)), Some(0x0008));
+        // A font with no OS/2 table (our fixture builder emits none) → None.
+        assert_eq!(sfnt_fs_type(&sample_ttf()), None);
+        // Garbage bytes never parse to an fsType.
+        assert_eq!(sfnt_fs_type(b"NOT-A-FONT"), None);
+    }
+
+    #[test]
+    fn is_harvestable_respects_fs_type_and_format() {
+        // Installable / editable fonts harvest; restricted / preview-only don't.
+        assert!(is_harvestable(&sfnt_with_fs_type(0x0000)));
+        assert!(is_harvestable(&sfnt_with_fs_type(0x0008)));
+        assert!(!is_harvestable(&sfnt_with_fs_type(0x0002)));
+        assert!(!is_harvestable(&sfnt_with_fs_type(0x0004)));
+        // No OS/2 table = no declared restriction = harvestable.
+        assert!(is_harvestable(&sample_ttf()));
+        // Non-sfnt bytes (e.g. obfuscated ODTTF) are never harvestable.
+        assert!(!is_harvestable(b"NOT-A-FONT-AT-ALL"));
     }
 }
