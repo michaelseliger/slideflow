@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-commit hook: run the CI checks for the engine crate before every commit.
+# Enabled via `git config core.hooksPath .githooks` (see README, "Setup & dev loop").
+# Bypass in an emergency with `git commit --no-verify`.
+set -e
+
+# Only run when the staged changes touch the Rust engine or workspace manifests.
+if git diff --cached --name-only | grep -qE '^(crates/|Cargo\.(toml|lock)$)'; then
+    echo "pre-commit: cargo clippy -p slideflow-core --all-targets -- -D warnings"
+    cargo clippy -p slideflow-core --all-targets -- -D warnings
+
+    echo "pre-commit: cargo test -p slideflow-core"
+    cargo test -p slideflow-core --quiet
+fi

@@ -203,6 +203,7 @@ picks deduplicated by content hash.
 
 ```bash
 git clone https://github.com/michaelseliger/slideflow && cd slideflow
+git config core.hooksPath .githooks # enable the pre-commit hook (clippy + engine tests)
 cargo test -p slideflow-core        # verify the engine builds + passes
 
 cd apps/desktop
@@ -262,9 +263,13 @@ issue first so we can discuss the approach.
 Before submitting a PR:
 
 ```bash
+cargo clippy -p slideflow-core --all-targets -- -D warnings   # must be lint-clean
 cargo test -p slideflow-core                 # engine tests must pass
 cd apps/desktop && pnpm build                # frontend must type-check + build
 ```
+
+The first two run automatically on commit if you enabled the hooks path above
+(`git config core.hooksPath .githooks`).
 
 The engine has no GUI dependencies, so you can hack on parsing, search,
 rendering, or composition from any OS without a Tauri toolchain.

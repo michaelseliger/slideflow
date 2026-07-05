@@ -175,7 +175,7 @@ impl Ctx<'_> {
         }
 
         let (l, t, r, b) = (cell.x, cell.y, cell.x + cell.w, cell.y + cell.h);
-        let edges: [(&str, (f64, f64, f64, f64)); 4] = [
+        let edges = [
             ("lnT", (l, t, r, t)),
             ("lnB", (l, b, r, b)),
             ("lnL", (l, t, l, b)),
