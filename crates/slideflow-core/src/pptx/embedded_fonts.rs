@@ -183,23 +183,20 @@ fn attr_local<'a>(n: &roxmltree::Node<'a, 'a>, name: &str) -> Option<&'a str> {
     n.attributes().find(|a| a.name() == name).map(|a| a.value())
 }
 
-// ---------------------------------------------------------------------------
-// WS-D hand-off: fontdb registration for the resvg rasterizer.
-//
-// usvg ignores SVG `@font-face`, so the export path must register the same
-// bytes in a `fontdb::Database`. `fontdb` is not yet a workspace dependency, so
-// this helper is intentionally left for the lead to wire once WS-D lands it.
-// Drop this in and add `use fontdb;`:
-//
-// pub fn register_embedded_fonts(db: &mut fontdb::Database, pf: &PresentationFile) {
-//     for f in embedded_fonts(pf) {
-//         // load_font_data indexes the face by its own name table; real
-//         // embedded fonts carry the matching family. Callers that match by the
-//         // declared `f.family` may need to set it explicitly on the loaded face.
-//         db.load_font_data(f.bytes);
-//     }
-// }
-// ---------------------------------------------------------------------------
+/// Register a deck's embedded fonts in a `fontdb::Database` for the rasterizer
+/// path ([`crate::export`]): usvg ignores SVG `@font-face`, so PNG/PDF export
+/// (and the drag-out icon) must load the same bytes fontdb-side to rasterize
+/// with the deck's real typefaces. Faces are indexed by their own name table
+/// (real embedded fonts carry the matching family). Returns how many variants
+/// were handed to the database.
+pub fn register_embedded_fonts(db: &mut fontdb::Database, pf: &PresentationFile) -> usize {
+    let fonts = embedded_fonts(pf);
+    let n = fonts.len();
+    for f in fonts {
+        db.load_font_data(f.bytes);
+    }
+    n
+}
 
 #[cfg(test)]
 mod tests {
@@ -266,5 +263,17 @@ mod tests {
         let pf = PresentationFile::from_bytes(&bytes).unwrap();
         let set = embedded_font_set(&pf);
         assert!(set.fonts.is_empty() && set.skipped.is_empty());
+    }
+
+    #[test]
+    fn register_embedded_fonts_loads_all_variants() {
+        let ttf = sample_ttf();
+        let bytes = DeckSpec::new("Embedded")
+            .embed_font("Arial Narrow", vec![(false, false, ttf.clone()), (true, false, ttf)])
+            .slide(SlideSpec::new("Hi"))
+            .build();
+        let pf = PresentationFile::from_bytes(&bytes).unwrap();
+        let mut db = fontdb::Database::new();
+        assert_eq!(register_embedded_fonts(&mut db, &pf), 2, "both variants handed to fontdb");
     }
 }

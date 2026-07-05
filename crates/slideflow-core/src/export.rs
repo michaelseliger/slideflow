@@ -213,7 +213,8 @@ pub fn render_slide_png(
     fonts: &fontdb::Database,
 ) -> Result<Vec<u8>> {
     let pf = PresentationFile::open(pptx)?;
-    let db = Arc::new(fonts.clone());
+    let base = Arc::new(fonts.clone());
+    let db = deck_fonts(&base, &pf);
     pf_slide_png(&pf, slide_index, width_px, &db)
 }
 
@@ -221,30 +222,56 @@ pub fn render_slide_png(
 // Batch exports
 // ---------------------------------------------------------------------------
 
-/// A per-run cache that opens each distinct source deck at most once. A failed
-/// open is remembered as `None` so repeated picks from a missing deck don't
-/// each retry (and warn) again.
+/// The caller's base database, enriched with a deck's embedded fonts when it
+/// has any (usvg ignores SVG `@font-face`, so the rasterizer needs the same
+/// bytes fontdb-side to draw the deck's real typefaces). Decks without
+/// embedded fonts share the base `Arc` untouched — the common case costs one
+/// pointer clone.
+fn deck_fonts(base: &Arc<fontdb::Database>, pf: &PresentationFile) -> Arc<fontdb::Database> {
+    let fonts = crate::pptx::embedded_fonts(pf);
+    if fonts.is_empty() {
+        return base.clone();
+    }
+    let mut db = (**base).clone();
+    for f in fonts {
+        db.load_font_data(f.bytes);
+    }
+    Arc::new(db)
+}
+
+/// An opened source deck paired with the font database to rasterize it with
+/// (the base database, enriched with the deck's embedded fonts when present).
+type CachedDeck = (Arc<PresentationFile>, Arc<fontdb::Database>);
+
+/// A per-run cache that opens each distinct source deck at most once, pairing
+/// it with its (possibly embedded-font-enriched) font database. A failed open
+/// is remembered as `None` so repeated picks from a missing deck don't each
+/// retry (and warn) again.
 struct DeckCache {
-    decks: HashMap<String, Option<Arc<PresentationFile>>>,
+    base_fonts: Arc<fontdb::Database>,
+    decks: HashMap<String, Option<CachedDeck>>,
 }
 
 impl DeckCache {
-    fn new() -> Self {
-        DeckCache { decks: HashMap::new() }
+    fn new(base_fonts: Arc<fontdb::Database>) -> Self {
+        DeckCache { base_fonts, decks: HashMap::new() }
     }
 
-    /// Get (opening on first use) the deck at `path`. Returns `None` if it has
-    /// ever failed to open; `newly_failed` is set true only on the open that
-    /// first discovered the failure, so the caller warns exactly once per deck.
-    fn get(&mut self, path: &str) -> (Option<Arc<PresentationFile>>, bool) {
+    /// Get (opening on first use) the deck at `path` plus its font database.
+    /// Returns `None` if it has ever failed to open; `newly_failed` is set true
+    /// only on the open that first discovered the failure, so the caller warns
+    /// exactly once per deck.
+    fn get(&mut self, path: &str) -> (Option<CachedDeck>, bool) {
         if let Some(entry) = self.decks.get(path) {
             return (entry.clone(), false);
         }
         match PresentationFile::open(Path::new(path)) {
             Ok(pf) => {
                 let pf = Arc::new(pf);
-                self.decks.insert(path.to_string(), Some(pf.clone()));
-                (Some(pf), false)
+                let db = deck_fonts(&self.base_fonts, &pf);
+                let entry = (pf, db);
+                self.decks.insert(path.to_string(), Some(entry.clone()));
+                (Some(entry), false)
             }
             Err(_) => {
                 self.decks.insert(path.to_string(), None);
@@ -275,19 +302,19 @@ pub fn export_pngs(
     let db = Arc::new(fonts.clone());
     let width_px = opts.target_width_px.max(1);
     let total = picks.len();
-    let mut cache = DeckCache::new();
+    let mut cache = DeckCache::new(db);
     let mut report = ExportReport { files_written: Vec::new(), warnings: Vec::new() };
     let mut used_names: Vec<String> = Vec::new();
 
     for (i, pick) in picks.iter().enumerate() {
-        let (pf, newly_failed) = cache.get(&pick.pptx_path);
-        match pf {
+        let (entry, newly_failed) = cache.get(&pick.pptx_path);
+        match entry {
             None => {
                 if newly_failed {
                     report.warnings.push(format!("Could not open {}", pick.pptx_path));
                 }
             }
-            Some(pf) => match pf_slide_png(&pf, pick.slide_index, width_px, &db) {
+            Some((pf, deck_db)) => match pf_slide_png(&pf, pick.slide_index, width_px, &deck_db) {
                 Ok(bytes) => {
                     let name = unique_png_name(&mut used_names, i + 1, &pick.pptx_path, pick.slide_index);
                     let path = out_dir.join(&name);
@@ -328,7 +355,7 @@ pub fn export_pdf(
 
     let db = Arc::new(fonts.clone());
     let total = picks.len();
-    let mut cache = DeckCache::new();
+    let mut cache = DeckCache::new(db);
     let mut report = ExportReport { files_written: Vec::new(), warnings: Vec::new() };
 
     let mut document = Document::new();
@@ -338,14 +365,15 @@ pub fn export_pdf(
 
     let mut pages_written = 0usize;
     for (i, pick) in picks.iter().enumerate() {
-        let (pf, newly_failed) = cache.get(&pick.pptx_path);
-        match pf {
+        let (entry, newly_failed) = cache.get(&pick.pptx_path);
+        match entry {
             None => {
                 if newly_failed {
                     report.warnings.push(format!("Could not open {}", pick.pptx_path));
                 }
             }
-            Some(pf) => match render_pdf_page(&mut document, &pf, pick.slide_index, &db) {
+            Some((pf, deck_db)) => match render_pdf_page(&mut document, &pf, pick.slide_index, &deck_db)
+            {
                 Ok(dropped) => {
                     pages_written += 1;
                     if dropped > 0 {
@@ -586,5 +614,33 @@ mod tests {
         let mut db = fontdb::Database::new();
         set_generic_families(&mut db);
         assert!(db.is_empty());
+    }
+
+    #[test]
+    fn deck_fonts_enriches_only_embedding_decks() {
+        use crate::fixtures::{sample_ttf, DeckSpec, SlideSpec};
+        use crate::pptx::PresentationFile;
+
+        let base = Arc::new(fontdb::Database::new());
+
+        let plain = DeckSpec::new("Plain").slide(SlideSpec::new("Hi")).build();
+        let plain_pf = PresentationFile::from_bytes(&plain).unwrap();
+        assert!(
+            Arc::ptr_eq(&deck_fonts(&base, &plain_pf), &base),
+            "a deck without embedded fonts must share the base database"
+        );
+
+        let embedding = DeckSpec::new("Embedded")
+            .font("Grafton")
+            .embed_font("Grafton", vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("Hi"))
+            .build();
+        let pf = PresentationFile::from_bytes(&embedding).unwrap();
+        let enriched = deck_fonts(&base, &pf);
+        assert!(
+            !Arc::ptr_eq(&enriched, &base),
+            "an embedding deck must get its own enriched database"
+        );
+        assert!(enriched.len() >= base.len(), "faces never shrink");
     }
 }
