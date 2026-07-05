@@ -62,6 +62,38 @@ use query::{max_opt, min_opt, parse_query, ParsedQuery};
 const NEAR_DUP_THRESHOLD: f32 = 0.92;
 const NEAR_DUP_TOP_N: usize = 10;
 
+/// Minimum raw cosine for a semantic hit to be considered relevant. Applied to
+/// the vector retrieval arm (semantic + hybrid) and to find-similar; below-floor
+/// hits are dropped so a query no longer returns the whole embedded corpus.
+///
+/// E5 (`multilingual-e5-small`) produces a COMPRESSED cosine range: even a
+/// query and an unrelated passage typically sit around 0.70–0.80, so an
+/// intuitive floor like 0.5 would be a no-op. The value below was tuned
+/// empirically against the live library (166 embedded slides of German/English
+/// B2B content) with the real model — ranked cosines for on-topic vs. nonsense
+/// queries:
+///
+/// | query                    | top-1 | genuine tail |
+/// |--------------------------|-------|--------------|
+/// | Salesforce Success …     | 0.911 | ≥ ~0.86      |
+/// | commercetools Accelerator| 0.909 | ≥ ~0.85      |
+/// | Magnolia Integration     | 0.899 | ≥ ~0.84      |
+/// | SAP Commerce Cloud       | 0.884 | ≥ ~0.85      |
+/// | Adobe Commerce / Magento | 0.875 | ≥ ~0.84      |
+/// | PIM Product Info Mgmt    | 0.875 | ≥ ~0.83      |
+/// | Delivery Organisation …  | 0.860 | ≥ ~0.82      |
+/// | B2B E-Commerce           | 0.858 | ≥ ~0.83      |
+/// | --- nonsense (ceiling) --------- top-1 --------- |
+/// | quantum chess strategy   | 0.800 |              |
+/// | photosynthesis of ferns  | 0.797 |              |
+/// | Bananenbrot Rezept       | 0.777 |              |
+///
+/// Pool percentiles across all queries: genuine p50 0.803 / p90 0.837 / max
+/// 0.911; nonsense p50 0.752 / p90 0.777 / **max 0.800**. 0.82 sits just above
+/// the nonsense ceiling (≈ +0.02 margin) while retaining every genuine query's
+/// relevant head, and drops the weakly-related 0.75–0.82 tail.
+const SEMANTIC_SCORE_FLOOR: f32 = 0.82;
+
 /// Raw near-duplicate clusters (O(n²)) for a vector-store snapshot, using the
 /// library's tuned threshold + fan-out. Pure compute on the snapshot — no DB, no
 /// `Library` — so the desktop host runs it in `spawn_blocking` off the
@@ -1098,10 +1130,16 @@ impl Library {
         if store.is_empty() {
             return Ok(Vec::new());
         }
-        let hits = store.top_k(&qv, cap, |i| match &allowed {
+        let mut hits = store.top_k(&qv, cap, |i| match &allowed {
             Some(set) => !set.contains(&store.slide_ids()[i]),
             None => false,
         });
+        // Drop below-floor hits so a query no longer surfaces the whole embedded
+        // corpus. Applied here (raw cosine still available) it covers semantic
+        // mode AND hybrid's vector arm — filtering BEFORE fusion, since post-RRF
+        // the cosine is gone. `top_k` itself is left untouched (it is shared with
+        // near-dup clustering, which floors at its own NEAR_DUP_THRESHOLD).
+        hits.retain(|(_, s)| *s >= SEMANTIC_SCORE_FLOOR);
         Ok(hits.into_iter().map(|(i, s)| (store.slide_ids()[i], s)).collect())
     }
 
@@ -1177,6 +1215,9 @@ impl Library {
                     store.slide_ids()[i] == slide_id || store.text_hash_at(i) == anchor_hash
                 })
                 .into_iter()
+                // Drop below-floor neighbors (raw cosine) so find-similar shows
+                // only genuinely related slides, not unrelated padding.
+                .filter(|(_, s)| *s >= SEMANTIC_SCORE_FLOOR)
                 .map(|(i, s)| (store.slide_ids()[i], s))
                 .collect()
         };
@@ -2603,6 +2644,29 @@ mod tests {
         (dir, lib, fake)
     }
 
+    /// A library whose slides each carry a single body word and no title, so the
+    /// embed text is EXACTLY that one word (the fixture parser duplicates a
+    /// title into the body, so a title-only slide would embed "word\nword" —
+    /// hence the empty title). With the FakeEmbedder (identical text → cosine
+    /// 1.0, distinct text → ≈orthogonal ≈0), a semantic query equal to a word
+    /// scores 1.0 for that slide and ~0 for the rest — cleanly straddling
+    /// `SEMANTIC_SCORE_FLOOR` so flooring is deterministic to test.
+    fn floor_test_library() -> (tempfile::TempDir, Library, Arc<FakeEmbedder>) {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Deck")
+            .slide(SlideSpec::new("").bullets(&["alpha"]))
+            .slide(SlideSpec::new("").bullets(&["beta"]))
+            .slide(SlideSpec::new("").bullets(&["gamma"]))
+            .write_to(&dir.path().join("d.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(32));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        (dir, lib, fake)
+    }
+
     fn scan_silent(lib: &mut Library) -> ScanEvent {
         let mut finished = ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 0, skipped: 0 };
         lib.scan(&mut |e| {
@@ -2765,50 +2829,58 @@ mod tests {
     }
 
     #[test]
-    fn semantic_search_embeds_query_and_ranks_all() {
-        let (_dir, lib, fake) = embedded_library();
+    fn semantic_search_embeds_query_and_floors_unrelated() {
+        // The relevance floor: semantic search embeds the query, returns the
+        // exact-text match (cosine 1.0), and DROPS the rest instead of ranking
+        // the whole embedded corpus.
+        let (_dir, lib, fake) = floor_test_library();
         let before = fake.query_count();
         let f = SearchFilters { search_mode: Some("semantic".into()), ..Default::default() };
-        let hits = lib.search("revenue growth", &f).unwrap();
+        let hits = lib.search("alpha", &f).unwrap();
         assert!(fake.query_count() > before, "semantic search embeds the query");
-        assert_eq!(hits.len(), 3, "all embedded slides are candidates");
-        assert!(hits.iter().all(|h| !h.snippet.is_empty()), "fallback snippets present");
-        // Scores are non-increasing.
-        for w in hits.windows(2) {
-            assert!(w[0].score >= w[1].score);
-        }
+        assert_eq!(hits.len(), 1, "only the above-floor (exact-text) slide survives");
+        assert_eq!(hits[0].slide.body_text, "alpha");
+        assert!(hits[0].score >= SEMANTIC_SCORE_FLOOR as f64, "kept hit clears the floor");
+        assert!(!hits[0].snippet.contains("<mark>"), "semantic hits get a fallback snippet");
+        // A query matching NO slide's text returns nothing (all below floor),
+        // not the entire embedded corpus.
+        assert!(lib.search("nonsense", &f).unwrap().is_empty());
     }
 
     #[test]
-    fn hybrid_surfaces_semantic_only_hits() {
+    fn hybrid_returns_lexical_hits_when_vector_arm_floored() {
+        // Frontend sanity: hybrid must still surface exact FTS matches even when
+        // the vector arm floors to empty. "revenue" matches the Revenue slide in
+        // FTS, but equals no slide's exact embed text, so every cosine is well
+        // below the floor and the vector arm contributes nothing. One-sided RRF
+        // (rrf_fuse handles a single non-empty list) must still return the
+        // lexical hit with its `<mark>` snippet, and no sub-floor semantic-only
+        // hit may leak in.
         let (_dir, lib, _fake) = embedded_library();
-        // FTS alone matches only the "Revenue" slide.
         let lex = lib.search("revenue", &SearchFilters::default()).unwrap();
         assert_eq!(lex.len(), 1);
-        assert!(lex[0].snippet.contains("<mark>"));
 
         let hy = SearchFilters { search_mode: Some("hybrid".into()), ..Default::default() };
         let hits = lib.search("revenue", &hy).unwrap();
-        assert!(hits.len() > lex.len(), "hybrid adds semantic-only hits");
-        assert!(hits.iter().any(|h| h.snippet.contains("<mark>")), "FTS mark retained");
-        assert!(
-            hits.iter().any(|h| !h.snippet.contains("<mark>")),
-            "a semantic-only hit surfaces with a fallback snippet"
-        );
+        assert_eq!(hits.len(), lex.len(), "vector arm floored to empty → FTS hits only");
+        assert!(hits.iter().all(|h| h.snippet.contains("<mark>")), "only FTS-marked hits remain");
+        assert_eq!(hits[0].slide.id, lex[0].slide.id, "the lexical hit survives fusion");
     }
 
     #[test]
     fn hybrid_and_semantic_respect_parsed_date_bounds() {
-        // Two decks, BOTH with a semantically-matching "revenue" slide; one deck
-        // is made old. A parsed `after:` bound must exclude the old deck's slide
-        // from the vector arm too (eff post-filtering), not just from FTS.
+        // Two decks, BOTH with a slide whose exact embed text is "revenue" (one
+        // body word, no title), so the FakeEmbedder scores the "revenue" query
+        // at cosine 1.0 — above the floor — for both. One deck is made old. A
+        // parsed `after:` bound must exclude the old deck's slide from the vector
+        // arm too (eff post-filtering), not just from FTS.
         let dir = tempfile::tempdir().unwrap();
         DeckSpec::new("Old")
-            .slide(SlideSpec::new("Revenue").bullets(&["quarterly revenue growth"]))
+            .slide(SlideSpec::new("").bullets(&["revenue"]))
             .write_to(&dir.path().join("old.pptx"))
             .unwrap();
         DeckSpec::new("New")
-            .slide(SlideSpec::new("Revenue").bullets(&["revenue outlook and growth"]))
+            .slide(SlideSpec::new("").bullets(&["revenue"]))
             .write_to(&dir.path().join("new.pptx"))
             .unwrap();
         let mut lib = Library::open_in_memory().unwrap();
@@ -2856,7 +2928,13 @@ mod tests {
     }
 
     #[test]
-    fn similar_excludes_self_and_twins_ordered_by_score() {
+    fn get_similar_slides_floors_unrelated_and_excludes_twins() {
+        // Find-similar drops both padding sources of noise:
+        //  - the cross-deck twin scores cosine 1.0 (ABOVE the floor) but is
+        //    excluded by the same-text-twin rule — proving the exclusion runs;
+        //  - the non-twin "Other" scores ≈0 (BELOW the floor) and is dropped by
+        //    the floor — without it, this unrelated slide would pad the list.
+        // With nothing genuinely related left, the result is empty.
         let dir = tempfile::tempdir().unwrap();
         DeckSpec::new("A")
             .slide(SlideSpec::new("Shared").bullets(&["same text"]))
@@ -2865,7 +2943,6 @@ mod tests {
             .unwrap();
         DeckSpec::new("B")
             .slide(SlideSpec::new("Shared").bullets(&["same text"])) // twin of A/Shared
-            .slide(SlideSpec::new("Third").bullets(&["different beta content"]))
             .write_to(&dir.path().join("b.pptx"))
             .unwrap();
         let mut lib = Library::open_in_memory().unwrap();
@@ -2883,15 +2960,10 @@ mod tests {
             .unwrap();
 
         let sim = lib.get_similar_slides(anchor.id, 10).unwrap();
-        assert!(!sim.is_empty());
-        assert!(sim.iter().all(|s| s.slide.id != anchor.id), "anchor excluded");
         assert!(
-            sim.iter().all(|s| s.slide.title.as_deref() != Some("Shared")),
-            "same-text twin excluded"
+            sim.is_empty(),
+            "above-floor twin excluded by rule; below-floor non-twin dropped by the floor"
         );
-        for w in sim.windows(2) {
-            assert!(w[0].score >= w[1].score, "ordered by score desc");
-        }
     }
 
     #[test]
@@ -2909,34 +2981,32 @@ mod tests {
         // must drop the in-memory caches so the next semantic lookup reloads from
         // the (now empty) index.
         let dir = tempfile::tempdir().unwrap();
+        // One body word, no title: the exact embed text is "revenue", so a
+        // semantic query for "revenue" scores cosine 1.0 (above the floor) and
+        // primes / exercises the vector store.
         DeckSpec::new("A")
-            .slide(SlideSpec::new("Shared").bullets(&["same text"]))
-            .slide(SlideSpec::new("Other").bullets(&["different alpha content"]))
+            .slide(SlideSpec::new("").bullets(&["revenue"]))
+            .slide(SlideSpec::new("").bullets(&["outlook"]))
             .write_to(&dir.path().join("a.pptx"))
-            .unwrap();
-        DeckSpec::new("B")
-            .slide(SlideSpec::new("Shared").bullets(&["same text"]))
-            .write_to(&dir.path().join("b.pptx"))
             .unwrap();
         let mut lib = Library::open_in_memory().unwrap();
         lib.set_embedder(Some(Arc::new(FakeEmbedder::new(32))));
         lib.add_root(dir.path()).unwrap();
         scan_silent(&mut lib);
 
-        let a = lib.decks().unwrap().into_iter().find(|d| d.file_name == "a.pptx").unwrap();
-        let anchor = lib.slides_for_deck(a.id).unwrap()[0].id;
-        // Prime the lazily-loaded vector store.
+        let f = SearchFilters { search_mode: Some("semantic".into()), ..Default::default() };
+        // Prime the lazily-loaded vector store; the exact-text query clears the floor.
         assert!(
-            !lib.get_similar_slides(anchor, 10).unwrap().is_empty(),
-            "precondition: the primed store resolves the anchor's neighbors"
+            !lib.search("revenue", &f).unwrap().is_empty(),
+            "precondition: the primed store resolves the query"
         );
 
         lib.clear().unwrap();
 
-        // A stale (non-invalidated) store would still hold the anchor's row and
-        // return neighbors; a correctly invalidated one reloads to an empty store.
+        // A stale (non-invalidated) store would still hold the slide's row and
+        // resolve "revenue"; a correctly invalidated one reloads to an empty store.
         assert!(
-            lib.get_similar_slides(anchor, 10).unwrap().is_empty(),
+            lib.search("revenue", &f).unwrap().is_empty(),
             "cleared library must not serve vectors for recycled/removed slide ids"
         );
     }
