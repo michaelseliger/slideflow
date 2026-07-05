@@ -25,6 +25,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::embed::e5::{E5Embedder, MODEL_ID};
 use slideflow_core::embed::Embedder;
+use slideflow_core::index::EMBED_BATCH;
 use slideflow_core::model::EmbeddingStatus;
 
 use crate::commands::AppState;
@@ -680,56 +681,114 @@ fn spawn_backfill(app: &AppHandle) -> bool {
 /// the cancel flag, (3) clean up orphans and invalidate BOTH connections'
 /// in-memory vector caches.
 ///
-/// NB: this holds the `scan_library` mutex for the WHOLE run, so a concurrent
-/// scan (`start_scan`) queues behind a long backfill (a first-time index of a
-/// large library on CPU can take minutes). That is the intended two-connection
-/// trade-off — searches on the interactive connection stay responsive — but it
-/// is why the backfill is cancelable and chunked.
+/// Lock discipline: the `scan_library` mutex is only ever taken in SHORT holds,
+/// never for the whole run, so a queued `start_scan` slots in early instead of
+/// waiting out a first-time index of a large library (minutes of CPU). Phase A
+/// locks per deck. Phase B snapshots `(embedder, model_id, dims, pending)` under
+/// one short lock, drops it, then runs the CPU-bound `embed_passages` per chunk
+/// with NO lock held and re-locks only to store. A scan that runs concurrently
+/// may inline-embed a text this loop is also about to embed; that redundant
+/// write is correctness-neutral (`store_embedding_vectors` is INSERT OR IGNORE).
 fn run_backfill(app: &AppHandle, semantic: &SemanticState) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut lib = state
-        .scan_library
-        .lock()
-        .map_err(|_| "library lock poisoned".to_string())?;
 
-    // Phase A: hashes for pre-hashing rows (cheap reparse, no embedding).
-    let decks = lib.decks_needing_hash_backfill().map_err(|e| e.to_string())?;
+    // Phase A: hashes for pre-hashing rows (cheap reparse, no embedding). Snapshot
+    // the deck list under one short lock, then lock PER DECK — releasing between
+    // decks lets a queued scan run without waiting out the whole phase.
+    let decks = {
+        let lib = state
+            .scan_library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_string())?;
+        lib.decks_needing_hash_backfill().map_err(|e| e.to_string())?
+    };
     for (deck_id, path) in decks {
         if semantic.backfill_cancel.load(Ordering::SeqCst) {
             break;
         }
+        let mut lib = state
+            .scan_library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_string())?;
         // Best-effort per deck: a vanished/corrupt file must not kill the run.
         let _ = lib.backfill_deck_hashes(deck_id, &path);
     }
 
-    // Phase B: embed all missing texts.
-    let pending = lib.pending_embedding_texts().map_err(|e| e.to_string())?;
-    let total = pending.len();
+    // Phase B: snapshot the embedder + the pending texts under ONE short lock,
+    // then drop it. The embed (CPU-bound) runs with no lock held; we re-lock only
+    // to store each batch.
+    let snapshot = {
+        let lib = state
+            .scan_library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_string())?;
+        match lib.embedder_handle() {
+            Some(embedder) => {
+                let model_id = embedder.id().to_string();
+                let dims = embedder.dims();
+                let pending = lib.pending_embedding_texts().map_err(|e| e.to_string())?;
+                Some((embedder, model_id, dims, pending))
+            }
+            // Embedder detached between spawn and here: nothing to embed, but the
+            // tail (orphan cleanup + cache invalidation) below MUST still run.
+            None => None,
+        }
+    };
+
+    let total = snapshot.as_ref().map_or(0, |(_, _, _, pending)| pending.len());
     emit_embed(app, &EmbedEvent::Started { total });
     let mut done = 0usize;
     // Hold onto a chunk error instead of `?`-returning it: the cleanup + cache
     // invalidation tail below MUST still run so the chunks that DID embed become
     // visible (an early return left earlier successful work invisible).
     let mut embed_error: Option<String> = None;
-    for chunk in pending.chunks(32) {
-        if semantic.backfill_cancel.load(Ordering::SeqCst) {
-            break;
+
+    if let Some((embedder, model_id, dims, pending)) = snapshot {
+        for chunk in pending.chunks(EMBED_BATCH) {
+            // Cancel BEFORE the (possibly long) embed.
+            if semantic.backfill_cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            // CPU-bound embed with NO library lock held — a queued scan runs
+            // concurrently instead of blocking on us.
+            let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+            let vectors = match embedder.embed_passages(&texts) {
+                Ok(vectors) => vectors,
+                Err(err) => {
+                    embed_error = Some(err.to_string());
+                    break;
+                }
+            };
+            // Cancel again AFTER the embed, before re-taking the lock to write, so
+            // a disable/delete toggle mid-embed stops us promptly.
+            if semantic.backfill_cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            // Re-lock briefly, only to store this batch.
+            {
+                let mut lib = match state.scan_library.lock() {
+                    Ok(lib) => lib,
+                    Err(_) => {
+                        embed_error = Some("library lock poisoned".to_string());
+                        break;
+                    }
+                };
+                if let Err(err) = lib.store_embedding_vectors(&model_id, dims, chunk, vectors) {
+                    embed_error = Some(err.to_string());
+                    break;
+                }
+            }
+            done += chunk.len();
+            emit_embed(app, &EmbedEvent::Progress { done, total });
         }
-        // Cancelable at batch granularity so the scan connection is released
-        // promptly when the user disables the model mid-run.
-        if let Err(err) = lib.embed_and_store_canceled(chunk, &semantic.backfill_cancel) {
-            embed_error = Some(err.to_string());
-            break;
-        }
-        done += chunk.len();
-        emit_embed(app, &EmbedEvent::Progress { done, total });
     }
 
     // ALWAYS run the tail — on success, cancel, OR error — so orphan cleanup and
     // both connections' cache invalidations happen and the embedded chunks show up.
-    let _ = lib.cleanup_orphan_embeddings();
-    lib.invalidate_vector_cache();
-    drop(lib);
+    if let Ok(mut lib) = state.scan_library.lock() {
+        let _ = lib.cleanup_orphan_embeddings();
+        lib.invalidate_vector_cache();
+    }
     // The interactive connection served stale vectors until now — refresh it.
     if let Ok(interactive) = state.library.lock() {
         interactive.invalidate_vector_cache();
