@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
-import { X, ChevronDown, Download, Layers, AlertTriangle, Trash2, Ratio } from "lucide-react";
+import { X, ChevronDown, Download, AlertTriangle, Trash2, Ratio } from "lucide-react";
 import { useTray, type TrayItem } from "../stores/useTray";
 import { useApp } from "../stores/useApp";
 import { toast } from "../stores/useToast";
@@ -8,6 +8,7 @@ import { cx, prefersReducedMotion } from "../lib/utils";
 import { parseDropEntries } from "../lib/dnd";
 import { mismatchedDimUids } from "../lib/trayDims";
 import Thumbnail from "./Thumbnail";
+import TraySwitcher from "./TraySwitcher";
 
 const EXPANDED_H = 132;
 const COLLAPSED_H = 34;
@@ -77,22 +78,15 @@ export default function Tray() {
     >
       {/* Header bar */}
       <div className="flex h-8 shrink-0 items-center gap-2 px-3">
+        <TraySwitcher />
         <button
-          className="flex items-center gap-1.5 rounded-[5px] px-1 py-0.5 text-body font-medium text-ink hover:bg-ink/5"
+          className="flex h-6 w-6 items-center justify-center rounded-[5px] text-subtle hover:bg-ink/5 hover:text-ink"
           onClick={() => useTray.getState().toggleCollapsed()}
-          title="Toggle tray (⌘T)"
+          title="Collapse tray (⌘T)"
         >
-          <Layers size={14} className="text-accent" />
-          Composition
-          <span className="tabnum rounded-full bg-accent px-1.5 text-caption font-semibold text-white">
-            {items.length}
-          </span>
           <ChevronDown
-            size={13}
-            className={cx(
-              "text-subtle transition-transform",
-              collapsed && "rotate-180",
-            )}
+            size={14}
+            className={cx("transition-transform", collapsed && "rotate-180")}
           />
         </button>
 

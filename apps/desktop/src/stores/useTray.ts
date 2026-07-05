@@ -1,57 +1,70 @@
-// The composition tray — the app's whole reason to exist. It is a first-class,
-// persistent object: saved continuously to localStorage and restored on
-// relaunch, with cmd-Z undo/redo across add / remove / reorder.
+// The composition tray(s) — the app's whole reason to exist. Trays are
+// first-class, persistent objects: saved continuously to localStorage and
+// restored on relaunch, with cmd-Z undo/redo (scoped PER tray) across
+// add / remove / reorder.
+//
+// This store is a thin wrapper over the pure reducers in `lib/trayModel.ts`.
+// The multi-tray state lives flattened here (`trays`/`order`/`activeId`), and a
+// top-level `items` field MIRRORS the active tray so every existing consumer
+// that only cares about "the tray" keeps working unchanged (selectors like
+// `useTray(s => s.items)`, `add`, `remove`, `clear`, `picks`, `has`, undo/redo
+// all operate on the active tray).
 
 import { create } from "zustand";
 import type { DeckRecord, SlidePick, SlideRecord } from "../lib/types";
 import { toast } from "./useToast";
+import * as tm from "../lib/trayModel";
+import { uidFor, type Tray, type TrayItem, type TrayModel } from "../lib/trayModel";
 
-export interface TrayItem {
-  /** Stable id for reorder keys & dedupe (deck_id:slide_index). */
-  uid: string;
-  slide: SlideRecord;
-  deck: DeckRecord;
-  /** Set when the source deck appears to have moved/changed since it was added. */
-  moved?: boolean;
+export type { TrayItem };
+
+/** One entry in the tray switcher. */
+export interface TraySummary {
+  id: string;
+  name: string;
+  count: number;
 }
 
-const STORAGE_KEY = "slideflow.tray.v1";
-const HISTORY_LIMIT = 100;
-
-function uidFor(slide: SlideRecord): string {
-  return `${slide.deck_id}:${slide.slide_index}`;
-}
-
-function persist(items: TrayItem[]) {
+function freshId(): string {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    return crypto.randomUUID();
+  } catch {
+    return `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+function persist(model: TrayModel) {
+  try {
+    localStorage.setItem(tm.STORAGE_KEY_V2, JSON.stringify(tm.toPersisted(model)));
   } catch {
     /* storage full / disabled — non-fatal */
   }
 }
 
-function load(): TrayItem[] {
+function load(): TrayModel {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as TrayItem[]) : [];
+    const v1 = localStorage.getItem(tm.STORAGE_KEY_V1);
+    const v2 = localStorage.getItem(tm.STORAGE_KEY_V2);
+    return tm.migrate(v1, v2, freshId);
   } catch {
-    return [];
+    return tm.emptyModel(freshId());
   }
 }
 
 interface TrayState {
-  items: TrayItem[];
+  // Multi-tray model, flattened for zustand selectors.
+  trays: Record<string, Tray>;
+  order: string[];
+  activeId: string;
   collapsed: boolean;
-  /** Undo/redo snapshots of the full item list. */
-  past: TrayItem[][];
-  future: TrayItem[][];
+  /** Compatibility mirror: the ACTIVE tray's items, kept in sync on every op. */
+  items: TrayItem[];
 
   setCollapsed: (v: boolean) => void;
   toggleCollapsed: () => void;
 
-  /** Add slides (ignoring duplicates). Returns how many were newly added. */
+  /** Add slides to the active tray (ignoring duplicates). Returns how many were
+   *  newly added. */
   add: (entries: { slide: SlideRecord; deck: DeckRecord }[], atIndex?: number) => number;
   remove: (uid: string) => void;
   removeAt: (index: number) => void;
@@ -61,141 +74,169 @@ interface TrayState {
   undo: () => void;
   redo: () => void;
 
-  /** Mark items whose deck is missing from the freshly-indexed deck set. */
+  /** Mark items whose deck is missing from the freshly-indexed deck set, across
+   *  ALL trays. */
   reconcile: (decks: DeckRecord[]) => void;
 
   picks: () => SlidePick[];
   has: (slide: SlideRecord) => boolean;
+
+  // --- multiple named trays ------------------------------------------------
+  /** Create a new (auto-named unless `name` given) tray and switch to it.
+   *  Returns the new tray id. */
+  createTray: (name?: string) => string;
+  renameTray: (id: string, name: string) => void;
+  deleteTray: (id: string) => void;
+  switchTray: (id: string) => void;
+  /** Trays in display order, with item counts, for the switcher UI. */
+  trayList: () => TraySummary[];
 }
 
-function commit(
-  set: (partial: Partial<TrayState>) => void,
-  get: () => TrayState,
-  next: TrayItem[],
-) {
-  const prev = get().items;
-  const past = [...get().past, prev].slice(-HISTORY_LIMIT);
-  set({ items: next, past, future: [] });
-  persist(next);
-}
+export const useTray = create<TrayState>((set, get) => {
+  const modelOf = (): TrayModel => ({
+    trays: get().trays,
+    order: get().order,
+    activeId: get().activeId,
+    collapsed: get().collapsed,
+  });
 
-export const useTray = create<TrayState>((set, get) => ({
-  items: load(),
-  collapsed: false,
-  past: [],
-  future: [],
+  const applyModel = (model: TrayModel) => {
+    persist(model);
+    set({
+      trays: model.trays,
+      order: model.order,
+      activeId: model.activeId,
+      collapsed: model.collapsed,
+      items: tm.activeItems(model),
+    });
+  };
 
-  setCollapsed: (v) => set({ collapsed: v }),
-  toggleCollapsed: () => set((s) => ({ collapsed: !s.collapsed })),
+  const initial = load();
 
-  add: (entries, atIndex) => {
-    const existing = new Set(get().items.map((i) => i.uid));
-    const fresh: TrayItem[] = [];
-    for (const { slide, deck } of entries) {
+  return {
+    trays: initial.trays,
+    order: initial.order,
+    activeId: initial.activeId,
+    collapsed: initial.collapsed,
+    items: tm.activeItems(initial),
+
+    setCollapsed: (v) => applyModel({ ...modelOf(), collapsed: v }),
+    toggleCollapsed: () => applyModel({ ...modelOf(), collapsed: !get().collapsed }),
+
+    add: (entries, atIndex) => {
+      const model = modelOf();
+      const cur = tm.activeItems(model);
+      const existing = new Set(cur.map((i) => i.uid));
+      const fresh: TrayItem[] = [];
+      for (const { slide, deck } of entries) {
+        const uid = uidFor(slide);
+        if (existing.has(uid)) continue;
+        existing.add(uid);
+        fresh.push({ uid, slide, deck });
+      }
+      if (fresh.length === 0) return 0;
+      let next: TrayItem[];
+      if (atIndex == null || atIndex >= cur.length) {
+        next = [...cur, ...fresh];
+      } else {
+        const at = Math.max(0, atIndex);
+        next = [...cur.slice(0, at), ...fresh, ...cur.slice(at)];
+      }
+      applyModel(tm.commitItems(model, model.activeId, next));
+      return fresh.length;
+    },
+
+    remove: (uid) => {
+      const model = modelOf();
+      const cur = tm.activeItems(model);
+      const removed = cur.find((i) => i.uid === uid);
+      const next = cur.filter((i) => i.uid !== uid);
+      if (next.length === cur.length) return;
+      applyModel(tm.commitItems(model, model.activeId, next));
+      if (removed) {
+        toast.info("Removed from tray", {
+          label: "Undo",
+          run: () => get().undo(),
+        });
+      }
+    },
+
+    removeAt: (index) => {
+      const cur = get().items;
+      if (index < 0 || index >= cur.length) return;
+      get().remove(cur[index].uid);
+    },
+
+    reorder: (nextItems) => {
+      const model = modelOf();
+      const cur = tm.activeItems(model);
+      const same =
+        cur.length === nextItems.length &&
+        cur.every((it, i) => it.uid === nextItems[i].uid);
+      if (same) return;
+      applyModel(tm.commitItems(model, model.activeId, nextItems));
+    },
+
+    clear: () => {
+      const model = modelOf();
+      if (tm.activeItems(model).length === 0) return;
+      applyModel(tm.commitItems(model, model.activeId, []));
+    },
+
+    undo: () => {
+      const model = modelOf();
+      const next = tm.undo(model, model.activeId);
+      if (next !== model) applyModel(next);
+    },
+    redo: () => {
+      const model = modelOf();
+      const next = tm.redo(model, model.activeId);
+      if (next !== model) applyModel(next);
+    },
+
+    reconcile: (decks) => {
+      const model = modelOf();
+      const next = tm.reconcile(model, decks);
+      if (next !== model) applyModel(next);
+    },
+
+    picks: () => tm.picksOf(get().items),
+
+    has: (slide) => {
       const uid = uidFor(slide);
-      if (existing.has(uid)) continue;
-      existing.add(uid);
-      fresh.push({ uid, slide, deck });
-    }
-    if (fresh.length === 0) return 0;
-    const cur = get().items;
-    let next: TrayItem[];
-    if (atIndex == null || atIndex >= cur.length) {
-      next = [...cur, ...fresh];
-    } else {
-      const at = Math.max(0, atIndex);
-      next = [...cur.slice(0, at), ...fresh, ...cur.slice(at)];
-    }
-    commit(set, get, next);
-    return fresh.length;
-  },
+      return get().items.some((i) => i.uid === uid);
+    },
 
-  remove: (uid) => {
-    const cur = get().items;
-    const removed = cur.find((i) => i.uid === uid);
-    const next = cur.filter((i) => i.uid !== uid);
-    if (next.length === cur.length) return;
-    commit(set, get, next);
-    if (removed) {
-      toast.info("Removed from tray", {
-        label: "Undo",
-        run: () => get().undo(),
-      });
-    }
-  },
+    createTray: (name) => {
+      const id = freshId();
+      applyModel(tm.createTray(modelOf(), id, name));
+      return id;
+    },
 
-  removeAt: (index) => {
-    const cur = get().items;
-    if (index < 0 || index >= cur.length) return;
-    get().remove(cur[index].uid);
-  },
+    renameTray: (id, name) => {
+      const model = modelOf();
+      const next = tm.renameTray(model, id, name);
+      if (next !== model) applyModel(next);
+    },
 
-  reorder: (nextItems) => {
-    // Only commit if the order actually changed.
-    const cur = get().items;
-    const same =
-      cur.length === nextItems.length &&
-      cur.every((it, i) => it.uid === nextItems[i].uid);
-    if (same) return;
-    commit(set, get, nextItems);
-  },
+    deleteTray: (id) => {
+      const model = modelOf();
+      const next = tm.deleteTray(model, id, freshId);
+      if (next !== model) applyModel(next);
+    },
 
-  clear: () => {
-    if (get().items.length === 0) return;
-    commit(set, get, []);
-  },
+    switchTray: (id) => {
+      const model = modelOf();
+      const next = tm.switchTray(model, id);
+      if (next !== model) applyModel(next);
+    },
 
-  undo: () => {
-    const { past, items, future } = get();
-    if (past.length === 0) return;
-    const previous = past[past.length - 1];
-    set({
-      items: previous,
-      past: past.slice(0, -1),
-      future: [items, ...future].slice(0, HISTORY_LIMIT),
-    });
-    persist(previous);
-  },
-
-  redo: () => {
-    const { future, items, past } = get();
-    if (future.length === 0) return;
-    const next = future[0];
-    set({
-      items: next,
-      future: future.slice(1),
-      past: [...past, items].slice(-HISTORY_LIMIT),
-    });
-    persist(next);
-  },
-
-  reconcile: (decks) => {
-    const byId = new Map(decks.map((d) => [d.id, d]));
-    const byPath = new Map(decks.map((d) => [d.path, d]));
-    let changed = false;
-    const next = get().items.map((it) => {
-      // The deck is considered present if we can still find it by id OR path.
-      const present = byId.has(it.deck.id) || byPath.has(it.deck.path);
-      const moved = !present;
-      if (moved !== !!it.moved) changed = true;
-      return moved === !!it.moved ? it : { ...it, moved };
-    });
-    if (changed) {
-      set({ items: next });
-      persist(next);
-    }
-  },
-
-  picks: () =>
-    get().items.map((it) => ({
-      pptx_path: it.deck.path,
-      slide_index: it.slide.slide_index,
-    })),
-
-  has: (slide) => {
-    const uid = uidFor(slide);
-    return get().items.some((i) => i.uid === uid);
-  },
-}));
+    trayList: () =>
+      get().order.map((id) => {
+        const t = get().trays[id];
+        return { id, name: t.name, count: t.items.length };
+      }),
+  };
+});
 
 export { uidFor };
