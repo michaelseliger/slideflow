@@ -367,14 +367,22 @@ export async function pickFolder(): Promise<string | null> {
   return typeof result === "string" ? result : null;
 }
 
-/** Native "save as .pptx" dialog; browser mode returns a canned path. */
-export async function pickSavePath(defaultName: string): Promise<string | null> {
+/** Native "save as .pptx" dialog; browser mode returns a canned path.
+ *  `defaultDir` (a remembered folder) pre-points the dialog when provided. */
+export async function pickSavePath(
+  defaultName: string,
+  defaultDir?: string,
+): Promise<string | null> {
   if (!isTauri()) {
-    return `/Users/you/Desktop/${defaultName}`;
+    const dir = defaultDir && defaultDir.length > 0 ? defaultDir : "/Users/you/Desktop";
+    return `${dir}/${defaultName}`;
   }
   const { save } = await import("@tauri-apps/plugin-dialog");
+  const sep = defaultDir && defaultDir.includes("\\") ? "\\" : "/";
+  const defaultPath =
+    defaultDir && defaultDir.length > 0 ? `${defaultDir}${sep}${defaultName}` : defaultName;
   const result = await save({
-    defaultPath: defaultName,
+    defaultPath,
     filters: [{ name: "PowerPoint", extensions: ["pptx"] }],
   });
   return result ?? null;

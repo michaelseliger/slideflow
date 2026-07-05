@@ -12,7 +12,8 @@ import {
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
-import { prefersReducedMotion } from "../lib/utils";
+import { dirname, prefersReducedMotion } from "../lib/utils";
+import { readExportPreset, writeExportPreset } from "../lib/exportPreset";
 import type { ComposeReport } from "../lib/types";
 import * as api from "../lib/api";
 
@@ -32,12 +33,21 @@ export default function ExportSheet() {
   const [title, setTitle] = useState("Slideflow Deck");
   const [includeNotes, setIncludeNotes] = useState(false);
   const [phase, setPhase] = useState<Phase>({ step: "form" });
+  const [presetApplied, setPresetApplied] = useState(false);
   const confettiFired = useRef(false);
 
   useEffect(() => {
-    if (open) {
-      setPhase({ step: "form" });
-      confettiFired.current = false;
+    if (!open) return;
+    setPhase({ step: "form" });
+    confettiFired.current = false;
+    // Re-apply the last SUCCESSFUL export's preset each time the sheet opens.
+    const p = readExportPreset();
+    if (p) {
+      setTitle(p.title);
+      setIncludeNotes(p.include_notes);
+      setPresetApplied(true);
+    } else {
+      setPresetApplied(false);
     }
   }, [open]);
 
@@ -51,7 +61,8 @@ export default function ExportSheet() {
     if (picks.length === 0) return;
     const safe = title.trim() || "Slideflow Deck";
     const defaultName = `${safe.replace(/[^\w.-]+/g, "-")}.pptx`;
-    const outputPath = await api.pickSavePath(defaultName);
+    const lastDir = readExportPreset()?.last_dir;
+    const outputPath = await api.pickSavePath(defaultName, lastDir);
     if (!outputPath) return;
 
     const total = picks.length;
@@ -68,6 +79,12 @@ export default function ExportSheet() {
     try {
       const report = await api.composeDeck(picks, outputPath, safe, includeNotes);
       window.clearInterval(timer);
+      // Remember what was actually used (folder only — never the filename).
+      writeExportPreset({
+        title: safe,
+        include_notes: includeNotes,
+        last_dir: dirname(report.output_path),
+      });
       setPhase({ step: "done", report });
     } catch (err) {
       window.clearInterval(timer);
@@ -141,6 +158,12 @@ export default function ExportSheet() {
                       className="selectable w-full rounded-[6px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
                     />
                   </label>
+
+                  {presetApplied && (
+                    <p className="mb-3 -mt-1 text-caption text-subtle">
+                      Starting from your last export.
+                    </p>
+                  )}
 
                   <label className="mb-4 flex items-center gap-2 text-body text-ink">
                     <input
