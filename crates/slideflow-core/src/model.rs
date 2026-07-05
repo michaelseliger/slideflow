@@ -45,6 +45,11 @@ pub struct SlideRecord {
     /// User-starred slide. Keyed by (deck path, slide index), so it survives
     /// reindexing.
     pub favorite: bool,
+    /// Layout/master/theme-independent fingerprint of the slide's authored
+    /// content (see [`crate::hash::slide_content_hash`]). Powers exact-duplicate
+    /// detection. `None` until the slide has been (re)scanned by a build that
+    /// computes it.
+    pub content_hash: Option<String>,
 }
 
 /// A search result: slide + owning deck + ranking info.

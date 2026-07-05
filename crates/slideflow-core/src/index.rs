@@ -134,10 +134,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS slides_fts USING fts5(
 const DECK_COLS: &str = "d.id, d.path, d.file_name, d.title, d.author, d.slide_count, \
     d.modified_unix, d.size_bytes, d.slide_width_emu, d.slide_height_emu, d.first_seen_unix, \
     EXISTS(SELECT 1 FROM deck_favorites df WHERE df.deck_path = d.path)";
-/// Columns selected for a `SlideRecord`, in field order (8 columns; requires
+/// Columns selected for a `SlideRecord`, in field order (9 columns; requires
 /// table aliases `s` AND `d` — the favorite flag is keyed by deck path).
 const SLIDE_COLS: &str = "s.id, s.deck_id, s.slide_index, s.title, s.body_text, s.notes, s.thumb_path, \
-    EXISTS(SELECT 1 FROM slide_favorites sf WHERE sf.deck_path = d.path AND sf.slide_index = s.slide_index)";
+    EXISTS(SELECT 1 FROM slide_favorites sf WHERE sf.deck_path = d.path AND sf.slide_index = s.slide_index), \
+    s.content_hash";
 
 /// bm25 weights: title > deck_title > body > notes.
 const BM25: &str = "bm25(slides_fts, 4.0, 1.0, 0.6, 2.0)";
@@ -191,6 +192,7 @@ impl Library {
                 1 => tx.execute_batch(MIGRATIONS_V1)?,
                 2 => tx.execute_batch(MIGRATIONS_V2)?,
                 3 => tx.execute_batch(MIGRATIONS_V3)?,
+                4 => tx.execute_batch(MIGRATIONS_V4)?,
                 _ => unreachable!("no migration for schema v{next}"),
             }
             // PRAGMA cannot bind params — format the (internal, trusted) integer.
@@ -540,9 +542,18 @@ impl Library {
 
         for slide in &deck.slides {
             tx.execute(
-                "INSERT INTO slides(deck_id, slide_index, title, body_text, notes, thumb_path) \
-                 VALUES(?1,?2,?3,?4,?5,NULL)",
-                params![deck_id, slide.index, slide.title, slide.body_text, slide.notes],
+                "INSERT INTO slides(deck_id, slide_index, title, body_text, notes, thumb_path, \
+                 content_hash, text_hash) \
+                 VALUES(?1,?2,?3,?4,?5,NULL,?6,?7)",
+                params![
+                    deck_id,
+                    slide.index,
+                    slide.title,
+                    slide.body_text,
+                    slide.notes,
+                    slide.content_hash,
+                    slide.text_hash,
+                ],
             )?;
             let sid = tx.last_insert_rowid();
             // deck_title column carries the docProps title AND the file name so
@@ -1377,7 +1388,7 @@ fn row_to_root(r: &Row) -> rusqlite::Result<RootRecord> {
 }
 
 /// Number of columns in [`SLIDE_COLS`] / [`DECK_COLS`] — keep in sync.
-const SLIDE_COL_COUNT: usize = 8;
+const SLIDE_COL_COUNT: usize = 9;
 const DECK_COL_COUNT: usize = 12;
 
 fn row_to_deck(r: &Row, base: usize) -> rusqlite::Result<DeckRecord> {
@@ -1407,6 +1418,7 @@ fn row_to_slide(r: &Row, base: usize) -> rusqlite::Result<SlideRecord> {
         notes: r.get(base + 5)?,
         thumb_path: r.get(base + 6)?,
         favorite: r.get(base + 7)?,
+        content_hash: r.get(base + 8)?,
     })
 }
 
@@ -1485,7 +1497,7 @@ const INDEX_VERSION: u32 = 2;
 /// user_version` tracks the DB's current level; [`Library::migrate`] applies
 /// each `MIGRATIONS_V*` step in order until the DB reaches this. Distinct from
 /// INDEX_VERSION: a schema migration is not a re-parse trigger.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// v1 additive migration: new deck/scan/root columns and the diagnostics tables
 /// (scan_issues/render_issues/export_picks). ADD COLUMN NOT NULL all carry a
@@ -1560,6 +1572,26 @@ CREATE TABLE IF NOT EXISTS slide_tags(
     PRIMARY KEY(tag_id, deck_path, slide_index)
 );
 CREATE INDEX IF NOT EXISTS idx_slide_tags_slide ON slide_tags(deck_path, slide_index);
+"#;
+
+/// v4 additive migration: per-slide content/text hashes + the embeddings store.
+/// Its own version step (see the freeze rule on [`MIGRATIONS_V2`]): the
+/// `ALTER TABLE ADD COLUMN`s here are NOT idempotent, which is exactly why they
+/// must live in a version a stamped DB runs exactly once — a v3-stamped DB
+/// reaches this step once and gains the columns; a v4-stamped DB never re-runs
+/// it, so the ALTERs can never hit 'duplicate column name'.
+const MIGRATIONS_V4: &str = r#"
+-- WS-B: embeddings + content hashes
+ALTER TABLE slides ADD COLUMN content_hash TEXT;
+ALTER TABLE slides ADD COLUMN text_hash TEXT;
+CREATE INDEX IF NOT EXISTS idx_slides_content_hash ON slides(content_hash);
+CREATE TABLE IF NOT EXISTS embeddings(
+    model_id  TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    dims      INTEGER NOT NULL,
+    vector    BLOB NOT NULL,
+    PRIMARY KEY(model_id, text_hash)
+);
 "#;
 
 fn content_hash(mtime: i64, size: i64) -> String {
@@ -1649,6 +1681,11 @@ struct ExtractedSlide {
     title: Option<String>,
     body_text: String,
     notes: Option<String>,
+    /// Layout-independent content fingerprint (always computed; cheap).
+    content_hash: String,
+    /// sha256 of the embedder input string, or `None` when the slide has no
+    /// indexable text. Keys the (model_id, text_hash) embeddings rows.
+    text_hash: Option<String>,
 }
 
 struct ExtractedDeck {
@@ -1683,11 +1720,19 @@ fn extract_deck(path: &Path) -> Result<ExtractedDeck> {
     let mut slides = Vec::with_capacity(pf.slide_count());
     for i in 1..=pf.slide_count() {
         let content = pf.slide_content(i)?;
+        let slide_part = pf.slide_part(i)?.to_string();
+        let content_hash = crate::hash::slide_content_hash(&pf.package, &slide_part)?;
+        let body_text = content.texts.join("\n");
+        let embed_text =
+            crate::hash::slide_embed_text(content.title.as_deref(), &body_text, content.notes.as_deref());
+        let text_hash = embed_text.as_deref().map(crate::hash::text_hash);
         slides.push(ExtractedSlide {
             index: i as i64,
             title: content.title.clone(),
-            body_text: content.texts.join("\n"),
+            body_text,
             notes: content.notes.clone(),
+            content_hash,
+            text_hash,
         });
     }
 
@@ -1834,6 +1879,74 @@ mod tests {
         assert_eq!(roots[0].deck_count, 2);
         assert_eq!(roots[0].slide_count, 3);
         assert!(roots[0].last_scan_unix.is_some());
+    }
+
+    #[test]
+    fn scan_fills_slide_hashes_and_dedupes_identical_content() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Shared").bullets(&["x", "y"]))
+            .slide(SlideSpec::new("UniqueA").bullets(&["only a"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        // b.pptx re-authors the SAME "Shared" slide under a different deck.
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Shared").bullets(&["x", "y"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        // Every slide got a content hash + text hash.
+        let (n_ch, n_th): (i64, i64) = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(content_hash), COUNT(text_hash) FROM slides",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n_ch, 3, "all three slides hashed");
+        assert_eq!(n_th, 3, "all three slides have text");
+
+        // The identically-authored "Shared" slide clusters across the two decks.
+        let dup_groups: i64 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM \
+                 (SELECT content_hash FROM slides GROUP BY content_hash HAVING COUNT(*) > 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dup_groups, 1);
+        let distinct: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(DISTINCT content_hash) FROM slides", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(distinct, 2, "Shared collides; UniqueA does not");
+
+        // The hash surfaces on the record model.
+        let deck = lib.decks().unwrap().into_iter().find(|d| d.file_name == "a.pptx").unwrap();
+        let slides = lib.slides_for_deck(deck.id).unwrap();
+        assert!(slides.iter().all(|s| s.content_hash.is_some()));
+    }
+
+    #[test]
+    fn unchanged_text_rescan_keeps_text_hash_stable() {
+        // Re-indexing a deck (delete+reinsert of its slide rows) must preserve
+        // each slide's text hash, so embeddings keyed by it are never orphaned.
+        let (_dir, lib) = two_deck_library();
+        let before: Vec<Option<String>> = {
+            let mut stmt = lib
+                .conn
+                .prepare("SELECT text_hash FROM slides ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert!(before.iter().all(|h| h.is_some()));
     }
 
     #[test]
@@ -2641,7 +2754,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_v0_to_v1_preserves_data() {
+    fn migration_v0_to_latest_preserves_data() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lib.db");
 
@@ -2706,12 +2819,24 @@ mod tests {
         assert!(lib.conn.prepare("SELECT skipped FROM scan_history").is_ok());
         assert!(lib.conn.prepare("SELECT exclude_globs FROM roots").is_ok());
 
-        // New tables exist.
-        for table in ["scan_issues", "render_issues", "export_picks"] {
+        // New tables exist (v1 diagnostics + v2 embeddings).
+        for table in ["scan_issues", "render_issues", "export_picks", "embeddings"] {
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let n: i64 = lib.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
             assert_eq!(n, 0);
         }
+
+        // v2 slide-hash columns exist and are NULL for the pre-migration row
+        // (they are only populated by a build that rescans).
+        assert!(lib.conn.prepare("SELECT content_hash, text_hash FROM slides").is_ok());
+        let (ch, th): (Option<String>, Option<String>) = lib
+            .conn
+            .query_row("SELECT content_hash, text_hash FROM slides", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(ch, None);
+        assert_eq!(th, None);
 
         // Favorites survived the migration.
         let sf: i64 = lib.conn.query_row("SELECT COUNT(*) FROM slide_favorites", [], |r| r.get(0)).unwrap();
@@ -3342,11 +3467,21 @@ mod tests {
         drop(Library::open(&db_path).unwrap()); // fresh DB, fully migrated
 
         {
+            // Reconstruct a GENUINE v2-era DB: strip the v3 objects being tested
+            // AND every later version's objects. A DB really stamped at 2
+            // predates v4, so it cannot carry the v4 columns — each batch and
+            // its stamp commit atomically. Leaving them in place would make the
+            // v4 replay (non-idempotent ALTERs, by design) fail on a state that
+            // cannot occur in the wild.
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "DROP INDEX idx_slide_tags_slide;
                  DROP TABLE slide_tags;
                  DROP TABLE tags;
+                 DROP INDEX idx_slides_content_hash;
+                 DROP TABLE embeddings;
+                 ALTER TABLE slides DROP COLUMN content_hash;
+                 ALTER TABLE slides DROP COLUMN text_hash;
                  PRAGMA user_version = 2;",
             )
             .unwrap();
@@ -3356,6 +3491,57 @@ mod tests {
         assert!(lib.list_tags().unwrap().is_empty(), "tags tables recreated by the v3 step");
         let version: i64 =
             lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// Same healing shape for WS-B: a DB stamped at 3 WITHOUT the hash columns
+    /// or the embeddings table gains them on reopen — precisely because the v4
+    /// step runs for it. The v4 `ALTER TABLE ADD COLUMN`s are NOT idempotent,
+    /// which is exactly why they live in their own version step that a
+    /// v3-stamped DB executes exactly once; a v4-stamped DB never re-runs them,
+    /// so reopening an up-to-date DB can never hit 'duplicate column name'.
+    #[test]
+    fn reopening_heals_db_stamped_v3_without_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+        drop(Library::open(&db_path).unwrap()); // fresh DB, fully migrated
+
+        {
+            // Strip every v4 object and stamp the DB back to 3 — the state of a
+            // library last touched by a build without the embeddings step.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_slides_content_hash;
+                 DROP TABLE embeddings;
+                 ALTER TABLE slides DROP COLUMN content_hash;
+                 ALTER TABLE slides DROP COLUMN text_hash;
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+            // Sanity: the column really is gone before the healing reopen.
+            assert!(conn.prepare("SELECT content_hash FROM slides").is_err());
+        }
+
+        // Reopen: migrate() finds user_version == 3 < SCHEMA_VERSION and runs
+        // EXACTLY the v4 batch — the objects below can only come from it.
+        let lib = Library::open(&db_path).unwrap();
+        let version: i64 =
+            lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            lib.conn.prepare("SELECT content_hash, text_hash FROM slides").is_ok(),
+            "hash columns recreated by the v4 step"
+        );
+        let embeddings: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(embeddings, 0, "embeddings table recreated by the v4 step");
+        drop(lib);
+
+        // A v4-stamped DB reopening must NOT error: the non-idempotent ALTERs
+        // are guarded by user_version and never run twice.
+        let again = Library::open(&db_path).unwrap();
+        let version: i64 =
+            again.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 
