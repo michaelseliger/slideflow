@@ -676,6 +676,13 @@ fn decode_uncompressed_tiff(b: &[u8]) -> Option<Vec<u8>> {
         }
         let count = count as usize;
         let total = ts.checked_mul(count)?;
+        // A tag's values physically live in the file, so `total` can never exceed
+        // its length. Reject an absurd count (a hostile IFD can claim ~4 billion,
+        // e.g. count 0xFFFFFFFF of LONG → ~17 GB) HERE, before the
+        // `Vec::with_capacity(count)` below reserves gigabytes and aborts.
+        if total > b.len() {
+            return None;
+        }
         let base = if total <= 4 { valoff } else { r32(valoff)? as usize };
         let mut out = Vec::with_capacity(count);
         for i in 0..count {
@@ -716,17 +723,17 @@ fn decode_uncompressed_tiff(b: &[u8]) -> Option<Vec<u8>> {
     if strip_offsets.len() != strip_counts.len() || strip_offsets.is_empty() {
         return None;
     }
-
-    // Concatenate the strips (in IFD order = top-to-bottom) into one buffer.
-    let mut raw: Vec<u8> = Vec::new();
-    for (o, c) in strip_offsets.iter().zip(&strip_counts) {
-        let start = *o as usize;
-        let end = start.checked_add(*c as usize)?;
-        raw.extend_from_slice(b.get(start..end)?);
+    // A strip spans whole rows, so a valid file has at most one strip per row.
+    // Reject an absurd strip table (a hostile file can list millions of strips,
+    // each claiming the whole file — naively summing them would `extend` terabytes)
+    // before touching any strip data.
+    if strip_offsets.len() > height {
+        return None;
     }
     let _ = rows_per_strip; // strips are whole rows; sequential concat suffices.
 
-    // Resolve output channels and the packed source row width.
+    // Resolve output channels and the packed source row width. Computed BEFORE the
+    // strip concatenation so it can bound how much we copy.
     let (out_ch, row_bytes) = match photometric {
         3 => {
             let bpp = *bits.first()?;
@@ -750,7 +757,24 @@ fn decode_uncompressed_tiff(b: &[u8]) -> Option<Vec<u8>> {
         }
         _ => return None,
     };
-    if raw.len() < height.checked_mul(row_bytes)? {
+
+    // The image needs exactly `height` full rows. Bound the concatenation by this
+    // (`width*height ≤ 40M` was checked above, so `expected ≤ ~160 MB`) and stop
+    // once we have it — a strip table whose byte counts sum to gigabytes fills only
+    // what the image uses and is truncated to exactly `expected`, never ballooning
+    // `raw` past the image. A legit file's strips sum to precisely this.
+    let expected = height.checked_mul(row_bytes)?;
+    let mut raw: Vec<u8> = Vec::with_capacity(expected);
+    for (o, c) in strip_offsets.iter().zip(&strip_counts) {
+        if raw.len() >= expected {
+            break;
+        }
+        let start = *o as usize;
+        let end = start.checked_add(*c as usize)?;
+        raw.extend_from_slice(b.get(start..end)?);
+    }
+    raw.truncate(expected);
+    if raw.len() < expected {
         return None;
     }
 
@@ -1883,6 +1907,96 @@ mod tests {
         // Hostile inputs.
         assert!(decode_uncompressed_tiff(b"II*\0\xff\xff\xff\xff").is_none());
         assert!(decode_uncompressed_tiff(b"").is_none());
+    }
+
+    /// A little-endian TIFF whose IFD entries are written verbatim — each is
+    /// `(tag, field-type, count, 4-byte value/offset)` — with no strip payload.
+    /// Lets a test set a hostile `count` the honest `build_tiff` (which derives
+    /// counts from real arrays) can't express.
+    fn tiff_with_raw_ifd(entries: &[(u16, u16, u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&42u16.to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes()); // IFD at offset 8
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, typ, count, val) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&typ.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&val.to_le_bytes());
+        }
+        out.extend_from_slice(&0u32.to_le_bytes()); // next IFD
+        out
+    }
+
+    #[test]
+    fn hostile_tiff_giant_ifd_count_rejected_without_oom() {
+        // Regression: the `values` closure did `Vec::with_capacity(count)` with a
+        // count read straight from the file. A StripOffsets entry claiming ~4
+        // billion LONGs (0xFFFFFFFF × 4 bytes ≈ 17 GB) must now bail — the count
+        // exceeds the file length — returning None cheaply instead of aborting.
+        let tiff = tiff_with_raw_ifd(&[
+            (256, 3, 1, 2),                    // ImageWidth = 2
+            (257, 3, 1, 2),                    // ImageLength = 2
+            (258, 3, 1, 8),                    // BitsPerSample = 8
+            (259, 3, 1, 1),                    // Compression = none
+            (262, 3, 1, 2),                    // Photometric = RGB
+            (277, 3, 1, 3),                    // SamplesPerPixel = 3
+            (273, 4, 0xFFFF_FFFF, 8),          // StripOffsets: absurd count
+            (279, 4, 1, 12),                   // StripByteCounts = 12
+        ]);
+        assert!(decode_uncompressed_tiff(&tiff).is_none());
+
+        // The same guard on a bloated ColorMap (palette photometric).
+        let tiff = tiff_with_raw_ifd(&[
+            (256, 3, 1, 2),
+            (257, 3, 1, 2),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),                    // Photometric = palette
+            (277, 3, 1, 1),
+            (273, 4, 1, 8),
+            (279, 4, 1, 4),
+            (320, 3, 0xFFFF_FFFF, 8),          // ColorMap: absurd count
+        ]);
+        assert!(decode_uncompressed_tiff(&tiff).is_none());
+    }
+
+    #[test]
+    fn hostile_tiff_strip_flood_rejected_without_oom() {
+        // Regression: strips were bounds-checked individually but their SUM was
+        // unbounded — a million strips each claiming the whole file would `extend`
+        // terabytes into `raw`. A 2-row image listing 300k strips has more strips
+        // than rows, so it must be rejected up front (no allocation, no panic).
+        let n = 300_000u32;
+        let mut entries = vec![
+            (256u16, 3u16, 1u32, 2u32),        // ImageWidth = 2
+            (257, 3, 1, 2),                    // ImageLength = 2 (only 2 rows!)
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 2),                    // RGB
+            (277, 3, 1, 3),
+        ];
+        // Out-of-line StripOffsets/StripByteCounts arrays of `n` entries each,
+        // appended after the IFD; every strip points at (and claims) the header.
+        let ifd_entry_count = (entries.len() + 2) as u32; // + the two strip tags
+        let ifd_start = 8u32;
+        let ifd_size = 2 + 12 * ifd_entry_count + 4;
+        let arr1_off = ifd_start + ifd_size;
+        let arr2_off = arr1_off + 4 * n;
+        entries.push((273, 4, n, arr1_off));
+        entries.push((279, 4, n, arr2_off));
+        entries.sort_by_key(|e| e.0);
+
+        let mut tiff = tiff_with_raw_ifd(&entries);
+        // The raw builder wrote the IFD but not the out-of-line arrays; append them.
+        for _ in 0..n {
+            tiff.extend_from_slice(&0u32.to_le_bytes()); // StripOffsets → 0
+        }
+        for _ in 0..n {
+            tiff.extend_from_slice(&8u32.to_le_bytes()); // StripByteCounts → 8
+        }
+        assert!(decode_uncompressed_tiff(&tiff).is_none());
     }
 
     // --- EMF vector interpreter --------------------------------------------
