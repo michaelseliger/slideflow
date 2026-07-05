@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  AlertTriangle,
   BarChart3,
   Clock,
   Download,
@@ -118,6 +119,31 @@ export default function StatsView() {
             <Empty>No index run recorded yet.</Empty>
           )}
         </Section>
+
+        {/* Problems (hidden when the last run had no skips) */}
+        {overview.last_scan_issues.length > 0 && (
+          <Section icon={<AlertTriangle size={14} />} title="Problems">
+            <ul>
+              {overview.last_scan_issues.map((issue, i) => (
+                <li
+                  key={`${issue.path}-${i}`}
+                  className="flex items-center gap-3 rounded-[6px] px-2 py-1.5 hover:bg-ink/5"
+                  title={issue.path}
+                >
+                  <span className="min-w-0 flex-1 truncate text-body text-ink">
+                    {basename(issue.path)}
+                  </span>
+                  <span
+                    className="min-w-0 max-w-[55%] shrink-0 truncate text-caption text-subtle"
+                    title={issue.reason}
+                  >
+                    {issue.reason}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
 
         {/* Recent searches */}
         <Section icon={<Search size={14} />} title="Recent searches">

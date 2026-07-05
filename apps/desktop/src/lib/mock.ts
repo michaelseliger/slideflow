@@ -116,6 +116,14 @@ const DECK_SEEDS: DeckSeed[] = [
   },
 ];
 
+/** A single scan skip surfaced in browser mode so the Problems section and the
+ *  live scan `skipped[]` both have something to render. Shared with the scan
+ *  simulation in `api.ts`. */
+export const MOCK_SCAN_ISSUE = {
+  path: "/Users/you/Decks/Archive/Q1-Draft-corrupt.pptx",
+  reason: "invalid zip: could not read central directory",
+};
+
 function svgFor(deck: DeckSeed, title: string, body: string): string {
   const esc = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -408,14 +416,14 @@ export const mock = {
       indexed: mockDecks.length,
       removed: 0,
       unchanged: 0,
-      skipped: 0,
+      skipped: 1,
     },
     recent_searches: structuredClone(mockSearches.slice(0, 10)),
     recent_exports: structuredClone(mockExports.slice(0, 10)),
     largest_decks: structuredClone(
       [...mockDecks].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, 5),
     ),
-    last_scan_issues: [],
+    last_scan_issues: [MOCK_SCAN_ISSUE],
     render_drops: [],
   }),
 

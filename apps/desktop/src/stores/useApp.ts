@@ -8,6 +8,7 @@ import type {
   DeckRecord,
   RootRecord,
   ScanEvent,
+  ScanIssue,
   SearchFilters,
   SearchHit,
   Stats,
@@ -30,6 +31,7 @@ export interface ScanState {
   total: number;
   indexed: number;
   lastPath: string | null;
+  skipped: ScanIssue[];
 }
 
 /** A reusable confirm-dialog request. Rendered by `ConfirmDialog`; the store
@@ -206,7 +208,7 @@ export const useApp = create<AppState>((set, get) => ({
   theme: loadTheme(),
   dark: applyTheme(loadTheme()),
 
-  scan: { running: false, done: 0, total: 0, indexed: 0, lastPath: null },
+  scan: { running: false, done: 0, total: 0, indexed: 0, lastPath: null, skipped: [] },
 
   confirm: null,
 
@@ -475,7 +477,7 @@ export const useApp = create<AppState>((set, get) => ({
   startScan: async () => {
     if (get().scan.running) return;
     set({
-      scan: { running: true, done: 0, total: 0, indexed: 0, lastPath: null },
+      scan: { running: true, done: 0, total: 0, indexed: 0, lastPath: null, skipped: [] },
     });
     try {
       const started = await api.startScan();
@@ -497,6 +499,7 @@ export const useApp = create<AppState>((set, get) => ({
         scan.done = 0;
         scan.indexed = 0;
         scan.lastPath = null;
+        scan.skipped = [];
         break;
       case "deck":
         scan.done = ev.done;
@@ -506,6 +509,7 @@ export const useApp = create<AppState>((set, get) => ({
         break;
       case "skipped":
         scan.lastPath = ev.path;
+        scan.skipped = [...scan.skipped, { path: ev.path, reason: ev.reason }];
         break;
       case "finished":
         scan.running = false;

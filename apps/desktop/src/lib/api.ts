@@ -17,7 +17,7 @@ import type {
   StatsOverview,
   UpdateEvent,
 } from "./types";
-import { mock } from "./mock";
+import { mock, MOCK_SCAN_ISSUE } from "./mock";
 import { svgToDataUri } from "./utils";
 
 /** True when running inside the Tauri webview (native shell present). */
@@ -105,13 +105,15 @@ async function mockStartScan(): Promise<boolean> {
     done += 1;
     emitMockScan({ kind: "deck", path: d.path, done, total });
   }
+  // Emit one skip so browser mode exercises the diagnostics surface.
+  emitMockScan({ kind: "skipped", path: MOCK_SCAN_ISSUE.path, reason: MOCK_SCAN_ISSUE.reason });
   const stats = await mock.getStats();
   emitMockScan({
     kind: "finished",
     indexed: total,
     removed: 0,
     unchanged: 0,
-    skipped: 0,
+    skipped: 1,
   });
   void stats;
   return true;

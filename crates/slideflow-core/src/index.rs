@@ -43,8 +43,8 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    DeckRecord, ExportRecord, RootRecord, ScanEvent, ScanRecord, SearchFilters, SearchHit,
-    SearchHistoryEntry, SlideRecord, StatsOverview,
+    DeckRecord, ExportRecord, RootRecord, ScanEvent, ScanIssue, ScanRecord, SearchFilters,
+    SearchHit, SearchHistoryEntry, SlideRecord, StatsOverview,
 };
 use crate::pptx::PresentationFile;
 
@@ -294,7 +294,7 @@ impl Library {
         let mut indexed = 0usize;
         let mut unchanged = 0usize;
         let mut removed = 0usize;
-        let mut skipped = 0usize;
+        let mut skipped: Vec<(String, String)> = Vec::new();
 
         for (i, (root_id, path)) in candidates.into_iter().enumerate() {
             let done = i + 1;
@@ -304,8 +304,9 @@ impl Library {
             let meta = match std::fs::metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    skipped += 1;
-                    progress(ScanEvent::Skipped { path: path_str, reason: e.to_string() });
+                    let reason = e.to_string();
+                    skipped.push((path_str.clone(), reason.clone()));
+                    progress(ScanEvent::Skipped { path: path_str, reason });
                     continue;
                 }
             };
@@ -334,8 +335,9 @@ impl Library {
                     progress(ScanEvent::Deck { path: path_str, done, total });
                 }
                 Err(e) => {
-                    skipped += 1;
-                    progress(ScanEvent::Skipped { path: path_str, reason: e.to_string() });
+                    let reason = e.to_string();
+                    skipped.push((path_str.clone(), reason.clone()));
+                    progress(ScanEvent::Skipped { path: path_str, reason });
                 }
             }
         }
@@ -358,26 +360,40 @@ impl Library {
         let now = now_unix();
         self.conn.execute("UPDATE roots SET last_scan_unix=?1", params![now])?;
 
-        // Record the run for the stats view (best-effort).
-        let _ = self.conn.execute(
-            "INSERT INTO scan_history(started_unix, duration_ms, indexed, removed, unchanged, skipped) \
-             VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                started_unix,
-                scan_started.elapsed().as_millis() as i64,
-                indexed as i64,
-                removed as i64,
-                unchanged as i64,
-                skipped as i64,
-            ],
-        );
+        // Record the run for the stats view (best-effort). Insert history first so
+        // we can attach one scan_issues row per buffered skip via its rowid.
+        let history_written = self
+            .conn
+            .execute(
+                "INSERT INTO scan_history(started_unix, duration_ms, indexed, removed, unchanged, skipped) \
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    started_unix,
+                    scan_started.elapsed().as_millis() as i64,
+                    indexed as i64,
+                    removed as i64,
+                    unchanged as i64,
+                    skipped.len() as i64,
+                ],
+            )
+            .is_ok();
+        if history_written {
+            let scan_id = self.conn.last_insert_rowid();
+            for (path, reason) in &skipped {
+                let _ = self.conn.execute(
+                    "INSERT INTO scan_issues(scan_id, path, reason) VALUES(?1,?2,?3)",
+                    params![scan_id, path, reason],
+                );
+            }
+        }
+        // Keep the table bounded; scan_issues ON DELETE CASCADE drops trimmed scans' issues.
         let _ = self.conn.execute(
             "DELETE FROM scan_history WHERE id NOT IN \
              (SELECT id FROM scan_history ORDER BY id DESC LIMIT 50)",
             [],
         );
 
-        progress(ScanEvent::Finished { indexed, removed, unchanged, skipped });
+        progress(ScanEvent::Finished { indexed, removed, unchanged, skipped: skipped.len() });
         Ok(())
     }
 
@@ -846,6 +862,17 @@ impl Library {
             v
         };
 
+        let last_scan_issues = {
+            let mut stmt = self.conn.prepare(
+                "SELECT path, reason FROM scan_issues \
+                 WHERE scan_id = (SELECT MAX(id) FROM scan_history) ORDER BY id LIMIT 200",
+            )?;
+            let v: Vec<ScanIssue> = stmt
+                .query_map([], |r| Ok(ScanIssue { path: r.get(0)?, reason: r.get(1)? }))?
+                .collect::<rusqlite::Result<_>>()?;
+            v
+        };
+
         Ok(StatsOverview {
             deck_count,
             slide_count,
@@ -856,10 +883,9 @@ impl Library {
             recent_searches,
             recent_exports,
             largest_decks,
-            // Empty in step0: step3 replaces last_scan_issues with a scan_issues
-            // query keyed on the newest scan_history.id; step6 replaces
-            // render_drops with a render_issues aggregation.
-            last_scan_issues: Vec::new(),
+            last_scan_issues,
+            // Empty in step0: step6 replaces render_drops with a
+            // render_issues aggregation.
             render_drops: Vec::new(),
         })
     }
@@ -1248,6 +1274,60 @@ mod tests {
         assert_eq!(roots[0].deck_count, 2);
         assert_eq!(roots[0].slide_count, 3);
         assert!(roots[0].last_scan_unix.is_some());
+    }
+
+    #[test]
+    fn scan_issues_persisted_and_retrievable() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Good")
+            .slide(SlideSpec::new("Title").bullets(&["ok"]))
+            .write_to(&dir.path().join("good.pptx"))
+            .unwrap();
+        std::fs::write(dir.path().join("broken.pptx"), b"not a zip").unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        let finished = scan_silent(&mut lib);
+        assert!(matches!(finished, ScanEvent::Finished { indexed: 1, skipped: 1, .. }));
+
+        let o = lib.stats_overview().unwrap();
+        assert_eq!(o.last_scan.as_ref().unwrap().skipped, 1);
+        assert_eq!(o.last_scan_issues.len(), 1);
+        assert!(o.last_scan_issues[0].path.ends_with("broken.pptx"));
+        assert!(!o.last_scan_issues[0].reason.is_empty());
+    }
+
+    #[test]
+    fn scan_history_trim_cascades_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("broken.pptx"), b"not a zip").unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        // Each rescan re-fails parse on broken.pptx (never indexed), so every run
+        // records exactly one scan_issues row.
+        for _ in 0..55 {
+            scan_silent(&mut lib);
+        }
+
+        let history: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM scan_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(history, 50, "scan_history bounded to 50 rows");
+
+        let orphans: i64 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM scan_issues \
+                 WHERE scan_id NOT IN (SELECT id FROM scan_history)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "trim cascade left no orphan issues");
+
+        let issues: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM scan_issues", [], |r| r.get(0)).unwrap();
+        assert_eq!(issues, 50, "one surviving issue per surviving scan");
     }
 
     #[test]
