@@ -49,6 +49,9 @@ use crate::model::{
 };
 use crate::pptx::PresentationFile;
 
+mod query;
+use query::{max_opt, min_opt, parse_query};
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roots(
     id             INTEGER PRIMARY KEY,
@@ -560,17 +563,63 @@ impl Library {
     /// honoring the filters (browse mode).
     pub fn search(&self, query: &str, filters: &SearchFilters) -> Result<Vec<SearchHit>> {
         let limit = filters.limit.unwrap_or(200) as i64;
+
+        // Parse the advanced query syntax into an FTS5 MATCH expression plus any
+        // `before:`/`after:` date bounds lifted out of the text.
+        let parsed = parse_query(query);
+
+        // Fold the parsed date bounds into the caller's filters, combining
+        // restrictively (max of the froms, min of the tos) so a `before:`/`after:`
+        // in the query box can only narrow a range the FilterPopover set.
+        let mut eff = filters.clone();
+        eff.modified_from = max_opt(eff.modified_from, parsed.after);
+        eff.modified_to = min_opt(eff.modified_to, parsed.before);
+
+        match parsed.match_expr {
+            // Primary path: run the parsed MATCH. It is constructed to be valid
+            // FTS5, but as a belt-and-suspenders guarantee that a user never sees
+            // an FTS syntax error, fall back to plain tokens if it ever errors.
+            Some(match_str) => match self.run_fts(&match_str, &eff, limit) {
+                Ok(hits) => Ok(hits),
+                Err(_) => self.search_plain(query, &eff, limit),
+            },
+            // No positive text term (empty, date-only, or purely negative):
+            // browse when there is truly nothing to match, otherwise degrade to
+            // the old plain-token behavior over whatever alphanumeric words remain.
+            None => self.search_plain(query, &eff, limit),
+        }
+    }
+
+    /// Fallback search equivalent to the pre-advanced-syntax behavior: reduce the
+    /// query to plain alphanumeric tokens (`"tok"*`, implicit AND). An empty token
+    /// set is browse mode, honoring `filters` (including any merged date bounds).
+    fn search_plain(
+        &self,
+        query: &str,
+        filters: &SearchFilters,
+        limit: i64,
+    ) -> Result<Vec<SearchHit>> {
         let tokens = sanitize_query(query);
         if tokens.is_empty() {
             return self.browse(filters, limit);
         }
-
         let match_str = tokens
             .iter()
             .map(|t| format!("\"{t}\"*"))
             .collect::<Vec<_>>()
             .join(" ");
+        self.run_fts(&match_str, filters, limit)
+    }
 
+    /// Execute an FTS5 `MATCH` against the slide index with `filters` applied,
+    /// bm25-ranked with a `<mark>`-wrapped body snippet. `match_str` must be a
+    /// valid FTS5 query expression.
+    fn run_fts(
+        &self,
+        match_str: &str,
+        filters: &SearchFilters,
+        limit: i64,
+    ) -> Result<Vec<SearchHit>> {
         let mut clauses = Vec::new();
         let mut fparams = Vec::new();
         push_filters(filters, &mut clauses, &mut fparams);
@@ -591,7 +640,7 @@ impl Library {
         );
 
         let mut params: Vec<Value> = Vec::with_capacity(2 + fparams.len());
-        params.push(Value::Text(match_str));
+        params.push(Value::Text(match_str.to_string()));
         params.extend(fparams);
         params.push(Value::Integer(limit));
 
@@ -1846,6 +1895,188 @@ mod tests {
         ] {
             // Must not error, regardless of FTS operators in the input.
             let _ = lib.search(q, &SearchFilters::default()).unwrap();
+        }
+    }
+
+    /// Two decks where the token `scopeword` sits in slide A's TITLE and slide
+    /// B's BODY, with per-slide unique body tokens `onlyone`/`onlytwo` — enough
+    /// to exercise column scoping, OR/NOT, dates, and favorites.
+    fn field_scoped_library() -> (tempfile::TempDir, Library) {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Finance")
+            .slide(
+                SlideSpec::new("scopeword alpha")
+                    .bullets(&["onlyone detail"])
+                    .notes("private memo"),
+            )
+            .write_to(&dir.path().join("financedeck.pptx"))
+            .unwrap();
+        DeckSpec::new("Roadmap")
+            .slide(SlideSpec::new("beta results").bullets(&["scopeword onlytwo"]))
+            .write_to(&dir.path().join("roadmapdeck.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        (dir, lib)
+    }
+
+    #[test]
+    fn advanced_field_scoping() {
+        let (_dir, lib) = field_scoped_library();
+        // `scopeword` is in deck A's slide TITLE and deck B's slide BODY. A
+        // title-scoped term must exclude the body-only hit (deck B).
+        let title_hits = lib.search("title:scopeword", &SearchFilters::default()).unwrap();
+        assert_eq!(title_hits.len(), 1);
+        assert_eq!(title_hits[0].deck.file_name, "financedeck.pptx");
+
+        // `onlytwo` lives only in deck B's bullets: found via body:, never title:.
+        let body_hits = lib.search("body:onlytwo", &SearchFilters::default()).unwrap();
+        assert_eq!(body_hits.len(), 1);
+        assert_eq!(body_hits[0].deck.file_name, "roadmapdeck.pptx");
+        assert!(lib.search("title:onlytwo", &SearchFilters::default()).unwrap().is_empty());
+
+        // A bare term ignores columns → both slides.
+        let both = lib.search("scopeword", &SearchFilters::default()).unwrap();
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn advanced_deck_scoping() {
+        let (_dir, lib) = field_scoped_library();
+        let a = lib.search("deck:financedeck", &SearchFilters::default()).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].deck.file_name, "financedeck.pptx");
+
+        let b = lib.search("deck:roadmapdeck", &SearchFilters::default()).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].deck.file_name, "roadmapdeck.pptx");
+    }
+
+    #[test]
+    fn advanced_or_widens_not_narrows() {
+        let (_dir, lib) = field_scoped_library();
+        // OR unions the two unique body tokens.
+        let or_hits = lib.search("onlyone OR onlytwo", &SearchFilters::default()).unwrap();
+        assert_eq!(or_hits.len(), 2);
+
+        // scopeword matches both; NOT onlytwo drops deck B.
+        let not_hits = lib.search("scopeword NOT onlytwo", &SearchFilters::default()).unwrap();
+        assert_eq!(not_hits.len(), 1);
+        assert_eq!(not_hits[0].deck.file_name, "financedeck.pptx");
+
+        // `-term` is equivalent NOT sugar.
+        let dash_hits = lib.search("scopeword -onlytwo", &SearchFilters::default()).unwrap();
+        assert_eq!(dash_hits.len(), 1);
+        assert_eq!(dash_hits[0].deck.file_name, "financedeck.pptx");
+    }
+
+    #[test]
+    fn advanced_date_bounds_filter_by_mtime() {
+        let (_dir, lib) = field_scoped_library();
+        // 2020-01-01T00:00:00Z = 1_577_836_800. Deck A predates it; deck B follows.
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1500000000 WHERE file_name='financedeck.pptx'",
+                [],
+            )
+            .unwrap();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1900000000 WHERE file_name='roadmapdeck.pptx'",
+                [],
+            )
+            .unwrap();
+
+        let after = lib.search("scopeword after:2020-01-01", &SearchFilters::default()).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].deck.file_name, "roadmapdeck.pptx");
+
+        let before = lib.search("scopeword before:2020-01-01", &SearchFilters::default()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].deck.file_name, "financedeck.pptx");
+    }
+
+    #[test]
+    fn advanced_query_date_combines_restrictively_with_filter() {
+        let (_dir, lib) = field_scoped_library();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1500000000 WHERE file_name='financedeck.pptx'",
+                [],
+            )
+            .unwrap();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1900000000 WHERE file_name='roadmapdeck.pptx'",
+                [],
+            )
+            .unwrap();
+
+        // A popover `modified_from` far in the future would exclude everything;
+        // the query's `before:` can only narrow, never widen, so still empty.
+        let filters = SearchFilters { modified_from: Some(2_000_000_000), ..Default::default() };
+        let hits = lib.search("scopeword before:2020-01-01", &filters).unwrap();
+        assert!(hits.is_empty(), "query before: must not loosen the popover's from-bound");
+    }
+
+    #[test]
+    fn advanced_query_combines_with_favorites_filter() {
+        let (_dir, mut lib) = field_scoped_library();
+        // Star only deck A's slide (the one carrying `onlyone`).
+        let s1 = lib.search("onlyone", &SearchFilters::default()).unwrap();
+        assert_eq!(s1.len(), 1);
+        assert!(lib.toggle_slide_favorite(s1[0].slide.id).unwrap());
+
+        let filters = SearchFilters { favorites_only: Some(true), ..Default::default() };
+        // scopeword matches both slides; favorites_only keeps just the starred one.
+        let hits = lib.search("scopeword", &filters).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].deck.file_name, "financedeck.pptx");
+    }
+
+    #[test]
+    fn advanced_parser_output_executes_against_fts() {
+        let (_dir, lib) = two_deck_library();
+        let mut hostile: Vec<String> = [
+            "revenue OR churn",
+            "\"unterminated",
+            "title:\"unterminated",
+            "NEAR(a b)",
+            "(revenue AND",
+            "* * *",
+            "revenue) NOT churn",
+            "-churn",
+            "NOT churn",
+            "a:b:c:d",
+            "title: body: deck:",
+            "%%% ;;; ()",
+            "😀 revenue 🎉",
+            "before:2020-13-45 after:not-a-date",
+            "revenue -churn title:foo deck:\"multi word\" OR notes:bar",
+            "OR OR OR NOT NOT",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        hostile.push("z ".repeat(3000));
+        hostile.push("\"".repeat(50));
+
+        for q in &hostile {
+            // 1) The full search path never errors on any input.
+            lib.search(q, &SearchFilters::default())
+                .unwrap_or_else(|e| panic!("search errored on {q:?}: {e}"));
+            // 2) Any generated MATCH string is valid FTS5 (executes cleanly).
+            if let Some(m) = super::query::parse_query(q).match_expr {
+                let mut stmt = lib
+                    .conn
+                    .prepare("SELECT rowid FROM slides_fts WHERE slides_fts MATCH ?1")
+                    .unwrap();
+                let res: rusqlite::Result<Vec<i64>> =
+                    stmt.query_map([&m], |r| r.get(0)).and_then(|rows| rows.collect());
+                res.unwrap_or_else(|e| panic!("MATCH {m:?} (from {q:?}) failed: {e}"));
+            }
         }
     }
 
