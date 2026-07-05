@@ -8,9 +8,11 @@
 //! - [`export`]   — picked slides → PNG images / a PDF, via the SVG renderer.
 //! - [`index`]    — SQLite + FTS5 library: scanning, incremental indexing, full-text search with filters, and filesystem watching.
 //! - [`thumbs`]   — content-addressed cache keys for the on-disk slide-preview cache.
+//! - [`dragout`]  — content-addressed cache keys for the desktop "drag a slide out" scratch files.
 //! - [`model`]    — serde-serializable domain types shared with the desktop frontend.
 //! - [`fixtures`] — programmatic minimal-but-valid PPTX builders for tests.
 
+pub mod dragout;
 pub mod error;
 pub mod export;
 pub mod fixtures;
