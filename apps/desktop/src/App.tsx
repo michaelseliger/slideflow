@@ -50,16 +50,24 @@ export default function App() {
   const scanRunning = useApp((s) => s.scan.running);
   const navType = useApp((s) => s.nav.type);
 
-  // Boot: load library + first search, then subscribe to scan progress.
-  // Update checks are scheduled on the Rust side; the store just listens.
+  // Boot: load library + first search, then subscribe to scan progress and
+  // (macOS) native-menu commands. Update checks are scheduled on the Rust side;
+  // the store just listens.
   useEffect(() => {
     void useApp.getState().init();
     void useUpdater.getState().init();
-    let unlisten: (() => void) | undefined;
+    const unlisteners: Array<() => void> = [];
     api
       .onScanEvent((ev) => useApp.getState().handleScanEvent(ev))
-      .then((un) => (unlisten = un));
-    return () => unlisten?.();
+      .then((un) => unlisteners.push(un));
+    api
+      .onMenuOpen((target) => {
+        const app = useApp.getState();
+        if (target === "settings") app.setSettingsOpen(true);
+        else app.setAboutOpen(true);
+      })
+      .then((un) => unlisteners.push(un));
+    return () => unlisteners.forEach((un) => un());
   }, []);
 
   // Follow the system theme live when in "system" mode.

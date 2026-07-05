@@ -82,6 +82,12 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_secs(60 * 60 * 24 - 5));
                 });
             }
+
+            // macOS: install the native app menu. Windows/Linux have no
+            // in-window menu bar and stay that way.
+            #[cfg(target_os = "macos")]
+            install_app_menu(app.handle())?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -122,4 +128,56 @@ pub fn run() {
                 updates::install_pending_on_exit(app);
             }
         });
+}
+
+/// macOS: install the application menu.
+///
+/// Starts from Tauri's default menu — so Edit (⌘C/⌘V/⌘X/⌘Z), Window, etc. and
+/// their standard accelerators stay intact — then swaps the first (app)
+/// submenu for a custom one. The custom submenu replaces the native About panel
+/// with an "About Slideflow" item and adds "Settings…" (⌘,); both fire a
+/// `menu:open` event so the frontend opens the richer in-app sheets (the native
+/// About panel lacks the update controls the in-app one carries).
+#[cfg(target_os = "macos")]
+fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, SubmenuBuilder};
+    use tauri::Emitter;
+
+    let about = MenuItem::with_id(app, "about", "About Slideflow", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("Cmd+,"))?;
+
+    // App submenu in macOS order: About / Settings on top, then the standard
+    // predefined items. The label is cosmetic — macOS always shows the app name
+    // for the first submenu.
+    let app_submenu = SubmenuBuilder::new(app, "Slideflow")
+        .item(&about)
+        .separator()
+        .item(&settings)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let menu = Menu::default(app)?;
+    // Drop the default app submenu (native About, no Settings) and slot ours in
+    // its place; the remaining default submenus are left untouched.
+    menu.remove_at(0)?;
+    menu.prepend(&app_submenu)?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(move |app, event| {
+        let payload = match event.id().0.as_str() {
+            "about" => "about",
+            "settings" => "settings",
+            _ => return,
+        };
+        let _ = app.emit("menu:open", payload);
+    });
+
+    Ok(())
 }

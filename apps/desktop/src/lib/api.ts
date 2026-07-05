@@ -278,6 +278,26 @@ export async function getAppVersion(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Native menu (macOS)
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscribe to `menu:open` events from the native macOS app menu. Rust emits
+ * the payload "about" | "settings" when the matching Slideflow-menu item is
+ * clicked; both open the corresponding in-app sheet. No-op in browser mode
+ * (and on Windows/Linux, which have no in-window menu bar), so it never fires
+ * there. Returns an unlisten function.
+ */
+export async function onMenuOpen(
+  handler: (target: "about" | "settings") => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  const un = await listen<"about" | "settings">("menu:open", (e) => handler(e.payload));
+  return un;
+}
+
+// ---------------------------------------------------------------------------
 // Auto-update
 //
 // The whole lifecycle (check → download → install) lives in Rust
