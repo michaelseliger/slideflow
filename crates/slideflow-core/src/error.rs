@@ -40,6 +40,9 @@ pub enum Error {
 
     #[error("render error: {0}")]
     Render(String),
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 impl Error {

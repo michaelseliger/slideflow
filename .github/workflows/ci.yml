@@ -44,6 +44,14 @@ jobs:
       # and proves the shippable `slideflow` binary links on every platform.
       - name: build CLI (release)
         run: cargo build -p slideflow-cli --release
+      # Non-blocking: verify the optional candle-backed E5 embedder still
+      # compiles. Ubuntu-only + continue-on-error to keep it cheap — the default
+      # engine build above is what actually gates CI. The `embeddings` feature
+      # pulls candle/tokenizers, which the default build never touches.
+      - name: cargo check (embeddings feature)
+        if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: cargo check -p slideflow-core --features embeddings
 
   # Frontend: install deps + `pnpm build` (= tsc --noEmit && vite build).
   frontend:

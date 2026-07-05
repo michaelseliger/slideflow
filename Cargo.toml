@@ -32,6 +32,16 @@ imagesize = "0.13"
 # Pure-Rust data-parallelism for brute-force cosine search and near-duplicate
 # clustering. No system libraries, so core still builds on Linux CI.
 rayon = "1"
+# Local semantic-search model runtime (CPU, pure Rust). Optional — compiled only
+# behind slideflow-core's `embeddings` feature (and the desktop host, which
+# depends on core with that feature). Never in the default engine build.
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+# Fast tokenizer loaded from tokenizer.json. Default features off (drops the
+# HTTP hub client + progress bars); `fancy-regex` is the pure-Rust regex backend
+# (avoids the `onig` C dependency, keeping the build cross-platform).
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # Pure-Rust decode/resize/re-encode for downscaling grid thumbnails. No system
 # libraries, so the core crate still builds on Linux CI without GUI deps.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }

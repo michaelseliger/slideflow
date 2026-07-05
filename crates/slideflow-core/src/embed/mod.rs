@@ -18,8 +18,14 @@ use crate::error::Result;
 mod fake;
 pub mod store;
 
+#[cfg(feature = "embeddings")]
+pub mod e5;
+
 pub use fake::FakeEmbedder;
 pub use store::VectorStore;
+
+#[cfg(feature = "embeddings")]
+pub use e5::E5Embedder;
 
 /// A text embedder producing fixed-dimension, L2-normalized vectors.
 ///

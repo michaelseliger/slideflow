@@ -31,6 +31,19 @@ krilla-svg.workspace = true
 # clustering (src/embed). No system libraries, so core still builds on Linux CI.
 rayon.workspace = true
 
+# Optional: the candle-backed E5 embedder, gated by the `embeddings` feature.
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
+[features]
+# Enables the real (candle) E5 embedder. The trait, vector store, fusion,
+# hashing, schema, and duplicate logic are always compiled and tested with the
+# FakeEmbedder; only `E5Embedder` and its ML dependencies live behind this flag.
+# The desktop host depends on slideflow-core with `features = ["embeddings"]`.
+embeddings = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
 [dev-dependencies]
 tempfile = "3"
 # Parse exported PDFs in tests to assert page count / MediaBox / embedded fonts.
