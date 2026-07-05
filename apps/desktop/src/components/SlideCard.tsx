@@ -168,17 +168,15 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
       label: "Find other slides from this deck",
       onClick: () => void useApp.getState().setNav({ type: "deck", id: deck.id }),
     },
-    // AI find-similar: only offered while the semantic model is ready. The
-    // results render in the Inspector's "Similar slides" section.
+    // AI find-similar: only offered while the semantic model is ready. Routes
+    // through findSimilar so the click always produces a visible response — the
+    // Inspector's "Similar slides" section (re)fetches and scrolls into view —
+    // even when this slide + the inspector were already selected/open.
     ...(semanticReady
       ? [
           {
             label: "Find similar (AI)",
-            onClick: () => {
-              const app = useApp.getState();
-              app.selectOnly(index);
-              app.setInspector(true);
-            },
+            onClick: () => useApp.getState().findSimilar(index),
           },
         ]
       : []),

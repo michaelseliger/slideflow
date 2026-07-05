@@ -149,6 +149,12 @@ interface AppState {
   // --- peek ---
   peekIndex: number | null;
 
+  // --- find-similar (AI) ---
+  /** Bumped by `findSimilar` to force the inspector's "Similar slides" section
+   *  to (re)fetch and scroll into view, even when the selected slide and
+   *  inspector visibility were already set. */
+  similarRequestNonce: number;
+
   // --- layout / panels ---
   sidebarCollapsed: boolean;
   inspectorVisible: boolean;
@@ -199,6 +205,9 @@ interface AppState {
   openPeek: (index: number) => void;
   closePeek: () => void;
   peekBy: (delta: number) => void;
+
+  // find-similar (AI)
+  findSimilar: (index: number) => void;
 
   // layout
   toggleSidebar: () => void;
@@ -268,6 +277,8 @@ export const useApp = create<AppState>((set, get) => ({
   anchorIndex: null,
 
   peekIndex: null,
+
+  similarRequestNonce: 0,
 
   sidebarCollapsed: false,
   inspectorVisible: false,
@@ -577,6 +588,17 @@ export const useApp = create<AppState>((set, get) => ({
     const next = Math.max(0, Math.min(results.length - 1, peekIndex + delta));
     set({ peekIndex: next });
     get().selectOnly(next);
+  },
+
+  // --- find-similar (AI) -------------------------------------------------
+
+  // Explicit "Find similar (AI)": select the slide, open the inspector, and
+  // bump the nonce so the inspector's Similar-slides section always (re)fetches
+  // and scrolls into view — even when the slide + inspector were already set
+  // (the usual case, since a right-click already selects and opens them).
+  findSimilar: (index) => {
+    get().selectOnly(index);
+    set({ inspectorVisible: true, similarRequestNonce: get().similarRequestNonce + 1 });
   },
 
   // --- layout ------------------------------------------------------------

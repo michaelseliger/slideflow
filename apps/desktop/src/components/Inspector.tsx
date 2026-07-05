@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Plus, FileText, Check, Star, Sparkles, X } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { useSemantic } from "../stores/useSemantic";
 import { toast } from "../stores/useToast";
-import { deckDisplayName, formatModified, formatBytes } from "../lib/utils";
+import { deckDisplayName, formatModified, formatBytes, prefersReducedMotion } from "../lib/utils";
 import * as api from "../lib/api";
 import type { SimilarSlide } from "../lib/types";
 import Thumbnail from "./Thumbnail";
@@ -205,10 +205,14 @@ function TagEditor({ slideId }: { slideId: number }) {
 }
 
 /** "Similar slides" (AI): the top semantic neighbors of the inspected slide.
- *  Rendered only while the model is ready; loads lazily per selection. */
+ *  Rendered only while the model is ready; loads lazily per selection. An
+ *  explicit "Find similar" bumps `similarRequestNonce`, which re-runs the fetch
+ *  (even when the slide is unchanged) and scrolls this section into view. */
 function SimilarSlides({ slideId }: { slideId: number }) {
   const ready = useSemantic((s) => s.status?.state === "ready");
+  const nonce = useApp((s) => s.similarRequestNonce);
   const [similar, setSimilar] = useState<SimilarSlide[] | null>(null);
+  const sectionRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!ready) return;
@@ -225,12 +229,25 @@ function SimilarSlides({ slideId }: { slideId: number }) {
     return () => {
       alive = false;
     };
-  }, [slideId, ready]);
+  }, [slideId, ready, nonce]);
+
+  // Scroll into view only for an EXPLICIT find-similar request (nonce ≥ 1),
+  // never on a normal inspector open (nonce 0), so we don't yank the scroll
+  // position. Each nonce triggers at most one scroll.
+  const scrolledFor = useRef(0);
+  useEffect(() => {
+    if (!ready || nonce === 0 || scrolledFor.current === nonce) return;
+    scrolledFor.current = nonce;
+    sectionRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "nearest",
+    });
+  }, [nonce, ready]);
 
   if (!ready) return null;
 
   return (
-    <div className="mt-3">
+    <div ref={sectionRef} className="mt-3">
       <div className="mb-1 flex items-center gap-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
         <Sparkles size={11} />
         Similar slides
