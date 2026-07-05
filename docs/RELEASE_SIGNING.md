@@ -1,4 +1,4 @@
-# macOS release signing & notarization
+# Release signing (macOS notarization + updater packages)
 
 Slideflow's release DMGs must be **signed with a Developer ID Application
 certificate and notarized by Apple**, or macOS Gatekeeper shows the
@@ -114,3 +114,75 @@ open /Applications/Slideflow.app
 
 This is a local workaround only — you can't ship a re-signed-by-hand build to
 other users. Notarization (above) is the real fix.
+
+---
+
+# Updater signing & the release flow
+
+The in-app auto-updater (`src-tauri/src/updates.rs`) polls
+`https://github.com/michaelseliger/slideflow/releases/latest/download/latest.json`
+and only installs packages whose **minisign** signature matches the `pubkey`
+in `tauri.conf.json`. This is completely separate from Apple code signing.
+
+## One-time setup
+
+1. Generate the keypair (pick a password):
+
+   ```bash
+   cd apps/desktop
+   pnpm tauri signer generate -w ~/.tauri/slideflow.key
+   ```
+
+   **Back up `~/.tauri/slideflow.key` + its password in a password manager.**
+   Losing the key permanently strands every installed client — they would
+   never accept another update and need a manual reinstall.
+
+2. Paste the content of `~/.tauri/slideflow.key.pub` into
+   `plugins.updater.pubkey` in `apps/desktop/src-tauri/tauri.conf.json`.
+
+3. Add the two repository secrets:
+
+   | Secret | Value |
+   |--------|-------|
+   | `TAURI_SIGNING_PRIVATE_KEY` | content of `~/.tauri/slideflow.key` |
+   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the key password |
+
+## Local builds now need the key
+
+Because `tauri.conf.json` sets `createUpdaterArtifacts: true`, **every**
+`pnpm tauri build` — local or CI — fails with *"A public key has been found,
+but no private key"* unless these env vars are set:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/slideflow.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="…"
+```
+
+## Shipping an update, end to end
+
+1. Bump + tag: `cargo release patch` in `apps/desktop/src-tauri/` (keeps
+   `Cargo.toml`, `tauri.conf.json` and `package.json` in lockstep), then push
+   the `v*` tag.
+2. CI populates a **draft** release: per-platform installers, updater
+   packages (`.app.tar.gz` / `.exe` / `.msi` / `.AppImage`) each with a
+   `.sig`, and a merged `latest.json`.
+3. **Before publishing, verify the draft**: `latest.json` must contain all
+   four platform keys (`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`,
+   `windows-x86_64`) and every updater artifact needs its `.sig` sibling.
+   The manifest merge across the four CI jobs is read-modify-write without
+   locking — if a rare race dropped a platform, re-run that platform's job.
+4. Write the release notes in the draft body (the in-app "What's new" links
+   here).
+5. **Publish the release — that's the go-live switch.** Running apps pick the
+   update up on their next daily check (or a manual "Check for Updates…" in
+   the About dialog), download it in the background, and install it on
+   restart or quit.
+
+Notes:
+
+- macOS jobs must keep `--bundles app,dmg` — the `.app.tar.gz` updater
+  artifact is only produced when `app` is an explicitly requested target.
+- Linux: only AppImage installs self-update; deb/rpm users update via their
+  package manager (the app hides update UI there).
+- Draft releases are invisible to the endpoint, so a tag can sit unpublished
+  as long as needed.

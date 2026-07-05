@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useApp, applyTheme } from "./stores/useApp";
 import { useTray } from "./stores/useTray";
+import { useUpdater } from "./stores/useUpdater";
 import * as api from "./lib/api";
 import { cmdKey } from "./lib/utils";
 
@@ -48,8 +49,10 @@ export default function App() {
   const navType = useApp((s) => s.nav.type);
 
   // Boot: load library + first search, then subscribe to scan progress.
+  // Update checks are scheduled on the Rust side; the store just listens.
   useEffect(() => {
     void useApp.getState().init();
+    void useUpdater.getState().init();
     let unlisten: (() => void) | undefined;
     api
       .onScanEvent((ev) => useApp.getState().handleScanEvent(ev))

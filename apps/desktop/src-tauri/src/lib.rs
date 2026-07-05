@@ -3,9 +3,10 @@
 //! Wires the `slideflow-core` [`Library`] into a Tauri app: opens the SQLite
 //! database under the platform app-data dir, prepares the thumbnail cache under
 //! the app-cache dir, registers the command surface, and installs the dialog /
-//! opener / shell plugins the frontend needs.
+//! opener / shell / updater plugins the frontend needs.
 
 mod commands;
+mod updates;
 
 use std::fs;
 
@@ -25,6 +26,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Resolve platform dirs.
             //   macOS: ~/Library/Application Support/com.slideflow.app/library.db
@@ -60,6 +62,21 @@ pub fn run() {
             }
 
             app.manage(AppState::new(library, scan_library, thumbs_dir));
+            app.manage(updates::PendingUpdate::new());
+
+            // Background auto-update: first check shortly after launch (so
+            // boot I/O settles first), then daily while the app runs. Found
+            // updates download silently; the frontend hears about it all via
+            // `update:event`. A plain thread (matching the scan pattern)
+            // avoids relying on tokio's time driver.
+            if updates::updates_supported() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    tauri::async_runtime::block_on(updates::run_update_flow(handle.clone()));
+                    std::thread::sleep(std::time::Duration::from_secs(60 * 60 * 24 - 5));
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -81,7 +98,18 @@ pub fn run() {
             commands::reveal_in_finder,
             commands::open_file,
             commands::open_url,
+            updates::updates_supported,
+            updates::check_for_updates,
+            updates::restart_to_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Slideflow");
+        .build(tauri::generate_context!())
+        .expect("error while building Slideflow")
+        .run(|app, event| {
+            // Sparkle-style install-on-quit: a downloaded update the user
+            // never restarted for is applied while the app exits, so the next
+            // launch is already the new version.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                updates::install_pending_on_exit(app);
+            }
+        });
 }

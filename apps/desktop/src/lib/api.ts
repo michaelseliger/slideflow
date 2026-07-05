@@ -15,6 +15,7 @@ import type {
   SlideRecord,
   Stats,
   StatsOverview,
+  UpdateEvent,
 } from "./types";
 import { mock } from "./mock";
 import { svgToDataUri } from "./utils";
@@ -245,6 +246,80 @@ export async function getAppVersion(): Promise<string> {
   if (!isTauri()) return "dev";
   const { getVersion } = await import("@tauri-apps/api/app");
   return getVersion();
+}
+
+// ---------------------------------------------------------------------------
+// Auto-update
+//
+// The whole lifecycle (check → download → install) lives in Rust
+// (`src-tauri/src/updates.rs`) so a downloaded update can still be installed
+// on quit. The frontend only mirrors state via `update:event` and triggers
+// the flow through the commands below.
+// ---------------------------------------------------------------------------
+
+/** Whether this install can update itself in place (false in dev builds and
+ *  for Linux deb/rpm installs, which update via the package manager). */
+export function updatesSupported(): Promise<boolean> {
+  if (isTauri()) return tauriInvoke("updates_supported");
+  // Browser mock: only pretend to support updates when the fake flow is on.
+  return Promise.resolve(mockUpdateEnabled());
+}
+
+/** Subscribe to `update:event` lifecycle events. Returns an unlisten fn. */
+export async function onUpdateEvent(
+  handler: (ev: UpdateEvent) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen<UpdateEvent>("update:event", (e) => handler(e.payload));
+    return un;
+  }
+  mockUpdateListeners.add(handler);
+  return () => mockUpdateListeners.delete(handler);
+}
+
+/** Kick off a check (and, if an update exists, a background download).
+ *  Fire-and-forget — all results arrive as `update:event`s. */
+export function checkForUpdates(): Promise<void> {
+  if (isTauri()) return tauriInvoke("check_for_updates");
+  return mockCheckForUpdates();
+}
+
+/** Install the downloaded update and relaunch as the new version. */
+export function restartToUpdate(): Promise<void> {
+  if (isTauri()) return tauriInvoke("restart_to_update");
+  return mockRestartToUpdate();
+}
+
+// Browser-mode fake update flow, opt-in so `pnpm dev` isn't nagged:
+//   localStorage.setItem("slideflow:mockUpdate", "1")
+const mockUpdateListeners = new Set<(ev: UpdateEvent) => void>();
+function emitMockUpdate(ev: UpdateEvent) {
+  for (const l of mockUpdateListeners) l(ev);
+}
+function mockUpdateEnabled(): boolean {
+  return localStorage.getItem("slideflow:mockUpdate") === "1";
+}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function mockCheckForUpdates(): Promise<void> {
+  emitMockUpdate({ kind: "checking" });
+  await sleep(800);
+  if (!mockUpdateEnabled()) {
+    emitMockUpdate({ kind: "up_to_date" });
+    return;
+  }
+  const version = "0.99.0";
+  const total = 24 * 1024 * 1024;
+  emitMockUpdate({ kind: "available", version });
+  for (let i = 1; i <= 12; i++) {
+    await sleep(250);
+    emitMockUpdate({ kind: "downloading", downloaded: (total / 12) * i, total });
+  }
+  emitMockUpdate({ kind: "ready", version });
+}
+async function mockRestartToUpdate(): Promise<void> {
+  await sleep(400);
+  window.location.reload();
 }
 
 // ---------------------------------------------------------------------------

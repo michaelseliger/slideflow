@@ -25,6 +25,11 @@
 #     the secrets. The APPLE_* vars are inert on the Linux/Windows runners.
 #   * Windows — .msi / .exe are still UNSIGNED (SmartScreen warnings). Add a
 #     WINDOWS_CERTIFICATE when ready.
+#   * Updater — update packages are minisign-signed with
+#     TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD (repo
+#     secrets, independent of Apple signing); the matching pubkey lives in
+#     tauri.conf.json. tauri-action also generates/merges the latest.json
+#     manifest the in-app updater polls. See docs/RELEASE_SIGNING.md.
 #
 # NOTE ON ACTION VERSION: tauri-apps/tauri-action is pinned to @v1, the current
 # major (latest release action-v1.0.0). It supersedes the older @v0 (0.6.x)
@@ -47,12 +52,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `app` must stay in the macOS bundle list: the updater artifact
+          # (.app.tar.gz + .sig) is only produced for *requested* bundle
+          # targets, and dmg alone does not count — without it, latest.json
+          # silently ships without the darwin keys.
           - platform: macos-latest
             arch: aarch64
-            args: '--target aarch64-apple-darwin --bundles dmg'
+            args: '--target aarch64-apple-darwin --bundles app,dmg'
           - platform: macos-latest
             arch: x86_64
-            args: '--target x86_64-apple-darwin --bundles dmg'
+            args: '--target x86_64-apple-darwin --bundles app,dmg'
           - platform: ubuntu-22.04
             arch: x86_64
             args: '--bundles deb,appimage,rpm'
@@ -112,6 +121,11 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater package signing (minisign, all platforms). Required now
+          # that tauri.conf.json sets createUpdaterArtifacts — builds FAIL
+          # without it. Unrelated to Apple code signing below.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS Developer ID signing + notarization. tauri-action imports the
           # cert from APPLE_CERTIFICATE/APPLE_CERTIFICATE_PASSWORD into a temp
           # keychain automatically; notarization uses APPLE_ID + APPLE_PASSWORD
@@ -131,4 +145,8 @@ jobs:
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Slideflow {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
+          # latest.json's plain windows-x86_64 key should point at the NSIS
+          # installer (smoother update UX than msi); per-installer keys are
+          # still emitted, so MSI installs keep updating via msi.
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}

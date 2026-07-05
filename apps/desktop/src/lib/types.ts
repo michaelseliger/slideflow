@@ -81,6 +81,17 @@ export type ScanEvent =
   | { kind: "skipped"; path: string; reason: string }
   | { kind: "finished"; indexed: number; removed: number; unchanged: number };
 
+/** Auto-update lifecycle events streamed on `update:event`. Mirrors the
+ *  `UpdateEvent` enum in `src-tauri/src/updates.rs`
+ *  (serde `#[serde(tag = "kind", rename_all = "snake_case")]`). */
+export type UpdateEvent =
+  | { kind: "checking" }
+  | { kind: "up_to_date" }
+  | { kind: "available"; version: string }
+  | { kind: "downloading"; downloaded: number; total: number | null }
+  | { kind: "ready"; version: string }
+  | { kind: "error"; message: string };
+
 /** Reference to a slide inside a source deck. Mirrors `SlidePick`. */
 export interface SlidePick {
   /** Absolute path to the source .pptx. */
