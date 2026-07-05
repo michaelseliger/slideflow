@@ -6,11 +6,11 @@
 //! Long-running work (scanning, composing, rendering) runs on a blocking
 //! thread so the async runtime and the webview never stall.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tokio::sync::Semaphore;
 
@@ -60,6 +60,13 @@ pub struct AppState {
     /// inflates its zip once instead of once per cache-missed slide. Keyed by
     /// `(deck_path, content_hash)`; a hash mismatch (file changed) reopens.
     pub deck_cache: Mutex<Vec<(String, String, Arc<PresentationFile>)>>,
+    /// Single-flight guard for [`prepare_slide_drag`]: the set of drag-out cache
+    /// keys currently being written. A second prepare for the same key waits on
+    /// `dragout_done` until the first finishes, then re-checks the cache — so two
+    /// concurrent prepares never write the same `.pptx` an in-flight OS drag is
+    /// reading.
+    pub dragout_inflight: Mutex<HashSet<String>>,
+    pub dragout_done: Condvar,
 }
 
 /// Concurrent renders permitted at once (see `render_permits`).
@@ -83,6 +90,8 @@ impl AppState {
             scanning: AtomicBool::new(false),
             render_permits: Semaphore::new(RENDER_CONCURRENCY),
             deck_cache: Mutex::new(Vec::new()),
+            dragout_inflight: Mutex::new(HashSet::new()),
+            dragout_done: Condvar::new(),
         }
     }
 
@@ -491,20 +500,47 @@ pub async fn get_slide_preview(
     })
 }
 
-/// Write `bytes` to `final_path` atomically: a uniquely named temp file in the
-/// same directory, then `rename` over the target (atomic on one filesystem). A
-/// crash mid-write can therefore never leave a partial file that the fast path
-/// would later serve as a valid cache hit. Best-effort — the cache is only an
-/// optimization, so I/O errors are swallowed.
-fn write_cache_atomic(dir: &Path, final_path: &Path, bytes: &[u8]) {
+/// A uniquely named temp path beside `final_path` (same directory → same
+/// filesystem, so the follow-up `rename` is atomic). Unique per process +
+/// monotonic sequence so concurrent writers never collide on the temp name.
+fn tmp_sibling(final_path: &Path) -> PathBuf {
     use std::sync::atomic::AtomicU64;
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let _ = fs::create_dir_all(dir);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), seq));
-    if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, final_path).is_err() {
+    let dir = final_path.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!(".tmp-{}-{}", std::process::id(), seq))
+}
+
+/// Atomically place `bytes` at `final_path`: write a uniquely named sibling temp,
+/// then `rename` over the target. A crash or a concurrent reader therefore never
+/// observes a partially written file — the target flips old→new in one step. The
+/// temp is removed if the rename fails.
+fn atomic_write(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_sibling(final_path);
+    fs::write(&tmp, bytes)?;
+    if let Err(err) = fs::rename(&tmp, final_path) {
         let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
+    Ok(())
+}
+
+/// Atomically move an already-written `tmp` onto `final_path` (for producers like
+/// the composer that write the temp themselves). Removes `tmp` on failure.
+fn atomic_place(tmp: &Path, final_path: &Path) -> std::io::Result<()> {
+    if let Err(err) = fs::rename(tmp, final_path) {
+        let _ = fs::remove_file(tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Best-effort atomic cache write (thumbnails): a partial file could never be
+/// served as a valid cache hit. Swallows I/O errors — the cache is only an
+/// optimization.
+fn write_cache_atomic(dir: &Path, final_path: &Path, bytes: &[u8]) {
+    let _ = fs::create_dir_all(dir);
+    let _ = atomic_write(final_path, bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +673,38 @@ fn is_nonempty(p: &Path) -> bool {
     p.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
+/// RAII single-flight token for one drag-out cache key. Acquiring it blocks
+/// while another prepare of the SAME key is in flight; dropping it releases the
+/// key and wakes any waiters. Poison-tolerant so a panicked prepare can never
+/// wedge a key permanently. It intentionally holds NO lock across the (heavy)
+/// compose/render — only key membership in the shared set — so distinct keys run
+/// fully in parallel and there is no lock to deadlock on.
+struct DragGuard<'a> {
+    inflight: &'a Mutex<HashSet<String>>,
+    done: &'a Condvar,
+    key: String,
+}
+
+impl<'a> DragGuard<'a> {
+    fn acquire(inflight: &'a Mutex<HashSet<String>>, done: &'a Condvar, key: &str) -> Self {
+        let mut set = inflight.lock().unwrap_or_else(|p| p.into_inner());
+        while set.contains(key) {
+            set = done.wait(set).unwrap_or_else(|p| p.into_inner());
+        }
+        set.insert(key.to_string());
+        DragGuard { inflight, done, key: key.to_string() }
+    }
+}
+
+impl Drop for DragGuard<'_> {
+    fn drop(&mut self) {
+        let mut set = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+        set.remove(&self.key);
+        drop(set);
+        self.done.notify_all();
+    }
+}
+
 /// Prepare the scratch files for dragging one slide out of the app as a native
 /// file: a single-slide `.pptx` (full formatting, via the composer) and a small
 /// PNG drag icon. They live in a [`cache_key`]-named subdirectory of
@@ -650,6 +718,10 @@ fn is_nonempty(p: &Path) -> bool {
 /// reused untouched (a second drag of the same slide is instant) and an edited
 /// deck self-invalidates into a fresh subdir. The whole `dragout` dir is wiped
 /// on app startup.
+///
+/// Both files are written atomically (compose to a temp then rename, likewise the
+/// PNG) and the whole write is single-flighted per cache key, so a second drag of
+/// the same slide that races the first can never read a half-written `.pptx`.
 #[tauri::command]
 pub async fn prepare_slide_drag(
     app: AppHandle,
@@ -657,7 +729,7 @@ pub async fn prepare_slide_drag(
 ) -> Result<SlideDragPaths, String> {
     let SlidePick { pptx_path, slide_index } = pick;
     let key = cache_key(&pptx_path, slide_index, deck_mtime_secs(&pptx_path));
-    let dir = app.state::<AppState>().dragout_dir.join(key);
+    let dir = app.state::<AppState>().dragout_dir.join(&key);
 
     let pptx_out = dir.join(dragout_pptx_name(&pptx_path, slide_index));
     let png_out = dir.join("icon.png");
@@ -667,23 +739,42 @@ pub async fn prepare_slide_drag(
         icon: png_out.to_string_lossy().into_owned(),
     };
 
-    // Cache hit: both scratch files already present and non-empty — reuse them.
+    // Fast path (no lock): both scratch files already present and non-empty.
     if is_nonempty(&pptx_out) && is_nonempty(&png_out) {
         return Ok(paths);
     }
 
     // Compose + rasterize off the async runtime (zip inflate + render are
-    // CPU-bound), mirroring the export commands.
+    // CPU-bound), mirroring the export commands. `is_nonempty` only accepts a
+    // present, non-empty file, but a partially-written one could still be
+    // non-empty — hence both the atomic writes and the single-flight guard.
     let title = deck_stem(&pptx_path);
     let fonts = system_fonts();
     let src = pptx_path.clone();
+    let app_for_thread = app.clone();
+    let pptx_out = pptx_out.clone();
+    let png_out = png_out.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let state = app_for_thread.state::<AppState>();
+        // Wait out any concurrent prepare of THIS key, then re-check the cache —
+        // the call we waited on may have just produced both files.
+        let _guard = DragGuard::acquire(&state.dragout_inflight, &state.dragout_done, &key);
+        if is_nonempty(&pptx_out) && is_nonempty(&png_out) {
+            return Ok(());
+        }
+
         fs::create_dir_all(&dir).map_err(e)?;
+        // Compose to a temp file, then atomically rename it into place.
         let opts = ComposeOptions { title, include_notes: false, fit_mode: None };
         let pick = SlidePick { pptx_path: src.clone(), slide_index };
-        compose(&[pick], &pptx_out, &opts).map_err(e)?;
-        let png = render_slide_png(Path::new(&src), slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
-        fs::write(&png_out, &png).map_err(e)?;
+        let pptx_tmp = tmp_sibling(&pptx_out);
+        compose(&[pick], &pptx_tmp, &opts).map_err(e)?;
+        atomic_place(&pptx_tmp, &pptx_out).map_err(e)?;
+
+        // Rasterize the drag icon and write it atomically too.
+        let png =
+            render_slide_png(Path::new(&src), slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
+        atomic_write(&png_out, &png).map_err(e)?;
         Ok(())
     })
     .await
@@ -959,4 +1050,61 @@ pub async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh, unique scratch dir under the system temp (no tempfile dev-dep).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut d = std::env::temp_dir();
+        d.push(format!("slideflow-cmd-test-{}-{tag}-{seq}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = scratch_dir("atomic-write");
+        let target = dir.join("out.bin");
+        atomic_write(&target, b"first").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        // Overwriting is atomic and swaps the whole contents in one step.
+        atomic_write(&target, b"second-longer").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"second-longer");
+        // No `.tmp-*` siblings survive a successful write.
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files must be renamed away, got {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_place_consumes_the_source_temp() {
+        let dir = scratch_dir("atomic-place");
+        let tmp = tmp_sibling(&dir.join("final.bin"));
+        let target = dir.join("final.bin");
+        fs::write(&tmp, b"payload").unwrap();
+        atomic_place(&tmp, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"payload");
+        assert!(!tmp.exists(), "the composed temp is renamed into place, not left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmp_sibling_is_unique_and_colocated() {
+        let final_path = Path::new("/some/dir/icon.png");
+        let a = tmp_sibling(final_path);
+        let b = tmp_sibling(final_path);
+        assert_ne!(a, b, "the monotonic sequence makes each temp name unique");
+        assert_eq!(a.parent(), final_path.parent(), "temp sits beside its target (same FS)");
+    }
 }
