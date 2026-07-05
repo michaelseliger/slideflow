@@ -6,6 +6,7 @@
 //! Long-running work (scanning, composing, rendering) runs on a blocking
 //! thread so the async runtime and the webview never stall.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -402,6 +403,7 @@ pub async fn compose_deck(
         include_notes,
     } = args;
     let record_title = title.clone();
+    let record_picks = picks.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         let opts = ComposeOptions {
             title,
@@ -418,6 +420,7 @@ pub async fn compose_deck(
             &record_title,
             report.slides_written as i64,
             report.source_decks as i64,
+            &record_picks,
         );
     }
     Ok(report)
@@ -448,6 +451,13 @@ pub async fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
 pub async fn get_stats_overview(state: State<'_, AppState>) -> Result<StatsOverview, String> {
     let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
     lib.stats_overview().map_err(e)
+}
+
+/// Total slides exported per deck path, for the "Most exported" browse sort.
+#[tauri::command]
+pub async fn get_export_counts(state: State<'_, AppState>) -> Result<HashMap<String, i64>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.export_counts().map_err(e)
 }
 
 /// Remember a settled search (called by the frontend after its debounce).

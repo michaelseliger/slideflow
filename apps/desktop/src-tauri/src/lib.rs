@@ -99,6 +99,7 @@ pub fn run() {
             commands::compose_deck,
             commands::get_stats,
             commands::get_stats_overview,
+            commands::get_export_counts,
             commands::record_search,
             commands::toggle_favorite_slide,
             commands::toggle_favorite_deck,

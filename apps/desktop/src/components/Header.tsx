@@ -14,6 +14,7 @@ import {
 import { useApp } from "../stores/useApp";
 import {cx, basename, stripMarks, deckDisplayName } from "../lib/utils";
 import FilterPopover from "./FilterPopover";
+import SortMenu from "./SortMenu";
 
 /** Unified titlebar toolbar (draggable) + the thin count/chips strip beneath.
  *  Interactive controls are marked `no-drag` and kept out of the traffic-light
@@ -176,6 +177,9 @@ export default function Header() {
             <Minus size={12} />
           </StripBtn>
         </div>
+
+        {/* Sort */}
+        <SortMenu />
 
         {/* Grouping toggle (1 / 2) */}
         <div className="flex items-center overflow-hidden rounded-[6px] border border-hairline/10">

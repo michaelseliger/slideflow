@@ -195,6 +195,11 @@ export function getStatsOverview(): Promise<StatsOverview> {
   return isTauri() ? tauriInvoke("get_stats_overview") : mock.getStatsOverview();
 }
 
+/** Total slides exported per deck path, keyed by path — powers "Most exported". */
+export function getExportCounts(): Promise<Record<string, number>> {
+  return isTauri() ? tauriInvoke("get_export_counts") : mock.getExportCounts();
+}
+
 /** Remember a settled search for the stats view (fire-and-forget). */
 export function recordSearch(query: string, resultCount: number): Promise<void> {
   return isTauri()

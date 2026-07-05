@@ -12,6 +12,7 @@ import {
   Info,
   Settings,
   Trash2,
+  ArrowDownUp,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { prefersReducedMotion } from "../lib/utils";
@@ -75,6 +76,31 @@ export default function CommandPalette() {
         label: "Toggle theme (System / Light / Dark)",
         icon: <SunMoon size={15} />,
         run: () => app.cycleTheme(),
+      },
+      {
+        id: "sort-name",
+        label: "Sort by: Name",
+        icon: <ArrowDownUp size={15} />,
+        run: () => app.setSortMode("name"),
+      },
+      {
+        id: "sort-added",
+        label: "Sort by: Recently added",
+        icon: <ArrowDownUp size={15} />,
+        run: () => app.setSortMode("added"),
+      },
+      {
+        id: "sort-modified",
+        label: "Sort by: Recently modified",
+        icon: <ArrowDownUp size={15} />,
+        run: () => app.setSortMode("modified"),
+      },
+      {
+        id: "sort-exported",
+        label: "Sort by: Most exported",
+        hint: "counting starts now",
+        icon: <ArrowDownUp size={15} />,
+        run: () => app.setSortMode("exported"),
       },
       {
         id: "all",

@@ -45,7 +45,7 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result};
 use crate::model::{
     DeckRecord, ExportRecord, RenderDropStat, RootRecord, ScanEvent, ScanIssue, ScanRecord,
-    SearchFilters, SearchHit, SearchHistoryEntry, SlideRecord, StatsOverview,
+    SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord, StatsOverview,
 };
 use crate::pptx::PresentationFile;
 
@@ -892,25 +892,51 @@ impl Library {
         Ok(())
     }
 
-    /// Remember a completed export/composition for the stats view.
+    /// Remember a completed export/composition for the stats view. Also records
+    /// each picked slide in `export_picks` so `export_counts` can rank decks by
+    /// how many slides they've contributed to exports.
     pub fn record_export(
         &mut self,
         output_path: &str,
         title: &str,
         slide_count: i64,
         source_decks: i64,
+        picks: &[SlidePick],
     ) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO export_history(output_path, title, slide_count, source_decks, exported_unix) \
              VALUES(?1,?2,?3,?4,?5)",
             params![output_path, title, slide_count, source_decks, now_unix()],
         )?;
-        self.conn.execute(
+        let export_id = tx.last_insert_rowid();
+        for pick in picks {
+            tx.execute(
+                "INSERT INTO export_picks(export_id, deck_path, slide_index) VALUES(?1,?2,?3)",
+                params![export_id, pick.pptx_path, pick.slide_index as i64],
+            )?;
+        }
+        // Trim; the FK cascade (foreign_keys=ON) removes trimmed rows' picks too.
+        tx.execute(
             "DELETE FROM export_history WHERE id NOT IN \
              (SELECT id FROM export_history ORDER BY id DESC LIMIT 200)",
             [],
         )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Total slides ever exported from each deck, keyed by deck path. A deck that
+    /// contributed N picks to one export counts N; the "Most exported" browse
+    /// sort ranks by this. Empty for existing users until they export again.
+    pub fn export_counts(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT deck_path, COUNT(*) FROM export_picks GROUP BY deck_path")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        Ok(rows)
     }
 
     /// Everything the stats view needs, in one call.
@@ -1693,7 +1719,17 @@ mod tests {
 
         // Populate activity history.
         lib.record_search("revenue", 1).unwrap();
-        lib.record_export("/tmp/out.pptx", "My Deck", 4, 2).unwrap();
+        lib.record_export(
+            "/tmp/out.pptx",
+            "My Deck",
+            4,
+            2,
+            &[
+                SlidePick { pptx_path: "/tmp/a.pptx".into(), slide_index: 1 },
+                SlidePick { pptx_path: "/tmp/b.pptx".into(), slide_index: 2 },
+            ],
+        )
+        .unwrap();
 
         // Seed a scan_issues row (cascades off scan_history) and a render_issues
         // row (deleted explicitly) so clear() must remove both.
@@ -1914,7 +1950,17 @@ mod tests {
         lib.record_search("churn", 2).unwrap();
         lib.record_search("  ", 0).unwrap(); // ignored
 
-        lib.record_export("/tmp/out.pptx", "My Deck", 4, 2).unwrap();
+        lib.record_export(
+            "/tmp/out.pptx",
+            "My Deck",
+            4,
+            2,
+            &[
+                SlidePick { pptx_path: "/tmp/a.pptx".into(), slide_index: 1 },
+                SlidePick { pptx_path: "/tmp/b.pptx".into(), slide_index: 2 },
+            ],
+        )
+        .unwrap();
 
         let o = lib.stats_overview().unwrap();
         assert_eq!(o.deck_count, 2);
@@ -1930,6 +1976,29 @@ mod tests {
         assert_eq!(o.recent_exports[0].slide_count, 4);
         assert_eq!(o.largest_decks.len(), 2);
         assert!(o.largest_decks[0].size_bytes >= o.largest_decks[1].size_bytes);
+    }
+
+    #[test]
+    fn export_records_picks_and_counts_aggregate() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let picks = vec![
+            SlidePick { pptx_path: "/decks/a.pptx".into(), slide_index: 1 },
+            SlidePick { pptx_path: "/decks/a.pptx".into(), slide_index: 3 },
+            SlidePick { pptx_path: "/decks/b.pptx".into(), slide_index: 2 },
+        ];
+        lib.record_export("/out/deck1.pptx", "Deck 1", 3, 2, &picks).unwrap();
+        lib.record_export(
+            "/out/deck2.pptx",
+            "Deck 2",
+            1,
+            1,
+            &[SlidePick { pptx_path: "/decks/a.pptx".into(), slide_index: 1 }],
+        )
+        .unwrap();
+        let counts = lib.export_counts().unwrap();
+        assert_eq!(counts.get("/decks/a.pptx").copied(), Some(3));
+        assert_eq!(counts.get("/decks/b.pptx").copied(), Some(1));
+        assert_eq!(counts.get("/decks/missing.pptx"), None);
     }
 
     #[test]

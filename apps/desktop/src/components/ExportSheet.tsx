@@ -86,6 +86,8 @@ export default function ExportSheet() {
         last_dir: dirname(report.output_path),
       });
       setPhase({ step: "done", report });
+      // Reflect this export in the "Most exported" sort without a rescan.
+      void useApp.getState().refreshExportCounts();
     } catch (err) {
       window.clearInterval(timer);
       setPhase({ step: "error", message: String(err) });

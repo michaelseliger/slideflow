@@ -369,6 +369,7 @@ export const mock = {
       source_decks: decks.size,
       exported_unix: Math.floor(Date.now() / 1000),
     });
+    for (const p of picks) mockExportCounts[p.pptx_path] = (mockExportCounts[p.pptx_path] ?? 0) + 1;
     return {
       output_path: outputPath,
       slides_written: picks.length,
@@ -454,8 +455,17 @@ export const mock = {
     ],
   }),
 
+  getExportCounts: async (): Promise<Record<string, number>> => ({ ...mockExportCounts }),
+
   setAutoUpdateEnabled: async (_enabled: boolean): Promise<void> => {},
 };
 
 const mockSearches: SearchHistoryEntry[] = [];
 const mockExports: ExportRecord[] = [];
+
+// Seed plausible export counts so "Most exported" differentiates before any
+// compose in browser mode (the real backend starts empty for existing users).
+const mockExportCounts: Record<string, number> = {};
+mockExportCounts[`${DECK_SEEDS[0].folder}/${DECK_SEEDS[0].file}`] = 9;
+mockExportCounts[`${DECK_SEEDS[1].folder}/${DECK_SEEDS[1].file}`] = 5;
+mockExportCounts[`${DECK_SEEDS[4].folder}/${DECK_SEEDS[4].file}`] = 2;

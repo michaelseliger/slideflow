@@ -16,9 +16,11 @@ import type {
 import { useTray } from "./useTray";
 import { toast } from "./useToast";
 import { clearSlideSvgCache } from "../lib/useSlideSvg";
+import { deckDisplayName } from "../lib/utils";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type Grouping = "flat" | "deck";
+export type SortMode = "name" | "added" | "modified" | "exported";
 
 export interface NavTarget {
   type: "all" | "root" | "deck" | "favorites" | "stats";
@@ -47,10 +49,44 @@ export interface ConfirmConfig {
 
 const THEME_KEY = "slideflow.theme";
 const COLS_KEY = "slideflow.gridCols";
+const SORT_KEY = "slideflow.sort.v1";
 
 function loadTheme(): ThemeMode {
   const v = localStorage.getItem(THEME_KEY);
   return v === "light" || v === "dark" || v === "system" ? v : "system";
+}
+
+function loadSortMode(): SortMode {
+  const v = localStorage.getItem(SORT_KEY);
+  // Default 'modified' preserves today's browse order (modified DESC).
+  return v === "name" || v === "added" || v === "modified" || v === "exported" ? v : "modified";
+}
+
+/** Reorder loaded browse hits by `mode`. `cmpDeck` is a total order on decks so
+ *  decks stay contiguous in both flat and group-by-deck views; within a deck,
+ *  slides keep their natural order. Only applied while browsing (never search). */
+function sortHits(hits: SearchHit[], mode: SortMode, counts: Record<string, number>): SearchHit[] {
+  const name = (d: DeckRecord) => deckDisplayName(d).toLowerCase();
+  const cmpDeck = (a: DeckRecord, b: DeckRecord): number => {
+    switch (mode) {
+      case "name":
+        return name(a).localeCompare(name(b)) || a.id - b.id;
+      case "added":
+        return b.first_seen_unix - a.first_seen_unix || a.id - b.id;
+      case "modified":
+        return b.modified_unix - a.modified_unix || a.id - b.id;
+      case "exported":
+        return (
+          (counts[b.path] ?? 0) - (counts[a.path] ?? 0) ||
+          b.modified_unix - a.modified_unix ||
+          a.id - b.id
+        );
+    }
+  };
+  return [...hits].sort(
+    (x, y) =>
+      cmpDeck(x.deck, y.deck) || x.slide.slide_index - y.slide.slide_index || x.slide.id - y.slide.id,
+  );
 }
 
 function systemPrefersDark(): boolean {
@@ -82,6 +118,8 @@ interface AppState {
   results: SearchHit[];
   searching: boolean;
   grouping: Grouping;
+  sortMode: SortMode;
+  exportCounts: Record<string, number>;
 
   // --- selection ---
   selectedIds: Set<number>;
@@ -118,6 +156,8 @@ interface AppState {
   setFilters: (patch: Partial<SearchFilters>) => void;
   clearFilters: () => void;
   setGrouping: (g: Grouping) => void;
+  setSortMode: (m: SortMode) => void;
+  refreshExportCounts: () => Promise<void>;
   setNav: (nav: NavTarget) => Promise<void>;
   refresh: () => Promise<void>;
 
@@ -188,6 +228,8 @@ export const useApp = create<AppState>((set, get) => ({
   results: [],
   searching: false,
   grouping: "flat",
+  sortMode: loadSortMode(),
+  exportCounts: {},
 
   selectedIds: new Set(),
   anchorIndex: null,
@@ -224,12 +266,13 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   reloadLibrary: async () => {
-    const [roots, decks, stats] = await Promise.all([
+    const [roots, decks, stats, exportCounts] = await Promise.all([
       api.listRoots(),
       api.getDecks(),
       api.getStats(),
+      api.getExportCounts(),
     ]);
-    set({ roots, decks, stats });
+    set({ roots, decks, stats, exportCounts });
     useTray.getState().reconcile(decks);
   },
 
@@ -257,6 +300,28 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setGrouping: (g) => set({ grouping: g }),
+
+  setSortMode: (m) => {
+    localStorage.setItem(SORT_KEY, m);
+    const { query, nav, results, exportCounts } = get();
+    const browsing = query.trim() === "" && nav.type !== "deck";
+    set({
+      sortMode: m,
+      results: browsing ? sortHits(results, m, exportCounts) : results,
+      selectedIds: new Set(),
+      anchorIndex: null,
+    });
+  },
+
+  refreshExportCounts: async () => {
+    const exportCounts = await api.getExportCounts();
+    const { query, nav, results, sortMode } = get();
+    const browsing = query.trim() === "" && nav.type !== "deck";
+    set({
+      exportCounts,
+      results: browsing && sortMode === "exported" ? sortHits(results, sortMode, exportCounts) : results,
+    });
+  },
 
   setNav: async (nav) => {
     set({ nav, query: "" });
@@ -311,7 +376,13 @@ export const useApp = create<AppState>((set, get) => ({
       }
 
       if (token !== searchToken) return; // stale — a newer query superseded us.
-      set({ results: hits, selectedIds: new Set(), anchorIndex: null });
+      // Browse mode (empty query, non-deck nav) honors the user's sort; search
+      // stays bm25-ranked and explicit deck-nav keeps slide order.
+      const ordered =
+        query.trim() === "" && nav.type !== "deck"
+          ? sortHits(hits, get().sortMode, get().exportCounts)
+          : hits;
+      set({ results: ordered, selectedIds: new Set(), anchorIndex: null });
 
       // Remember settled searches for the stats view: only after the user
       // pauses typing for a moment, so keystroke prefixes don't pile up.
