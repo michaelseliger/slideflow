@@ -329,6 +329,16 @@ pub fn spawn_embedder_bootstrap(app: AppHandle) {
         let result = E5Embedder::load(&semantic.model_dir);
         match result {
             Ok(embedder) => {
+                // The load took seconds; the user may have DISABLED meanwhile.
+                // Attaching now would let scans inline-embed while status reads
+                // "disabled", and — because we'd set ready=true — a later re-enable
+                // would skip bootstrap and never come up. So re-check the pref
+                // before attaching: if disabled, drop the freshly-loaded embedder
+                // and leave ready=false so a re-enable bootstraps cleanly.
+                if !semantic_enabled(&app) {
+                    semantic.loading.store(false, Ordering::SeqCst);
+                    return;
+                }
                 let arc: Arc<dyn Embedder> = Arc::new(embedder);
                 let state = app.state::<AppState>();
                 if let Ok(mut lib) = state.library.lock() {
@@ -666,10 +676,27 @@ fn spawn_backfill(app: &AppHandle) -> bool {
     std::thread::spawn(move || {
         let semantic = app_for_thread.state::<SemanticState>();
         let result = run_backfill(&app_for_thread, &semantic);
+        // Did THIS run stop early on a cancel? run_backfill returns Ok on both a
+        // clean finish and a cancel (it breaks the loop, then runs its tail), so
+        // distinguish via the flag. Read it BEFORE releasing `backfilling`, so a
+        // racing respawn (which resets the flag at spawn) can't clear it first.
+        let canceled = semantic.backfill_cancel.load(Ordering::SeqCst);
         semantic.backfilling.store(false, Ordering::SeqCst);
         match result {
             Ok(()) => emit_embed(&app_for_thread, &EmbedEvent::Finished),
             Err(message) => emit_embed(&app_for_thread, &EmbedEvent::Error { message }),
+        }
+        // A canceled run may have raced a disable→enable: the re-enable's
+        // spawn_backfill_if_enabled lost the `backfilling` CAS (this run still held
+        // it) and gave up, leaving the re-enabled texts unembedded while status
+        // says "ready". Now that we've released `backfilling`, retry once — but
+        // ONLY after a canceled run (an uncanceled complete run must not respawn,
+        // or it would loop forever) and only if the feature is still enabled and
+        // the embedder still up. spawn_backfill_if_enabled re-checks both, and the
+        // fresh spawn resets backfill_cancel, preserving a further
+        // enable→cancel-again chain.
+        if canceled {
+            spawn_backfill_if_enabled(&app_for_thread);
         }
     });
     true
