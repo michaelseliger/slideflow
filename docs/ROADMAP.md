@@ -8,6 +8,9 @@
 > telemetry, export presets, per-folder excludes, and sort views are done (see
 > CHANGELOG "Unreleased") and removed from this menu. Item numbers of the
 > remaining entries are kept stable for cross-references.
+> Extended 2026-07-05 (wave-2 brainstorm): items 21–30 added after a UX audit —
+> multi-select, grid keyboard nav, card context menus, export history, and
+> onboarding/empty states already exist and were dropped from the brainstorm.
 
 This document collects candidate improvements from two angles — the everyday
 user who searches, picks, and exports, and the power user who lives in the app
@@ -64,6 +67,21 @@ closures are copied per deck.
 - **Tags / named collections.** Favorites is a single flat list. Letting users
   tag slides ("intro", "pricing", "2026 kickoff") and browse tags in the
   sidebar turns the library into a curated asset store.
+- **Copy slide as image (21).** The card context menu can copy only the source
+  *path* today (`SlideCard.tsx`). With the wave-2 rasterizer
+  (`export.rs::render_slide_png`) in place, ⌘C / "Copy as image" can put a PNG
+  on the clipboard (Tauri clipboard plugin or `arboard`) — the fastest possible
+  share path for a single slide.
+- **Library metadata backup/restore (22).** Favorites, tags, saved searches,
+  and named trays live in the SQLite library and `localStorage`; a machine move
+  or a corrupted DB loses all curation even though decks are just files.
+  Export/import the user-authored metadata as one JSON file (keyed by deck path
+  + slide index, matching the rescan-safe favorites convention).
+- **Slide-version awareness (23).** When a rescan re-indexes a changed deck,
+  tray items and favorites silently keep pointing at the new content. With the
+  per-slide `content_hash` shipped by wave 2 (#9), `useTray.reconcile()` can
+  flag picks whose hash changed — "a newer version of this slide exists" — and
+  offer a one-click refresh of the pick.
 
 ---
 
@@ -83,6 +101,17 @@ closures are copied per deck.
   GTK/WebKit dependency — a small `slideflow` binary exposing `index`, `search`,
   and `compose` would enable scripting ("build me a deck from these slide IDs in
   CI") at very low cost, and doubles as a debugging tool.
+- **Theme / brand browser (26).** The index already knows each slide's
+  layout/master/theme lineage; grouping the library by master or theme (a
+  sidebar dimension next to folders) lets users spot off-brand decks and jump
+  to "all slides still on the 2023 template".
+- **Hide / exclude slides (27).** A per-slide "hide from search" flag (schema
+  column + `push_filters` clause + context-menu toggle) removes boilerplate
+  (dividers, legal pages) from results without touching the source files.
+- **Menu-bar quick search (28).** A global hotkey opening a floating
+  Spotlight-style search palette (reusing `CommandPalette.tsx` + the search
+  API) makes the library reachable from inside PowerPoint without switching
+  apps. macOS first (Tauri global-shortcut plugin).
 
 ---
 
@@ -92,6 +121,26 @@ closures are copied per deck.
   per-family width factors. Remaining: extract **embedded fonts** from PPTX
   (`fntdata` parts) and use them in previews for pixel-true text, and verify
   the in-app WebKit fallback path (Arial Narrow on macOS) actually kicks in.
+- **OCR for image-only slides (30, research).** Slides whose text is baked
+  into screenshots/exports are invisible to FTS and embeddings. Local OCR
+  during scan would fix that, but every option has a real cost (tesseract:
+  heavy C dep; macOS Vision: not cross-platform; pure-Rust OCR: immature).
+  Investigate-only until a dependency fits the pure-Rust/no-system-libs rule.
+
+---
+
+## UX & platform polish
+
+- **Peek modal, next stage (24).** `PeekModal.tsx` is a `max-w-5xl` modal with
+  arrow navigation. A true fullscreen mode plus zoom/pan (the SVG previews are
+  resolution-independent) would make it a real review surface.
+- **Shift+arrow range selection (25).** The grid has an anchor-based
+  multi-select (click modifiers) and arrow-key navigation, but no
+  keyboard range extension; `useApp.rangeSelect` already exists — wire ⇧+arrows
+  to it in the `App.tsx` key handler.
+- **Accessibility pass (29).** VoiceOver labels on cards/tray/sheets, focus
+  order after modal open/close, and a reduced-motion audit. Nothing is
+  actively hostile today, but none of it has been verified.
 
 ---
 
@@ -153,6 +202,16 @@ experiment layered on Stage 1 — never a dependency of it.
 | 15 | Tags / collections | M | Medium | Schema + sidebar work |
 | 19 | CLI companion | M | Low–Medium | Cheap thanks to the pure-Rust engine; niche audience |
 | 20 | Generative assist via local model server (AI Stage 2) | L | Unknown | Opt-in experiment on top of #6 |
+| 21 | Copy slide as image | S | Medium | Rides the wave-2 rasterizer |
+| 22 | Library metadata backup/restore | S | Medium | One JSON file, path+index keyed |
+| 23 | Slide-version awareness | M | Medium | Needs #9's content_hash (wave 2) |
+| 24 | Peek modal fullscreen + zoom | S | Medium | SVG previews scale for free |
+| 25 | Shift+arrow range selection | S | Low | `rangeSelect` exists, wire the keys |
+| 26 | Theme / brand browser | M | Medium | Lineage data already indexed |
+| 27 | Hide / exclude slides | S–M | Medium | Schema flag + filter + toggle |
+| 28 | Menu-bar quick search | M | Medium | Global shortcut + palette reuse |
+| 29 | Accessibility pass | M | Medium | VoiceOver, focus order, reduced motion |
+| 30 | OCR for image-only slides | L | Unknown | Research: no dependency fits yet |
 
 **Suggested order:** 5 (advanced search) while 6 (embeddings) is developed;
 7/8 and the renderer follow-up (13) ride alongside as engine work; then the
