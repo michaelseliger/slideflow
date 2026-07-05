@@ -17,7 +17,10 @@ use tokio::sync::Semaphore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use slideflow_core::export::{export_pdf, export_pngs, system_fonts, PdfOptions, PngOptions};
+use slideflow_core::dragout::cache_key;
+use slideflow_core::export::{
+    export_pdf, export_pngs, render_slide_png, system_fonts, PdfOptions, PngOptions,
+};
 use slideflow_core::index::Library;
 use slideflow_core::model::{
     ComposeReport, DeckRecord, ExportReport, FitMode, RootRecord, SavedSearch, SearchFilters,
@@ -42,6 +45,10 @@ pub struct AppState {
     pub scan_library: Mutex<Library>,
     /// `app_cache_dir/thumbs` — where rendered slide SVGs are cached.
     pub thumbs_dir: PathBuf,
+    /// `app_cache_dir/dragout` — scratch home for the single-slide `.pptx` +
+    /// PNG icon written when a slide is dragged out or saved (see
+    /// [`prepare_slide_drag`]). Wiped on every launch (lib.rs setup).
+    pub dragout_dir: PathBuf,
     /// Guards against two concurrent scans stepping on each other.
     pub scanning: AtomicBool,
     /// Bounds how many slide renders run at once. Rendering fully inflates a
@@ -62,11 +69,17 @@ const RENDER_CONCURRENCY: usize = 2;
 const DECK_CACHE_SLOTS: usize = 2;
 
 impl AppState {
-    pub fn new(library: Library, scan_library: Library, thumbs_dir: PathBuf) -> Self {
+    pub fn new(
+        library: Library,
+        scan_library: Library,
+        thumbs_dir: PathBuf,
+        dragout_dir: PathBuf,
+    ) -> Self {
         AppState {
             library: Mutex::new(library),
             scan_library: Mutex::new(scan_library),
             thumbs_dir,
+            dragout_dir,
             scanning: AtomicBool::new(false),
             render_permits: Semaphore::new(RENDER_CONCURRENCY),
             deck_cache: Mutex::new(Vec::new()),
@@ -473,6 +486,131 @@ pub async fn compose_deck(
         );
     }
     Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// Drag a slide out of the app (WS-G, macOS-first)
+// ---------------------------------------------------------------------------
+
+/// Pixel width of the PNG drag-preview icon. Small — it's only the thumbnail
+/// shown under the cursor during the OS drag session.
+const DRAGOUT_ICON_PX: u32 = 160;
+
+/// Max chars of the deck-stem portion of a drag-out file name, so a very long
+/// deck name can't produce a filesystem-hostile path.
+const DRAGOUT_MAX_STEM: usize = 80;
+
+/// Absolute paths of the scratch files backing one drag-out: the single-slide
+/// `.pptx` (the drag payload) and its PNG drag icon. Handed to the frontend,
+/// which passes them to the native drag plugin. Mirrors `SlideDragPaths` in
+/// `lib/types.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideDragPaths {
+    pub pptx: String,
+    pub icon: String,
+}
+
+/// Deck file stem (name without extension) for user-facing names/titles.
+/// Local mirror of `export.rs`'s private helper.
+fn deck_stem(pptx_path: &str) -> String {
+    Path::new(pptx_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "deck".to_string())
+}
+
+/// Replace path separators / colons and drop control characters so a stem is
+/// safe as a single path component. Local mirror of `export.rs`'s private
+/// `sanitize` (deliberately not re-exported from that module).
+fn sanitize_component(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    cleaned.trim().to_string()
+}
+
+/// The shared file stem (no extension) for one slide's drag-out `.pptx` + `.png`.
+/// A readable head (`<deck stem> — slide N`) plus the content-addressed
+/// [`cache_key`] tail, so a matching pair on disk is always fresh and an edited
+/// source deck self-invalidates.
+fn dragout_file_stem(pptx_path: &str, slide_index: usize, mtime_secs: u64) -> String {
+    let head = sanitize_component(&deck_stem(pptx_path));
+    let head: String = head.chars().take(DRAGOUT_MAX_STEM).collect();
+    let key = cache_key(pptx_path, slide_index, mtime_secs);
+    format!("{head} — slide {slide_index} — {key}")
+}
+
+/// The source deck's mtime in whole seconds since the Unix epoch, or 0 if it
+/// can't be read (a missing deck then simply fails the compose below with a
+/// real error).
+fn deck_mtime_secs(pptx_path: &str) -> u64 {
+    fs::metadata(pptx_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Whether `p` is a present, non-empty regular file.
+fn is_nonempty(p: &Path) -> bool {
+    p.metadata().map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Prepare the scratch files for dragging one slide out of the app as a native
+/// file: a single-slide `.pptx` (full formatting, via the composer) and a small
+/// PNG drag icon, both under `app_cache/dragout`. Returns their paths for the
+/// frontend to hand to the native drag plugin.
+///
+/// Cheap to call repeatedly: the files are cache-addressed on
+/// `(deck path, slide, deck mtime)`, so a matching pair already on disk is
+/// reused untouched (a second drag of the same slide is instant) and an edited
+/// deck self-invalidates. The whole `dragout` dir is wiped on app startup.
+#[tauri::command]
+pub async fn prepare_slide_drag(
+    app: AppHandle,
+    pick: SlidePick,
+) -> Result<SlideDragPaths, String> {
+    let SlidePick { pptx_path, slide_index } = pick;
+    let dir = app.state::<AppState>().dragout_dir.clone();
+
+    let stem = dragout_file_stem(&pptx_path, slide_index, deck_mtime_secs(&pptx_path));
+    let pptx_out = dir.join(format!("{stem}.pptx"));
+    let png_out = dir.join(format!("{stem}.png"));
+
+    let paths = SlideDragPaths {
+        pptx: pptx_out.to_string_lossy().into_owned(),
+        icon: png_out.to_string_lossy().into_owned(),
+    };
+
+    // Cache hit: both scratch files already present and non-empty — reuse them.
+    if is_nonempty(&pptx_out) && is_nonempty(&png_out) {
+        return Ok(paths);
+    }
+
+    // Compose + rasterize off the async runtime (zip inflate + render are
+    // CPU-bound), mirroring the export commands.
+    let title = deck_stem(&pptx_path);
+    let fonts = system_fonts();
+    let src = pptx_path.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        fs::create_dir_all(&dir).map_err(e)?;
+        let opts = ComposeOptions { title, include_notes: false, fit_mode: None };
+        let pick = SlidePick { pptx_path: src.clone(), slide_index };
+        compose(&[pick], &pptx_out, &opts).map_err(e)?;
+        let png = render_slide_png(Path::new(&src), slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
+        fs::write(&png_out, &png).map_err(e)?;
+        Ok(())
+    })
+    .await
+    .map_err(e)??;
+
+    Ok(paths)
 }
 
 /// Progress event streamed on `export:event` while a PDF/PNG export runs — the

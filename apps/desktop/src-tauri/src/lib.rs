@@ -26,6 +26,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // Outgoing native drag sessions (drag a slide out as a real file, WS-G).
+        // This only starts *outgoing* OS drags; it does NOT re-enable Tauri's
+        // incoming webview drop handling, so `dragDropEnabled: false` (which the
+        // internal grid → tray HTML5 DnD depends on) stays intact.
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Resolve platform dirs.
@@ -44,6 +49,16 @@ pub fn run() {
             let thumbs_dir = cache_dir.join("thumbs");
             fs::create_dir_all(&thumbs_dir).expect("create thumbs cache dir");
 
+            // Drag-out scratch dir (WS-G): the single-slide .pptx + PNG icons
+            // written when a slide is dragged out. These are ephemeral caches
+            // keyed on the source deck's mtime, so wipe the whole dir on every
+            // launch — a fresh boot starts empty (mirrors the thumb sweep, but
+            // total rather than selective). Cheap (a handful of small files),
+            // so done synchronously before the dir is handed to AppState.
+            let dragout_dir = cache_dir.join("dragout");
+            let _ = fs::remove_dir_all(&dragout_dir);
+            fs::create_dir_all(&dragout_dir).expect("create dragout cache dir");
+
             let db_path = data_dir.join("library.db");
             let library = Library::open(&db_path).expect("open library database");
             // Second connection to the same WAL database so searches stay
@@ -61,7 +76,7 @@ pub fn run() {
                 });
             }
 
-            app.manage(AppState::new(library, scan_library, thumbs_dir));
+            app.manage(AppState::new(library, scan_library, thumbs_dir, dragout_dir));
             app.manage(updates::PendingUpdate::new());
 
             // Background auto-update: first check shortly after launch (so
@@ -107,6 +122,7 @@ pub fn run() {
             commands::delete_saved_search,
             commands::get_slide_preview,
             commands::compose_deck,
+            commands::prepare_slide_drag,
             commands::export_tray_pdf,
             commands::export_tray_pngs,
             commands::get_stats,
