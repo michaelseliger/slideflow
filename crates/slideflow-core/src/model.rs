@@ -1,6 +1,8 @@
 //! Serde-serializable domain types shared between the core engine and the
 //! desktop frontend (they cross the Tauri IPC boundary as JSON).
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// An indexed presentation file.
@@ -145,6 +147,20 @@ pub struct ComposeReport {
     /// Neutral, informational notes (e.g. a deck scaled to match the output
     /// canvas). Not problems — kept distinct from `warnings`.
     pub notes: Vec<String>,
+}
+
+/// Result of a PNG or PDF export of picked slides (WS-D). Distinct from
+/// [`ComposeReport`], which describes a `.pptx` composition: an export
+/// rasterizes/typesets the picked slides via the SVG renderer instead of
+/// copying original parts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportReport {
+    /// Absolute paths of the files written — one PNG per slide, or a single PDF.
+    /// Serializes as an array of strings across the IPC boundary.
+    pub files_written: Vec<PathBuf>,
+    /// Non-fatal notes (e.g. a slide whose deck could not be opened was skipped
+    /// while the rest still exported).
+    pub warnings: Vec<String>,
 }
 
 /// One remembered search (for the stats view).

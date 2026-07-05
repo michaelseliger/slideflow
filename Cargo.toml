@@ -29,6 +29,20 @@ imagesize = "0.13"
 # Pure-Rust decode/resize/re-encode for downscaling grid thumbnails. No system
 # libraries, so the core crate still builds on Linux CI without GUI deps.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+# Slide → PNG / PDF export (WS-D). All pure Rust — no system libs, so the core
+# crate still builds on Linux CI. usvg/resvg/tiny-skia/fontdb drive the PNG path
+# (parse the render SVG once, rasterize into a tiny-skia Pixmap). krilla +
+# krilla-svg drive the PDF path (typst's pipeline: one page per slide, subset
+# selectable text, shadows/filters rasterized). krilla-svg consumes the SAME
+# usvg::Tree we parse, so these versions MUST stay in lockstep with usvg/resvg.
+usvg = "0.47"
+resvg = "0.47"
+# Must match the tiny-skia that resvg 0.47 / krilla depend on (0.12), else the
+# Pixmap/Transform types passed to resvg::render won't unify across versions.
+tiny-skia = "0.12"
+fontdb = "0.23"
+krilla = "0.8"
+krilla-svg = "0.8.1"
 
 [profile.release]
 lto = "thin"
