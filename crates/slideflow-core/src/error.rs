@@ -29,6 +29,9 @@ pub enum Error {
     #[error("watch error: {0}")]
     Watch(String),
 
+    #[error("invalid exclude pattern: {0}")]
+    InvalidGlob(String),
+
     #[error("compose error: {0}")]
     Compose(String),
 

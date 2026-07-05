@@ -162,6 +162,7 @@ interface AppState {
   // folders
   addFolder: () => Promise<void>;
   removeRoot: (rootId: number) => Promise<void>;
+  setRootExcludes: (rootId: number, patterns: string[]) => Promise<void>;
 
   // confirm / destructive flows
   requestConfirm: (cfg: ConfirmConfig) => void;
@@ -538,6 +539,20 @@ export const useApp = create<AppState>((set, get) => ({
       await get().startScan();
     } catch (err) {
       toast.error(`Couldn't add folder: ${String(err)}`);
+    }
+  },
+
+  setRootExcludes: async (rootId, patterns) => {
+    try {
+      const updated = await api.setRootExcludes(rootId, patterns);
+      // Patch the record immediately so the editor's persisted state stays
+      // fresh; the follow-up scan's Finished handler reloadLibrary()s so folder
+      // counts reflect the new exclusions.
+      set({ roots: get().roots.map((r) => (r.id === rootId ? updated : r)) });
+      toast.success("Exclude patterns saved — re-indexing");
+      await get().startScan();
+    } catch (err) {
+      toast.error(`Couldn't save exclude patterns: ${String(err)}`);
     }
   },
 

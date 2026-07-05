@@ -17,6 +17,9 @@ roxmltree = "0.20"
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 notify = "7"
 walkdir = "2"
+# Pure-Rust glob matching (aho-corasick/regex-automata/bstr) for per-root
+# exclude patterns — no system libs, so core still builds on Linux CI.
+globset = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

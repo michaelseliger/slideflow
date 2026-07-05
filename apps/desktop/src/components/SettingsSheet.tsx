@@ -6,6 +6,7 @@ import { useUpdater } from "../stores/useUpdater";
 import { prefersReducedMotion, basename, cx } from "../lib/utils";
 import * as api from "../lib/api";
 import { UpdateStatus } from "./AboutSheet";
+import RootExcludesEditor from "./RootExcludesEditor";
 
 const AUTO_UPDATE_KEY = "slideflow.autoUpdate.v1";
 
@@ -156,8 +157,9 @@ function LibrarySection() {
                 <Trash2 size={14} />
               </button>
             </div>
-            {/* MOUNT POINT (step4 #17 exclude-patterns): per-root editor renders here; reads r.exclude_globs (added by step0), calls api.setRootExcludes(r.id, patterns) added by step4. Keep this stable container. */}
-            <div data-root-excludes={r.id} />
+            {/* Per-root exclude-glob editor (step4 #17): reads r.exclude_globs,
+                calls setRootExcludes then re-scans. */}
+            <RootExcludesEditor root={r} />
           </div>
         ))}
       </div>

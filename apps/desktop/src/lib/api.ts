@@ -53,6 +53,17 @@ export function removeRoot(rootId: number): Promise<void> {
     : mock.removeRoot(rootId);
 }
 
+/** Replace a root's exclude globs (validated backend-side); resolves to the
+ *  updated record. The caller follows this with a rescan to apply them. */
+export function setRootExcludes(
+  rootId: number,
+  patterns: string[],
+): Promise<RootRecord> {
+  return isTauri()
+    ? tauriInvoke("set_root_excludes", { rootId, patterns })
+    : mock.setRootExcludes(rootId, patterns);
+}
+
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------

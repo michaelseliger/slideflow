@@ -272,6 +272,16 @@ export const mock = {
     if (i >= 0) mockRoots.splice(i, 1);
   },
 
+  setRootExcludes: async (
+    rootId: number,
+    patterns: string[],
+  ): Promise<RootRecord> => {
+    const r = mockRoots.find((x) => x.id === rootId);
+    if (!r) throw new Error("root not found");
+    r.exclude_globs = patterns.map((p) => p.trim()).filter(Boolean);
+    return structuredClone(r);
+  },
+
   getDecks: async (): Promise<DeckRecord[]> => structuredClone(mockDecks),
 
   getDeckSlides: async (deckId: number): Promise<SlideRecord[]> =>

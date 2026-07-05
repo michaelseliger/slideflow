@@ -121,6 +121,19 @@ pub async fn remove_root(state: State<'_, AppState>, root_id: i64) -> Result<(),
     lib.remove_root(root_id).map_err(e)
 }
 
+/// Replace a root's exclude globs (validate-then-store). Writes on the
+/// interactive `library` connection; the frontend follows this with a rescan
+/// (separate `scan_library` connection, same WAL DB) to apply the new filter.
+#[tauri::command]
+pub async fn set_root_excludes(
+    state: State<'_, AppState>,
+    root_id: i64,
+    patterns: Vec<String>,
+) -> Result<RootRecord, String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.set_root_excludes(root_id, &patterns).map_err(e)
+}
+
 // ---------------------------------------------------------------------------
 // Scanning (background thread, event-driven)
 // ---------------------------------------------------------------------------

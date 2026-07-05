@@ -35,6 +35,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
@@ -259,29 +260,77 @@ impl Library {
             .query_row(&format!("{ROOT_SELECT} WHERE r.id=?1"), params![id], row_to_root)?)
     }
 
+    /// Replace a root's exclude globs. Blank lines are dropped; every remaining
+    /// pattern is compiled (and the whole set built) BEFORE any write, so an
+    /// invalid pattern is rejected without touching the stored value. The globs
+    /// are persisted as a JSON array in `roots.exclude_globs` and take effect on
+    /// the next scan.
+    pub fn set_root_excludes(&mut self, root_id: i64, patterns: &[String]) -> Result<RootRecord> {
+        let cleaned: Vec<String> = patterns
+            .iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        let mut builder = GlobSetBuilder::new();
+        for p in &cleaned {
+            let g = Glob::new(p).map_err(|e| Error::InvalidGlob(format!("{p}: {e}")))?;
+            builder.add(g);
+        }
+        builder.build().map_err(|e| Error::InvalidGlob(e.to_string()))?;
+        let json = serde_json::to_string(&cleaned).map_err(|e| Error::InvalidGlob(e.to_string()))?;
+        self.conn
+            .execute("UPDATE roots SET exclude_globs=?2 WHERE id=?1", params![root_id, json])?;
+        self.root_record(root_id)
+    }
+
     /// Incrementally (re)scan all roots. `progress` is called from the
     /// scanning thread; it must be cheap.
     pub fn scan(&mut self, progress: &mut dyn FnMut(ScanEvent)) -> Result<()> {
         let scan_started = Instant::now();
         let started_unix = now_unix();
-        // Snapshot roots up front.
-        let roots: Vec<(i64, String)> = {
-            let mut stmt = self.conn.prepare("SELECT id, path FROM roots")?;
-            let v = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        // Snapshot roots up front, compiling each root's exclude globs into a
+        // raw file-match set and a directory-prune set.
+        let roots: Vec<(i64, String, GlobSet, GlobSet)> = {
+            let mut stmt = self.conn.prepare("SELECT id, path, exclude_globs FROM roots")?;
+            let rows: Vec<(i64, String, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            v
+            rows.into_iter()
+                .map(|(id, path, json)| {
+                    let patterns = serde_json::from_str::<Vec<String>>(&json).unwrap_or_default();
+                    let (raw, prune) = build_glob_sets(&patterns);
+                    (id, path, raw, prune)
+                })
+                .collect()
         };
 
         // Enumerate candidate .pptx files across all roots.
         let mut candidates: Vec<(i64, PathBuf)> = Vec::new();
-        for (root_id, root_path) in &roots {
+        for (root_id, root_path, raw_set, prune_set) in &roots {
+            let root = Path::new(root_path);
             for entry in WalkDir::new(root_path)
                 .into_iter()
-                .filter_entry(|e| !is_pruned_dir(e.path()))
+                .filter_entry(|e| {
+                    if is_pruned_dir(e.path()) {
+                        return false;
+                    }
+                    if e.file_type().is_dir() {
+                        if let Some(rel) = rel_forward_slash(root, e.path()) {
+                            if !rel.is_empty() && prune_set.is_match(&rel) {
+                                return false; // skip whole excluded subtree
+                            }
+                        }
+                    }
+                    true
+                })
                 .filter_map(|e| e.ok())
             {
                 if entry.file_type().is_file() && is_pptx_file(entry.path()) {
+                    if let Some(rel) = rel_forward_slash(root, entry.path()) {
+                        if raw_set.is_match(&rel) {
+                            continue;
+                        }
+                    }
                     candidates.push((*root_id, entry.path().to_path_buf()));
                 }
             }
@@ -1062,6 +1111,48 @@ fn system_time_unix(t: Option<SystemTime>) -> i64 {
 
 fn now_unix() -> i64 {
     system_time_unix(Some(SystemTime::now()))
+}
+
+/// Compile a root's exclude patterns into two sets: a `raw` set matched against
+/// every candidate file's root-relative forward-slash path, and a `prune` set
+/// used to skip whole subtrees during the walk. The prune set is built ONLY from
+/// the whole-folder form `.../**` (the trailing `/**` stripped), so a bare
+/// `*`/`**` or a file-only glob (e.g. `**/*.tmp.pptx`) can never prune a
+/// directory — such patterns are still filtered file-by-file via `raw`.
+/// Individually invalid patterns are skipped (validation happens up-front in
+/// [`Library::set_root_excludes`]); a failed set build falls back to empty.
+fn build_glob_sets(patterns: &[String]) -> (GlobSet, GlobSet) {
+    let mut raw = GlobSetBuilder::new();
+    let mut prune = GlobSetBuilder::new();
+    for p in patterns {
+        if let Ok(g) = Glob::new(p) {
+            raw.add(g);
+        }
+        if let Some(prefix) = p.strip_suffix("/**") {
+            if !prefix.is_empty() {
+                if let Ok(g) = Glob::new(prefix) {
+                    prune.add(g);
+                }
+            }
+        }
+    }
+    (
+        raw.build().unwrap_or_else(|_| GlobSet::default()),
+        prune.build().unwrap_or_else(|_| GlobSet::default()),
+    )
+}
+
+/// A path's location relative to `root`, as a forward-slash string (globset
+/// matches `/`-separated paths regardless of platform). `None` if `path` is not
+/// under `root`.
+fn rel_forward_slash(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let s = rel.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '/' {
+        Some(s.into_owned())
+    } else {
+        Some(s.replace(std::path::MAIN_SEPARATOR, "/"))
+    }
 }
 
 /// A directory that scanning must not descend into.
@@ -1888,5 +1979,94 @@ mod tests {
         b.add_root(dir.path()).unwrap();
         // The first handle sees the second's committed write over the shared file.
         assert!(!a.roots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exclude_pattern_skips_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Keep")
+            .slide(SlideSpec::new("Keep").bullets(&["keepme"]))
+            .write_to(&dir.path().join("keep.pptx"))
+            .unwrap();
+        DeckSpec::new("Draft")
+            .slide(SlideSpec::new("Draft").bullets(&["draftme"]))
+            .write_to(&dir.path().join("draft.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        let root = lib.add_root(dir.path()).unwrap();
+        lib.set_root_excludes(root.id, &["**/draft.pptx".into()]).unwrap();
+        scan_silent(&mut lib);
+
+        assert_eq!(lib.stats().unwrap().0, 1);
+        assert!(lib.search("draftme", &SearchFilters::default()).unwrap().is_empty());
+        assert!(!lib.search("keepme", &SearchFilters::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exclude_pattern_prunes_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live");
+        let archive = dir.path().join("archive");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        DeckSpec::new("Current")
+            .slide(SlideSpec::new("Current").bullets(&["liveterm"]))
+            .write_to(&live.join("current.pptx"))
+            .unwrap();
+        DeckSpec::new("Old")
+            .slide(SlideSpec::new("Old").bullets(&["oldterm"]))
+            .write_to(&archive.join("old.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        let root = lib.add_root(dir.path()).unwrap();
+        lib.set_root_excludes(root.id, &["**/archive/**".into()]).unwrap();
+        scan_silent(&mut lib);
+
+        assert_eq!(lib.stats().unwrap().0, 1);
+        assert!(lib.search("oldterm", &SearchFilters::default()).unwrap().is_empty());
+        assert!(!lib.search("liveterm", &SearchFilters::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exclusion_removes_previously_indexed_deck() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Keep")
+            .slide(SlideSpec::new("Keep").bullets(&["keepterm"]))
+            .write_to(&dir.path().join("keep.pptx"))
+            .unwrap();
+        DeckSpec::new("Secret")
+            .slide(SlideSpec::new("Secret").bullets(&["secretterm"]))
+            .write_to(&dir.path().join("secret.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        let root = lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        assert_eq!(lib.stats().unwrap().0, 2);
+        assert!(!lib.search("secretterm", &SearchFilters::default()).unwrap().is_empty());
+
+        // A newly-added pattern drops the already-indexed deck via the seen-sweep.
+        lib.set_root_excludes(root.id, &["**/secret.pptx".into()]).unwrap();
+        let finished = scan_silent(&mut lib);
+        assert!(matches!(finished, ScanEvent::Finished { removed: 1, .. }));
+        assert_eq!(lib.stats().unwrap().0, 1);
+        assert!(lib.search("secretterm", &SearchFilters::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_root_excludes_rejects_invalid_pattern() {
+        let (_dir, mut lib) = two_deck_library();
+        let root_id = lib.roots().unwrap()[0].id;
+
+        // Unclosed char class: rejected, and nothing is persisted.
+        assert!(lib.set_root_excludes(root_id, &["a[b".into()]).is_err());
+        let root = lib.roots().unwrap().into_iter().find(|r| r.id == root_id).unwrap();
+        assert!(root.exclude_globs.is_empty());
+
+        // A valid pattern still stores fine afterwards.
+        let updated = lib.set_root_excludes(root_id, &["**/x.pptx".into()]).unwrap();
+        assert_eq!(updated.exclude_globs, vec!["**/x.pptx".to_string()]);
     }
 }

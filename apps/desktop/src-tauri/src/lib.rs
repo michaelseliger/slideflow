@@ -88,6 +88,7 @@ pub fn run() {
             commands::list_roots,
             commands::add_root,
             commands::remove_root,
+            commands::set_root_excludes,
             commands::start_scan,
             commands::is_scanning,
             commands::clear_index,
