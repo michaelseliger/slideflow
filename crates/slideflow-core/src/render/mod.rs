@@ -69,7 +69,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 5;
+pub const RENDER_VERSION: u32 = 6; // 6: TIFF/WMF image support + font substitution chains
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
