@@ -1,11 +1,12 @@
 import { useRef, useState } from "react";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
-import { X, ChevronDown, Download, Layers, AlertTriangle, Trash2 } from "lucide-react";
+import { X, ChevronDown, Download, Layers, AlertTriangle, Trash2, Ratio } from "lucide-react";
 import { useTray, type TrayItem } from "../stores/useTray";
 import { useApp } from "../stores/useApp";
 import { toast } from "../stores/useToast";
 import { cx, prefersReducedMotion } from "../lib/utils";
 import { parseDropEntries } from "../lib/dnd";
+import { mismatchedDimUids } from "../lib/trayDims";
 import Thumbnail from "./Thumbnail";
 
 const EXPANDED_H = 132;
@@ -53,6 +54,8 @@ export default function Tray() {
 
   const height = collapsed ? COLLAPSED_H : EXPANDED_H;
   const movedCount = items.filter((i) => i.moved).length;
+  const mismatched = mismatchedDimUids(items);
+  const mismatchCount = mismatched.size;
 
   return (
     <motion.section
@@ -103,6 +106,16 @@ export default function Tray() {
           </span>
         )}
 
+        {mismatchCount > 0 && (
+          <span
+            className="flex items-center gap-1 text-caption text-amber-500"
+            title="Some picks use a different slide size than the first pick — they may not fit the exported deck"
+          >
+            <Ratio size={12} />
+            {mismatchCount} off-size
+          </span>
+        )}
+
         <div className="ml-auto flex items-center gap-1.5">
           {items.length > 0 && (
             <button
@@ -140,7 +153,13 @@ export default function Tray() {
             >
               <AnimatePresence initial={false}>
                 {items.map((item, index) => (
-                  <TrayThumb key={item.uid} item={item} index={index} reduce={reduce} />
+                  <TrayThumb
+                    key={item.uid}
+                    item={item}
+                    index={index}
+                    reduce={reduce}
+                    dimsMismatch={mismatched.has(item.uid)}
+                  />
                 ))}
               </AnimatePresence>
             </Reorder.Group>
@@ -167,10 +186,12 @@ function TrayThumb({
   item,
   index,
   reduce,
+  dimsMismatch,
 }: {
   item: TrayItem;
   index: number;
   reduce: boolean;
+  dimsMismatch: boolean;
 }) {
   return (
     <Reorder.Item
@@ -200,6 +221,14 @@ function TrayThumb({
             title="Source deck moved or changed"
           >
             <AlertTriangle size={10} />
+          </span>
+        )}
+        {dimsMismatch && (
+          <span
+            className="absolute left-0.5 top-0.5 rounded bg-amber-400 p-0.5 text-black"
+            title="Different slide size than the first pick — may not fit the exported deck"
+          >
+            <Ratio size={10} />
           </span>
         )}
       </div>

@@ -24,6 +24,9 @@ interface DeckSeed {
   folder: string;
   author: string;
   accent: string;
+  /** Optional override so one seed differs in slide size — exercises the
+   *  mixed-dimensions tray badge in browser mode. Defaults to EMU_W/EMU_H. */
+  dims?: { w: number; h: number };
   slides: { title: string; body: string; notes?: string }[];
 }
 
@@ -64,6 +67,7 @@ const DECK_SEEDS: DeckSeed[] = [
     folder: "/Users/you/Decks/Marketing",
     author: "Priya Nair",
     accent: "#FF375F",
+    dims: { w: 9_144_000, h: 6_858_000 },
     slides: [
       { title: "Brand Guidelines", body: "Voice, color, and typography" },
       { title: "Our Voice", body: "Warm, precise, never corporate. Speak like a helpful colleague." },
@@ -179,8 +183,8 @@ function buildMockLibrary() {
       slide_count: seed.slides.length,
       modified_unix: now - deckId * 86400 * 3,
       size_bytes: 1_200_000 + deckId * 40_000,
-      slide_width_emu: EMU_W,
-      slide_height_emu: EMU_H,
+      slide_width_emu: seed.dims?.w ?? EMU_W,
+      slide_height_emu: seed.dims?.h ?? EMU_H,
       first_seen_unix: now - deckId * 86400 * 30,
       favorite: false,
     };
