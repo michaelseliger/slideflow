@@ -261,10 +261,13 @@ function Switch({ checked, onToggle }: { checked: boolean; onToggle: () => void 
         checked ? "bg-accent" : "bg-ink/20",
       )}
     >
+      {/* left-[2px] anchors the knob; without it the browser's static-position
+          fallback puts the base X mid-track and the translate pushes the knob
+          outside (invisible white-on-white when checked). */}
       <span
         className={cx(
-          "absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white transition-transform",
-          checked ? "translate-x-[18px]" : "translate-x-[2px]",
+          "absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full bg-white transition-transform",
+          checked ? "translate-x-[16px]" : "translate-x-0",
         )}
       />
     </button>
