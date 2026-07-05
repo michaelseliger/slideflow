@@ -5,6 +5,7 @@ import {
   FolderPlus,
   Presentation,
   Loader2,
+  Sparkles,
   Star,
   BarChart3,
   Bookmark,
@@ -13,6 +14,7 @@ import {
   Tag,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
+import { useSemantic } from "../stores/useSemantic";
 import { cx, basename, deckDisplayName } from "../lib/utils";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
 import * as api from "../lib/api";
@@ -29,6 +31,7 @@ export default function Sidebar() {
   const stats = useApp((s) => s.stats);
   const nav = useApp((s) => s.nav);
   const scan = useApp((s) => s.scan);
+  const aiIndexing = useSemantic((s) => s.indexing);
   const setNav = useApp((s) => s.setNav);
   const addFolder = useApp((s) => s.addFolder);
   const [menu, setMenu] = useState<{ x: number; y: number; rootId: number } | null>(null);
@@ -263,6 +266,35 @@ export default function Sidebar() {
       {scan.running && collapsed && (
         <div className="flex justify-center pb-2">
           <Loader2 size={16} className="animate-spin text-accent" />
+        </div>
+      )}
+
+      {/* Live AI-indexing (semantic embedding backfill) progress. Can run at the
+          same time as a file scan, so it renders as its own parallel block. */}
+      {aiIndexing && !collapsed && (
+        <div className="mx-2 mb-1 rounded-[6px] bg-ink/5 px-2.5 py-2">
+          <div className="flex items-center gap-1.5 text-caption text-subtle">
+            <Sparkles size={12} className="animate-pulse text-accent" />
+            <span className="truncate">
+              AI indexing… <span className="tabnum">{aiIndexing.done}</span> of{" "}
+              <span className="tabnum">{aiIndexing.total}</span>
+            </span>
+          </div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10">
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-300"
+              style={{
+                width: aiIndexing.total
+                  ? `${Math.min(100, (aiIndexing.done / aiIndexing.total) * 100)}%`
+                  : "35%",
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {aiIndexing && collapsed && (
+        <div className="flex justify-center pb-2">
+          <Sparkles size={16} className="animate-pulse text-accent" />
         </div>
       )}
 

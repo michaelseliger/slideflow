@@ -7,14 +7,17 @@ import {
   FolderOpen,
   HardDrive,
   Layers,
+  Loader2,
   Presentation,
   RefreshCw,
   Search,
+  Sparkles,
   Star,
 } from "lucide-react";
-import type { StatsOverview } from "../lib/types";
+import type { EmbeddingStatus, StatsOverview } from "../lib/types";
 import { useApp } from "../stores/useApp";
-import { deckDisplayName, formatBytes, formatModified, basename } from "../lib/utils";
+import { useSemantic } from "../stores/useSemantic";
+import { cx, deckDisplayName, formatBytes, formatModified, basename } from "../lib/utils";
 import * as api from "../lib/api";
 import { dropKindLabel } from "./ApproxBadge";
 
@@ -24,6 +27,8 @@ export default function StatsView() {
   const [overview, setOverview] = useState<StatsOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scanRunning = useApp((s) => s.scan.running);
+  const semanticStatus = useSemantic((s) => s.status);
+  const aiIndexing = useSemantic((s) => s.indexing);
 
   const load = () => {
     api
@@ -119,6 +124,11 @@ export default function StatsView() {
           ) : (
             <Empty>No index run recorded yet.</Empty>
           )}
+        </Section>
+
+        {/* AI index (semantic embedding subsystem) */}
+        <Section icon={<Sparkles size={14} />} title="AI index">
+          <AiIndexBody status={semanticStatus} indexing={aiIndexing} />
         </Section>
 
         {/* Problems (hidden when the last run had no skips) */}
@@ -330,4 +340,93 @@ function Section({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="px-2 py-3 text-caption text-subtle">{children}</div>;
+}
+
+const SEMANTIC_STATE: Record<
+  EmbeddingStatus["state"],
+  { label: string; dot: string }
+> = {
+  ready: { label: "Ready", dot: "bg-green-500" },
+  disabled: { label: "Disabled", dot: "bg-ink/30" },
+  not_downloaded: { label: "Not downloaded", dot: "bg-ink/30" },
+  downloading: { label: "Downloading", dot: "bg-accent" },
+  error: { label: "Error", dot: "bg-red-500" },
+};
+
+/** Body of the "AI index" section: feature state, model, coverage, and the live
+ *  backfill bar — all read from the semantic store, no backend call. */
+function AiIndexBody({
+  status,
+  indexing,
+}: {
+  status: EmbeddingStatus | null;
+  indexing: { done: number; total: number } | null;
+}) {
+  if (!status) {
+    return <Empty>Semantic-search status is loading…</Empty>;
+  }
+  const meta = SEMANTIC_STATE[status.state];
+  const pending = Math.max(0, status.total_slides - status.embedded_slides);
+  // Model + coverage are only meaningful once a model exists on disk.
+  const hasModel = status.state === "ready" || status.embedded_slides > 0;
+
+  return (
+    <div className="space-y-1.5 px-2 py-1.5">
+      <div className="flex items-center gap-2 text-body text-ink">
+        <span className={cx("h-2 w-2 shrink-0 rounded-full", meta.dot)} />
+        <span className="font-medium">{meta.label}</span>
+        {status.state === "error" && status.error && (
+          <span className="min-w-0 truncate text-caption text-subtle" title={status.error}>
+            {status.error}
+          </span>
+        )}
+      </div>
+
+      {hasModel && (
+        <>
+          <div className="text-caption text-subtle/70">
+            {status.model_id} · {status.dims}-dim
+          </div>
+          <div className="text-body text-ink">
+            <span className="tabnum">{status.embedded_slides.toLocaleString()}</span> of{" "}
+            <span className="tabnum">{status.total_slides.toLocaleString()}</span> slides indexed
+            {pending > 0 && (
+              <span className="text-subtle">
+                {" · "}
+                <span className="tabnum">{pending.toLocaleString()}</span> pending
+              </span>
+            )}
+          </div>
+        </>
+      )}
+
+      {indexing && (
+        <div>
+          <div className="flex items-center gap-1.5 text-caption text-subtle">
+            <Loader2 size={12} className="animate-spin" />
+            <span>
+              AI indexing… <span className="tabnum">{indexing.done}</span> of{" "}
+              <span className="tabnum">{indexing.total}</span>
+            </span>
+          </div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10">
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-300"
+              style={{
+                width: indexing.total
+                  ? `${Math.min(100, (indexing.done / indexing.total) * 100)}%`
+                  : "35%",
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {(status.state === "disabled" || status.state === "not_downloaded") && (
+        <div className="text-caption text-subtle">
+          Enable semantic search in Settings to search your slides by meaning.
+        </div>
+      )}
+    </div>
+  );
 }
