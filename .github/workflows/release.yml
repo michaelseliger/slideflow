@@ -89,9 +89,12 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
+          # NOTE: do NOT add the legacy libappindicator3-dev here — it now
+          # conflicts with libayatana-appindicator3-dev on ubuntu-22.04
+          # (apt exit 100, "unmet dependencies"), which is what broke the
+          # v0.2.3 and first v0.3.0 release runs. Tauri 2 needs only ayatana.
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             librsvg2-dev \
             patchelf \
             build-essential \
