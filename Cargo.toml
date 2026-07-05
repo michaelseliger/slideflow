@@ -63,3 +63,11 @@ krilla-svg = "0.8.1"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Optimize dependencies even in debug builds. candle's CPU matmul is orders of
+# magnitude slower unoptimized (a first-time embed of a few hundred slides took
+# ~40 min in a debug build, seconds when optimized). "*" targets dependencies
+# only, not this workspace's own crates, so `cargo test` stays quick to rebuild
+# while candle/gemm run at full speed.
+[profile.dev.package."*"]
+opt-level = 3

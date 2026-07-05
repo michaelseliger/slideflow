@@ -47,3 +47,11 @@ sha2 = "0.10"
 lto = "thin"
 strip = true
 codegen-units = 1
+
+# `pnpm tauri dev` builds this crate in debug. candle's CPU matmul is orders of
+# magnitude slower unoptimized (a first-time embed of ~166 slides took ~40 min in
+# a debug build, seconds once optimized), so optimize every dependency — the "*"
+# here also covers the path-dep slideflow-core (with candle) since this is its own
+# workspace. Our own thin host code stays debug for fast incremental rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
