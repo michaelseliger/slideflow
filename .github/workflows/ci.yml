@@ -1,10 +1,11 @@
 # CI for Slideflow.
 #
 # Two things are tested on every push / PR:
-#   * the pure-Rust engine crate `slideflow-core` (no GTK/WebKit needed — the
-#     Tauri shell at apps/desktop/src-tauri is a *separate* Cargo workspace and
-#     is deliberately excluded from the root workspace, so this runs on plain
-#     Linux/macOS/Windows runners).
+#   * the pure-Rust workspace: the engine crate `slideflow-core` plus the
+#     `slideflow-cli` companion binary (no GTK/WebKit needed — the Tauri shell at
+#     apps/desktop/src-tauri is a *separate* Cargo workspace and is deliberately
+#     excluded from the root workspace, so this runs on plain Linux/macOS/Windows
+#     runners). The CLI is also release-built to catch profile-only breakage.
 #   * the React/TS frontend under apps/desktop (type-check + production build).
 #
 # `clippy` runs but is intentionally NON-BLOCKING (continue-on-error) — see the
@@ -22,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Engine crate: build + run all tests (lib, integration, examples, doctests).
+  # Engine crate + CLI: build + run all tests (lib, integration, examples).
   core:
     name: core (${{ matrix.os }})
     strategy:
@@ -34,8 +35,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `slideflow-cli` is a thin wrapper over the engine, so its debug tests add
+      # negligible time (core is already compiled here) while giving real
+      # cross-platform coverage of the CLI's spawn/paths/output on all three OSes.
       - name: cargo test
-        run: cargo test -p slideflow-core --all-targets
+        run: cargo test -p slideflow-core -p slideflow-cli --all-targets
+      # Release build of the CLI binary: catches profile-only breakage (LTO/strip)
+      # and proves the shippable `slideflow` binary links on every platform.
+      - name: build CLI (release)
+        run: cargo build -p slideflow-cli --release
 
   # Frontend: install deps + `pnpm build` (= tsc --noEmit && vite build).
   frontend:
