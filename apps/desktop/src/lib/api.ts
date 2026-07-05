@@ -66,6 +66,12 @@ export function isScanning(): Promise<boolean> {
   return isTauri() ? tauriInvoke("is_scanning") : Promise.resolve(false);
 }
 
+/** Clear the whole index + preview cache (keeps roots + favorites). The caller
+ *  follows this with `startScan` to rebuild. */
+export function clearIndex(): Promise<void> {
+  return isTauri() ? tauriInvoke("clear_index") : mock.clearIndex();
+}
+
 /**
  * Subscribe to `scan:event` progress events. Returns an unlisten function.
  * In browser mode this wires up an in-memory event bus that `mockStartScan`
@@ -88,6 +94,8 @@ function emitMockScan(ev: ScanEvent) {
   for (const l of mockScanListeners) l(ev);
 }
 async function mockStartScan(): Promise<boolean> {
+  // Re-seed the mock library first so a rebuild after clearIndex() repopulates.
+  await mock.rebuildFromDisk();
   const decks = await mock.getDecks();
   const total = decks.length;
   emitMockScan({ kind: "started", total_files: total });

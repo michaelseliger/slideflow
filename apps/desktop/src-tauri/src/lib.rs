@@ -85,6 +85,7 @@ pub fn run() {
             commands::remove_root,
             commands::start_scan,
             commands::is_scanning,
+            commands::clear_index,
             commands::search,
             commands::get_decks,
             commands::get_deck_slides,

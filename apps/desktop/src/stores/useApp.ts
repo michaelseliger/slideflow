@@ -32,6 +32,17 @@ export interface ScanState {
   lastPath: string | null;
 }
 
+/** A reusable confirm-dialog request. Rendered by `ConfirmDialog`; the store
+ *  holds at most one at a time. */
+export interface ConfirmConfig {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  destructive?: boolean;
+  onConfirm: () => void | Promise<void>;
+}
+
 const THEME_KEY = "slideflow.theme";
 const COLS_KEY = "slideflow.gridCols";
 
@@ -93,6 +104,9 @@ interface AppState {
   // --- scan ---
   scan: ScanState;
 
+  // --- confirm dialog ---
+  confirm: ConfirmConfig | null;
+
   // --- actions ---
   init: () => Promise<void>;
   reloadLibrary: () => Promise<void>;
@@ -144,6 +158,12 @@ interface AppState {
   // folders
   addFolder: () => Promise<void>;
   removeRoot: (rootId: number) => Promise<void>;
+
+  // confirm / destructive flows
+  requestConfirm: (cfg: ConfirmConfig) => void;
+  dismissConfirm: () => void;
+  clearAndRebuild: () => Promise<void>;
+  confirmClearAndRebuild: () => void;
 }
 
 let searchToken = 0;
@@ -184,6 +204,8 @@ export const useApp = create<AppState>((set, get) => ({
   dark: applyTheme(loadTheme()),
 
   scan: { running: false, done: 0, total: 0, indexed: 0, lastPath: null },
+
+  confirm: null,
 
   // -------------------------------------------------------------------------
 
@@ -527,4 +549,35 @@ export const useApp = create<AppState>((set, get) => ({
       toast.error(`Couldn't remove folder: ${String(err)}`);
     }
   },
+
+  // --- confirm / destructive flows ---------------------------------------
+
+  requestConfirm: (cfg) => set({ confirm: cfg }),
+  dismissConfirm: () => set({ confirm: null }),
+
+  clearAndRebuild: async () => {
+    try {
+      await api.clearIndex();
+    } catch (err) {
+      toast.error(`Couldn't clear the index: ${String(err)}`);
+      return;
+    }
+    // Slide ids get recycled on reindex; drop the session preview cache so no
+    // slide can show a stale preview from the wiped library.
+    clearSlideSvgCache();
+    await get().reloadLibrary();
+    await get().refresh();
+    toast.success("Index cleared — rebuilding now");
+    await get().startScan();
+  },
+
+  confirmClearAndRebuild: () =>
+    get().requestConfirm({
+      title: "Clear index & rebuild?",
+      message:
+        "This clears the search index and preview cache, then re-scans your folders from scratch. Starred slides and decks are kept. Recent scan, search, and export history will be cleared, and tray slides show as moved until the rescan finishes.",
+      confirmLabel: "Clear & rebuild",
+      destructive: true,
+      onConfirm: () => get().clearAndRebuild(),
+    }),
 }));

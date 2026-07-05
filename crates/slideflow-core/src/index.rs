@@ -219,6 +219,32 @@ impl Library {
         Ok(())
     }
 
+    /// Wipe all indexed content (decks, slides, FTS, and activity history) in a
+    /// single transaction, keeping the configured roots — with their
+    /// `exclude_globs` — and both favorites tables so stars survive and relink
+    /// on the next rescan. `last_scan_unix` is reset to NULL so the library reads
+    /// as unscanned until the follow-up scan runs. `foreign_keys` is ON (set in
+    /// `init`), so deleting `scan_history` / `export_history` cascades to their
+    /// `scan_issues` / `export_picks` children; `render_issues` has no FK and is
+    /// deleted explicitly.
+    pub fn clear(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        // Whole-table wipes (no params). A content-owning FTS5 table supports a
+        // plain DELETE, same as the per-row DELETEs used elsewhere.
+        tx.execute_batch(
+            "DELETE FROM slides_fts;
+             DELETE FROM slides;
+             DELETE FROM decks;
+             DELETE FROM scan_history;
+             DELETE FROM search_history;
+             DELETE FROM export_history;
+             DELETE FROM render_issues;
+             UPDATE roots SET last_scan_unix = NULL;",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn roots(&self) -> Result<Vec<RootRecord>> {
         let mut stmt = self.conn.prepare(&format!("{ROOT_SELECT} ORDER BY r.path"))?;
         let rows = stmt
@@ -1401,6 +1427,106 @@ mod tests {
         assert_eq!(lib.stats().unwrap(), (0, 0));
         assert!(lib.roots().unwrap().is_empty());
         assert!(lib.search("revenue", &SearchFilters::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_wipes_content_keeps_roots_and_favorites() {
+        let (_dir, mut lib) = two_deck_library();
+
+        // Star a slide and a deck (both keyed by path/index, not row id).
+        let hits = lib.search("revenue", &SearchFilters::default()).unwrap();
+        let slide_id = hits[0].slide.id;
+        assert!(lib.toggle_slide_favorite(slide_id).unwrap());
+        let deck_id = lib.decks().unwrap()[0].id;
+        assert!(lib.toggle_deck_favorite(deck_id).unwrap());
+
+        // Populate activity history.
+        lib.record_search("revenue", 1).unwrap();
+        lib.record_export("/tmp/out.pptx", "My Deck", 4, 2).unwrap();
+
+        // Seed a scan_issues row (cascades off scan_history) and a render_issues
+        // row (deleted explicitly) so clear() must remove both.
+        let scan_id: i64 = lib
+            .conn
+            .query_row("SELECT id FROM scan_history ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO scan_issues(scan_id, path, reason) VALUES(?1,?2,?3)",
+                params![scan_id, "/decks/broken.pptx", "corrupt zip"],
+            )
+            .unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO render_issues(deck_path, slide_index, content_hash, dropped, updated_unix) \
+                 VALUES(?1,?2,?3,?4,?5)",
+                params!["/decks/root/a.pptx", 1i64, "hash", "[\"chart\"]", 111i64],
+            )
+            .unwrap();
+
+        lib.clear().unwrap();
+
+        // All indexed content is gone.
+        assert_eq!(lib.stats().unwrap(), (0, 0));
+        assert!(lib.decks().unwrap().is_empty());
+        assert!(lib.search("revenue", &SearchFilters::default()).unwrap().is_empty());
+
+        // Roots kept, but reset to unscanned + zero counts.
+        let roots = lib.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].last_scan_unix, None);
+        assert_eq!(roots[0].deck_count, 0);
+        assert_eq!(roots[0].slide_count, 0);
+
+        // Favorites kept.
+        let sf: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM slide_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(sf, 1);
+        let df: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM deck_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(df, 1);
+
+        // History cleared.
+        let o = lib.stats_overview().unwrap();
+        assert!(o.recent_searches.is_empty());
+        assert!(o.recent_exports.is_empty());
+        assert!(o.last_scan.is_none());
+
+        // Diagnostics gone: scan_issues via cascade, render_issues via explicit delete.
+        let si: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM scan_issues", [], |r| r.get(0)).unwrap();
+        assert_eq!(si, 0);
+        let ri: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM render_issues", [], |r| r.get(0)).unwrap();
+        assert_eq!(ri, 0);
+    }
+
+    #[test]
+    fn clear_then_rescan_reindexes_and_favorites_relink() {
+        let (dir, mut lib) = two_deck_library();
+
+        // Star the revenue slide before wiping.
+        let hits = lib.search("revenue", &SearchFilters::default()).unwrap();
+        let starred_title = hits[0].slide.title.clone();
+        assert!(lib.toggle_slide_favorite(hits[0].slide.id).unwrap());
+
+        lib.clear().unwrap();
+        assert_eq!(lib.stats().unwrap(), (0, 0));
+
+        // Files are still on disk in the tempdir, so a rescan reindexes them.
+        let finished = scan_silent(&mut lib);
+        assert!(matches!(
+            finished,
+            ScanEvent::Finished { indexed: 2, removed: 0, unchanged: 0, skipped: 0 }
+        ));
+        assert_eq!(lib.stats().unwrap(), (2, 3));
+
+        // The path/index-keyed favorite re-attached to the freshly indexed rows.
+        let filters = SearchFilters { favorites_only: Some(true), ..Default::default() };
+        let favs = lib.search("", &filters).unwrap();
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].slide.title, starred_title);
+        let _ = dir;
     }
 
     #[test]

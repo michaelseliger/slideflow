@@ -182,6 +182,41 @@ pub async fn is_scanning(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(state.scanning.load(Ordering::SeqCst))
 }
 
+/// Clear the entire index (decks, slides, search/scan/export history) and the
+/// on-disk preview cache, keeping roots + favorites. Guarded by the same
+/// `scanning` flag as [`start_scan`] so it can't race a scan; the frontend
+/// follows this with a fresh `start_scan` to rebuild.
+#[tauri::command]
+pub async fn clear_index(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    // Claim the scanning flag so no scan mutates the index underneath us.
+    if state
+        .scanning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Can't clear the index while a scan is running.".into());
+    }
+
+    // Run the whole op in an immediately-invoked closure so the flag is ALWAYS
+    // released afterwards, whatever fails.
+    let result: Result<(), String> = (|| {
+        {
+            let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+            lib.clear().map_err(e)?;
+        } // drop the interactive lock before filesystem work
+          // Wipe + recreate the preview cache directory.
+        let _ = std::fs::remove_dir_all(&state.thumbs_dir);
+        std::fs::create_dir_all(&state.thumbs_dir).map_err(e)?;
+        if let Ok(mut cache) = state.deck_cache.lock() {
+            cache.clear();
+        }
+        Ok(())
+    })();
+    state.scanning.store(false, Ordering::SeqCst);
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Search / browse
 // ---------------------------------------------------------------------------

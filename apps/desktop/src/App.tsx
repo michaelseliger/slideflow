@@ -17,6 +17,7 @@ import StatsView from "./components/StatsView";
 import CommandPalette from "./components/CommandPalette";
 import ExportSheet from "./components/ExportSheet";
 import AboutSheet from "./components/AboutSheet";
+import ConfirmDialog from "./components/ConfirmDialog";
 import Toaster from "./components/Toaster";
 
 function focusSearch() {
@@ -250,6 +251,7 @@ export default function App() {
       <CommandPalette />
       <ExportSheet />
       <AboutSheet />
+      <ConfirmDialog />
       <Toaster />
     </div>
   );

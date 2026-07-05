@@ -154,7 +154,10 @@ let mockDecks: DeckRecord[] = [];
 let mockSlides: SlideRecord[] = [];
 const svgById = new Map<number, string>();
 
-(function build() {
+function buildMockLibrary() {
+  mockDecks = [];
+  mockSlides = [];
+  svgById.clear();
   let deckId = 1;
   let slideId = 1;
   const now = Math.floor(Date.now() / 1000);
@@ -191,7 +194,8 @@ const svgById = new Map<number, string>();
     });
     deckId += 1;
   }
-})();
+}
+buildMockLibrary();
 
 const mockRoots: RootRecord[] = (() => {
   const byFolder = new Map<string, { decks: number; slides: number }>();
@@ -355,6 +359,24 @@ export const mock = {
     if (!deck) return false;
     deck.favorite = !deck.favorite;
     return deck.favorite;
+  },
+
+  // --- clear / rebuild -----------------------------------------------------
+
+  // Mirror the native clear_index: wipe indexed content + history but keep
+  // roots. Browser mode has no separate favorites store, so mock favorites
+  // reset with the records here — acceptable (native keeps them via the DB).
+  clearIndex: async (): Promise<void> => {
+    mockDecks = [];
+    mockSlides = [];
+    svgById.clear();
+    mockSearches.length = 0;
+    mockExports.length = 0;
+  },
+
+  // Re-read the "folders" on rescan: deterministic ids make this idempotent.
+  rebuildFromDisk: async (): Promise<void> => {
+    buildMockLibrary();
   },
 
   recordSearch: async (query: string, resultCount: number): Promise<void> => {

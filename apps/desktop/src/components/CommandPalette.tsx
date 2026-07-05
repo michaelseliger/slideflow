@@ -10,6 +10,7 @@ import {
   PanelRight,
   PanelLeft,
   Info,
+  Trash2,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { prefersReducedMotion } from "../lib/utils";
@@ -54,6 +55,12 @@ export default function CommandPalette() {
         hint: "⌘R",
         icon: <RefreshCw size={15} />,
         run: () => void app.startScan(),
+      },
+      {
+        id: "clear-rebuild",
+        label: "Clear index & rebuild…",
+        icon: <Trash2 size={15} />,
+        run: () => app.confirmClearAndRebuild(),
       },
       {
         id: "export",
