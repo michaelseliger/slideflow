@@ -1,7 +1,7 @@
 {
   "name": "slideflow-desktop",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "description": "Slideflow — search your slides, compose new decks with original fidelity.",
   "scripts": {
