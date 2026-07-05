@@ -156,14 +156,14 @@ pub fn set_generic_families(db: &mut fontdb::Database) {
 /// Render one slide of an already-opened deck to an SVG string, with images
 /// embedded and capped at `max_image_px` on the longer edge.
 fn slide_svg(pf: &PresentationFile, slide_index: usize, max_image_px: u32) -> Result<String> {
-    // No `@font-face` substitutes baked into the export SVG: the exporter
-    // carries the bundled Carlito/Caladea bytes fontdb-side instead (see
-    // `system_fonts` / `deck_fonts`), which usvg *does* honor — unlike SVG
-    // `@font-face`, which it ignores.
+    // No `@font-face` fonts baked into the export SVG (neither bundled
+    // substitutes nor app-local fonts): the exporter carries the bundled
+    // Carlito/Caladea bytes — and the host's app fonts — fontdb-side instead (see
+    // `system_fonts` / `deck_fonts` / `AppFontSet::register`), which usvg *does*
+    // honor, unlike SVG `@font-face`, which it ignores.
     let opts = RenderOptions {
-        embed_images: true,
         max_image_px: Some(max_image_px),
-        embed_substitute_fonts: false,
+        ..Default::default()
     };
     render_slide_svg(pf, slide_index, &opts)
 }

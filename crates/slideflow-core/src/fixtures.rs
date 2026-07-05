@@ -423,6 +423,14 @@ pub fn sample_ttf() -> Vec<u8> {
     build_minimal_ttf("Slideflow Test")
 }
 
+/// A minimal test TrueType font carrying `family` in its `name` table — so it
+/// indexes under that family in a `fontdb::Database` and matches a deck's
+/// `<a:latin typeface="family">`. Used to exercise the app-local font pipeline
+/// (harvested / user-added / downloaded faces resolve by their real family name).
+pub fn sample_ttf_named(family: &str) -> Vec<u8> {
+    build_minimal_ttf(family)
+}
+
 fn build_minimal_ttf(family: &str) -> Vec<u8> {
     fn push16(b: &mut Vec<u8>, v: u16) {
         b.extend_from_slice(&v.to_be_bytes());

@@ -38,7 +38,7 @@
 //! - Escape all text. The SVG is injected into the app's webview via
 //!   `<img src=data:>` — it must not contain scripts or external references.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -98,11 +98,27 @@ pub struct RenderOptions {
     /// The export path leaves this `false`: it registers the same bytes fontdb-
     /// side instead ([`crate::fonts::register_bundled_fonts`]).
     pub embed_substitute_fonts: bool,
+    /// App-local fonts (harvested / user-added / downloaded — see
+    /// [`crate::fonts::AppFontSet`]) the host makes available for THIS render.
+    /// When set and [`Self::embed_substitute_fonts`] is on (full/peek tier), a
+    /// used family with a matching app face is embedded as an `@font-face` data-
+    /// URI under its real name, so the isolated `<img>` preview shows the actual
+    /// typeface (e.g. a licensed `"VilleroyBoch"`) rather than a generic
+    /// fallback. `None` (the default, and every grid-thumbnail render) embeds no
+    /// app fonts. The engine never reads the fonts dir itself — the host injects
+    /// this set; the export path leaves it `None` and registers the same bytes
+    /// fontdb-side ([`crate::fonts::AppFontSet::register`]).
+    pub app_fonts: Option<std::sync::Arc<crate::fonts::AppFontSet>>,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { embed_images: true, max_image_px: None, embed_substitute_fonts: false }
+        RenderOptions {
+            embed_images: true,
+            max_image_px: None,
+            embed_substitute_fonts: false,
+            app_fonts: None,
+        }
     }
 }
 
@@ -122,7 +138,7 @@ impl RenderOptions {
     /// fonts embedded (Helvetica-vs-Carlito is imperceptible at tile size, and
     /// baking ~800 KB of base64 font into every grid SVG would bloat the cache).
     pub fn thumb() -> Self {
-        RenderOptions { embed_images: true, max_image_px: Some(512), embed_substitute_fonts: false }
+        RenderOptions { max_image_px: Some(512), ..Default::default() }
     }
 
     /// Larger preview for the peek modal / inspector: crisp, and the bundled
@@ -133,7 +149,11 @@ impl RenderOptions {
     /// fidelity is unaffected — the composer copies original parts, never these
     /// renders.)
     pub fn preview() -> Self {
-        RenderOptions { embed_images: true, max_image_px: Some(1600), embed_substitute_fonts: true }
+        RenderOptions {
+            max_image_px: Some(1600),
+            embed_substitute_fonts: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -490,15 +510,53 @@ impl Ctx<'_> {
             ));
         }
 
-        // 2. Bundled metric-compatible substitutes (full/peek tier only): for
+        // 2. App-local fonts (harvested / user-added / downloaded — the real
+        //    typefaces, keyed by their authored family name). Full/peek tier
+        //    only, same size policy as the bundled substitutes below. A used
+        //    variant with a matching app face is embedded under its REAL name
+        //    ("VilleroyBoch", "Karla", even a licensed "Calibri"), so the
+        //    font-family chain — which always lists the authored name first —
+        //    resolves straight to it. Families covered here are recorded so the
+        //    bundled-substitute pass below doesn't also embed a redundant clone.
+        let mut app_covered: HashSet<String> = HashSet::new();
+        if self.options.embed_substitute_fonts {
+            if let Some(app) = self.options.app_fonts.clone() {
+                for (family, bold, italic) in &self.used_font_variants {
+                    if set.fonts.iter().any(|f| f.family.eq_ignore_ascii_case(family)) {
+                        continue; // a deck-embedded face already won above
+                    }
+                    let Some(face) = app.best_face(family, *bold, *italic) else {
+                        continue;
+                    };
+                    if seen.insert((family.to_ascii_lowercase(), *bold, *italic), ()).is_some() {
+                        continue;
+                    }
+                    app_covered.insert(family.to_ascii_lowercase());
+                    let (mime, format) = font_media_type(&face.bytes);
+                    css.push_str(&format!(
+                        r#"@font-face{{font-family:"{family}";font-weight:{weight};font-style:{style};src:url(data:{mime};base64,{data}) format("{format}");}}"#,
+                        family = css_font_family(family),
+                        weight = if *bold { "bold" } else { "normal" },
+                        style = if *italic { "italic" } else { "normal" },
+                        data = B64.encode(face.bytes.as_slice()),
+                    ));
+                }
+            }
+        }
+
+        // 3. Bundled metric-compatible substitutes (full/peek tier only): for
         //    each used variant of an UNembedded, substitutable family (Calibri →
         //    Carlito, Cambria → Caladea), embed the exact matching variant so
         //    the isolated `<img>` SVG shows the real shapes+metrics instead of
-        //    Helvetica. Skipped when the deck embeds that family — the real font
-        //    emitted above wins, and the font-family list names it first.
+        //    Helvetica. Skipped when the deck embeds that family, OR when an app
+        //    font already covered it above — the real font emitted there wins,
+        //    and the font-family list names it first.
         if self.options.embed_substitute_fonts {
             for (family, bold, italic) in &self.used_font_variants {
                 if set.fonts.iter().any(|f| f.family.eq_ignore_ascii_case(family)) {
+                    continue;
+                }
+                if app_covered.contains(&family.to_ascii_lowercase()) {
                     continue;
                 }
                 let Some(sub) = crate::fonts::bundled_substitute(family) else {
@@ -2200,6 +2258,82 @@ mod tests {
         assert!(
             !svg.contains("font-family:&quot;Carlito&quot;"),
             "no Carlito substitute when Calibri is embedded: {svg}"
+        );
+    }
+
+    /// An app-local font (harvested / user-added / downloaded) for a used family
+    /// is baked into the full/peek SVG under its REAL authored name, and grid
+    /// thumbnails stay lean. (The matching export-fontdb resolution is covered by
+    /// `fonts::tests::app_font_register_resolves_in_export_fontdb`, which needs a
+    /// real, fontdb-parseable face — the minimal fixture font has no OS/2 table.)
+    #[test]
+    fn app_font_embeds_on_full_tier_thumb_stays_lean() {
+        use crate::fonts::{AppFontFace, AppFontSet};
+        use std::sync::Arc;
+
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="VilleroyBoch"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes =
+            textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+
+        let app = Arc::new(AppFontSet::new(vec![AppFontFace {
+            family: "VilleroyBoch".to_string(),
+            bold: false,
+            italic: false,
+            bytes: Arc::new(crate::fixtures::sample_ttf_named("VilleroyBoch")),
+        }]));
+
+        // Full/peek tier: the app font is baked in as an @font-face under its
+        // real authored name, which leads the font-family chain.
+        let mut full = RenderOptions::preview();
+        full.app_fonts = Some(app.clone());
+        let svg = render_slide_svg(&pf, 1, &full).unwrap();
+        assert!(
+            svg.contains(r#"font-family="VilleroyBoch, Helvetica, Arial, sans-serif""#),
+            "authored family leads the chain: {svg}"
+        );
+        assert!(
+            svg.contains("font-family:&quot;VilleroyBoch&quot;"),
+            "full tier embeds a VilleroyBoch @font-face: {svg}"
+        );
+        assert!(svg.contains("src:url(data:font/ttf;base64,"), "app-font bytes embedded: {svg}");
+        assert_no_external_refs(&svg);
+
+        // Grid thumbnail: same chain, but no baked font bytes (size policy).
+        let mut thumb = RenderOptions::thumb();
+        thumb.app_fonts = Some(app.clone());
+        let thumb_svg = render_slide_svg(&pf, 1, &thumb).unwrap();
+        assert!(!thumb_svg.contains("@font-face"), "thumb embeds no app font: {thumb_svg}");
+    }
+
+    /// An app font must not shadow a deck's OWN embedded face for the same
+    /// family: the deck-embedded bytes win, and the app font is not also emitted.
+    #[test]
+    fn embedded_font_beats_app_font_for_same_family() {
+        use crate::fonts::{AppFontFace, AppFontSet};
+        use std::sync::Arc;
+
+        let deck = DeckSpec::new("Deck")
+            .embed_font("Grafton", vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("x"));
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="Grafton"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes =
+            textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(deck, &shapes);
+
+        let app = Arc::new(AppFontSet::new(vec![AppFontFace {
+            family: "Grafton".to_string(),
+            bold: false,
+            italic: false,
+            bytes: Arc::new(crate::fixtures::sample_ttf_named("Grafton")),
+        }]));
+        let mut full = RenderOptions::preview();
+        full.app_fonts = Some(app);
+        let svg = render_slide_svg(&pf, 1, &full).unwrap();
+        assert_eq!(
+            svg.matches("@font-face").count(),
+            1,
+            "only the deck-embedded Grafton face, not also the app font: {svg}"
         );
     }
 

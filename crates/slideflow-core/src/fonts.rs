@@ -170,9 +170,179 @@ pub fn register_bundled_fonts(db: &mut fontdb::Database) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// App-local fonts (harvested / user-added / downloaded)
+// ---------------------------------------------------------------------------
+
+/// One app-local font face — a real font the user owns or we legally fetched,
+/// living under `<app_data>/fonts/` (harvested from a deck, user-added, or
+/// downloaded). Unlike the bundled *substitutes*, its `family` is the **real**
+/// authored name a deck references (`"VilleroyBoch"`, `"Karla"`, even a licensed
+/// `"Calibri"`), so it wins the `font-family` chain the renderer emits — the
+/// authored name is always first.
+#[derive(Clone)]
+pub struct AppFontFace {
+    /// Family name from the font's `name` table — what a deck's
+    /// `<a:latin typeface>` must match (case-insensitively) to use this face.
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
+    /// Raw (validated) TTF/OTF bytes, shared so cloning a set is a refcount bump
+    /// rather than copying megabytes.
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
+// Hand-written so a `Debug`-printed RenderOptions logs the face's identity, not
+// its (potentially multi-MB) byte buffer.
+impl std::fmt::Debug for AppFontFace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppFontFace")
+            .field("family", &self.family)
+            .field("bold", &self.bold)
+            .field("italic", &self.italic)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// The set of app-local fonts available to one render/export, built by the
+/// desktop host from `<app_data>/fonts/` and injected into the engine via
+/// [`crate::render::RenderOptions::app_fonts`].
+///
+/// The engine NEVER reads the fonts directory itself — it only consults the set
+/// the host hands it — so core stays filesystem-side-effect-free and network-
+/// free, and tests inject in-memory sets. The preview path embeds a used face as
+/// an `@font-face` data-URI (full/peek tier only, mirroring the bundled-
+/// substitute size policy); the export path registers the same bytes into its
+/// `fontdb::Database` via [`AppFontSet::register`].
+#[derive(Debug, Clone, Default)]
+pub struct AppFontSet {
+    faces: Vec<AppFontFace>,
+}
+
+impl AppFontSet {
+    pub fn new(faces: Vec<AppFontFace>) -> Self {
+        AppFontSet { faces }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.faces.is_empty()
+    }
+
+    pub fn faces(&self) -> &[AppFontFace] {
+        &self.faces
+    }
+
+    /// Distinct family names present (case preserved; first occurrence kept).
+    pub fn families(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for f in &self.faces {
+            if !out.iter().any(|e| e.eq_ignore_ascii_case(&f.family)) {
+                out.push(f.family.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether any face carries `family` (case-insensitive).
+    pub fn has_family(&self, family: &str) -> bool {
+        self.faces.iter().any(|f| f.family.eq_ignore_ascii_case(family))
+    }
+
+    /// The best face for (`family`, `bold`, `italic`): an exact variant match if
+    /// present, else the family's regular (upright, non-bold) face, else any face
+    /// of that family. `None` when the set has no face for `family` at all — the
+    /// caller then falls through to the bundled substitute / generic tail.
+    pub fn best_face(&self, family: &str, bold: bool, italic: bool) -> Option<&AppFontFace> {
+        let same = |f: &&AppFontFace| f.family.eq_ignore_ascii_case(family);
+        self.faces
+            .iter()
+            .find(|f| same(f) && f.bold == bold && f.italic == italic)
+            .or_else(|| self.faces.iter().find(|f| same(f) && !f.bold && !f.italic))
+            .or_else(|| self.faces.iter().find(same))
+    }
+
+    /// Load every app face into `db` so a `font-family` list that names one
+    /// resolves during rasterization (the export path — usvg ignores SVG
+    /// `@font-face`). Faces index under their own `name` table.
+    pub fn register(&self, db: &mut fontdb::Database) {
+        for f in &self.faces {
+            db.load_font_data((*f.bytes).clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn face(family: &str, bold: bool, italic: bool) -> AppFontFace {
+        AppFontFace { family: family.to_string(), bold, italic, bytes: Arc::new(sample_bytes()) }
+    }
+
+    // Distinct dummy bytes per call so `register` can be told faces apart. Not a
+    // valid font — only `best_face`/`families`/`has_family` are exercised here.
+    fn sample_bytes() -> Vec<u8> {
+        vec![0x00, 0x01, 0x00, 0x00]
+    }
+
+    #[test]
+    fn best_face_prefers_exact_then_regular_then_any() {
+        let set = AppFontSet::new(vec![
+            face("VilleroyBoch", false, false),
+            face("VilleroyBoch", true, false),
+        ]);
+        // Exact variant wins.
+        assert!(set.best_face("villeroyboch", true, false).unwrap().bold);
+        // No italic face → falls back to the regular (upright, non-bold) face.
+        let it = set.best_face("VilleroyBoch", false, true).unwrap();
+        assert!(!it.bold && !it.italic, "italic request falls back to regular");
+        // Unknown family → None.
+        assert!(set.best_face("Karla", false, false).is_none());
+    }
+
+    /// The export contract: an app-font set registered into a `fontdb::Database`
+    /// resolves by its real family name during rasterization (usvg ignores SVG
+    /// `@font-face`, so the exporter needs the bytes fontdb-side). Uses the real,
+    /// fontdb-parseable bundled Carlito bytes as a stand-in app face — the
+    /// minimal fixture font has no OS/2 table and fontdb rejects it.
+    #[test]
+    fn app_font_register_resolves_in_export_fontdb() {
+        let carlito = bundled_face("Carlito", false, false).expect("bundled Carlito regular");
+        let set = AppFontSet::new(vec![AppFontFace {
+            family: carlito.family.to_string(),
+            bold: false,
+            italic: false,
+            bytes: Arc::new(carlito.bytes.to_vec()),
+        }]);
+        let mut db = fontdb::Database::new();
+        set.register(&mut db);
+        let id = db
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Carlito")],
+                ..fontdb::Query::default()
+            })
+            .expect("registered app face resolves in the export fontdb");
+        let face = db.face(id).expect("queried face exists");
+        assert!(
+            face.families.iter().any(|(f, _)| f == "Carlito"),
+            "resolved to {:?}, expected the registered app face",
+            face.families
+        );
+    }
+
+    #[test]
+    fn families_and_has_family_are_case_insensitive_and_deduped() {
+        let set = AppFontSet::new(vec![
+            face("Karla", false, false),
+            face("Karla", true, false),
+            face("Aptos", false, false),
+        ]);
+        assert_eq!(set.families(), vec!["Karla".to_string(), "Aptos".to_string()]);
+        assert!(set.has_family("karla") && set.has_family("APTOS"));
+        assert!(!set.has_family("Calibri"));
+    }
 
     #[test]
     fn calibri_and_cambria_lead_with_the_bundled_clone() {
