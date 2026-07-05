@@ -296,7 +296,16 @@ pub fn export_pdf(
                 }
             }
             Some(pf) => match render_pdf_page(&mut document, &pf, pick.slide_index, &db) {
-                Ok(()) => pages_written += 1,
+                Ok(dropped) => {
+                    pages_written += 1;
+                    if dropped > 0 {
+                        report.warnings.push(format!(
+                            "{} slide {}: {dropped} image(s) could not be embedded and were left blank",
+                            deck_stem(&pick.pptx_path),
+                            pick.slide_index
+                        ));
+                    }
+                }
                 Err(e) => report.warnings.push(format!(
                     "{} slide {}: {e}",
                     deck_stem(&pick.pptx_path),
@@ -321,14 +330,20 @@ pub fn export_pdf(
     Ok(report)
 }
 
-/// Render one slide as a fresh page appended to `document`.
+/// Render one slide as a fresh page appended to `document`. Returns how many
+/// embedded rasters were neutralized (see [`sanitize_pdf_images`]) so the caller
+/// can surface a warning.
 fn render_pdf_page(
     document: &mut Document,
     pf: &PresentationFile,
     slide_index: usize,
     db: &Arc<fontdb::Database>,
-) -> Result<()> {
+) -> Result<usize> {
     let svg = slide_svg(pf, slide_index, PDF_MAX_IMAGE_PX)?;
+    // krilla decodes embedded rasters lazily at document.finish(), so a single
+    // corrupt image would abort the WHOLE PDF rather than one page. Neutralize
+    // any raster the strict decoder can't read *before* handing it to krilla.
+    let (svg, dropped) = sanitize_pdf_images(&svg);
     let tree = parse_svg(&svg, db)?;
     let size = tree.size();
     let (w, h) = (size.width(), size.height());
@@ -343,7 +358,70 @@ fn render_pdf_page(
     surface.draw_svg(&tree, krilla_size, settings);
     surface.finish();
     page.finish();
-    Ok(())
+    Ok(dropped)
+}
+
+/// A known-good 1×1 fully-transparent PNG as a data URI, built once. Used to
+/// replace embedded rasters krilla can't decode.
+fn transparent_pixel_uri() -> &'static str {
+    static URI: OnceLock<String> = OnceLock::new();
+    URI.get_or_init(|| {
+        use base64::Engine as _;
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode 1×1 transparent PNG");
+        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&buf))
+    })
+}
+
+/// Whether a `data:image/<type>;base64,…` URI holds a raster the strict PNG/JPEG
+/// decoder (the same strictness krilla uses) cannot read. Vector `svg+xml` URIs
+/// never hit that decoder, so they're always considered fine here.
+fn is_undecodable_raster(uri: &str) -> bool {
+    use base64::Engine as _;
+    let Some(rest) = uri.strip_prefix("data:image/") else { return false };
+    let Some((subtype, b64)) = rest.split_once(";base64,") else { return false };
+    if subtype.eq_ignore_ascii_case("svg+xml") {
+        return false;
+    }
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => image::load_from_memory(&bytes).is_err(),
+        Err(_) => true,
+    }
+}
+
+/// Replace every embedded raster the strict decoder rejects with a transparent
+/// pixel, returning the rewritten SVG and the count neutralized. Vector images
+/// and decodable rasters pass through untouched.
+fn sanitize_pdf_images(svg: &str) -> (String, usize) {
+    const OPEN: &str = "href=\"";
+    if !svg.contains("href=\"data:image/") {
+        return (svg.to_string(), 0);
+    }
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    let mut dropped = 0usize;
+    while let Some(pos) = rest.find("href=\"data:image/") {
+        let val_start = pos + OPEN.len();
+        out.push_str(&rest[..val_start]);
+        let after = &rest[val_start..];
+        let Some(qend) = after.find('"') else {
+            out.push_str(after);
+            return (out, dropped);
+        };
+        let uri = &after[..qend];
+        if is_undecodable_raster(uri) {
+            dropped += 1;
+            out.push_str(transparent_pixel_uri());
+        } else {
+            out.push_str(uri);
+        }
+        rest = &after[qend..];
+    }
+    out.push_str(rest);
+    (out, dropped)
 }
 
 // ---------------------------------------------------------------------------

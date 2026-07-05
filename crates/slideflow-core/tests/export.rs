@@ -235,6 +235,35 @@ fn pdf_missing_deck_warns_and_others_still_export() {
 }
 
 #[test]
+fn pdf_undecodable_image_degrades_to_warning_not_whole_pdf_abort() {
+    // The bundled TINY_PNG fixture has a CRC-incorrect IDAT chunk that both the
+    // strict `image` decoder and krilla reject. Because krilla decodes images
+    // lazily at assembly time, an un-neutralized bad image would abort the whole
+    // PDF; instead the export must blank it, warn, and still write every page.
+    let tmp = tempfile::tempdir().unwrap();
+    let deck = write_deck(tmp.path(), "withbadimg", 2, true); // slide 1 carries TINY_PNG
+    let out = tmp.path().join("d.pdf");
+    let fonts = fixture_fonts();
+
+    let picks = vec![
+        SlidePick { pptx_path: deck.to_string_lossy().into(), slide_index: 1 },
+        SlidePick { pptx_path: deck.to_string_lossy().into(), slide_index: 2 },
+    ];
+    let report =
+        export_pdf(&picks, &out, &PdfOptions::default(), &fonts, &mut |_, _| {}).unwrap();
+
+    assert_eq!(report.files_written, vec![out.clone()]);
+    assert_eq!(report.warnings.len(), 1, "one warning for the blanked image");
+    assert!(
+        report.warnings[0].contains("could not be embedded"),
+        "warning: {:?}",
+        report.warnings
+    );
+    let doc = lopdf::Document::load(&out).unwrap();
+    assert_eq!(doc.get_pages().len(), 2, "both slides still produce pages");
+}
+
+#[test]
 fn empty_picks_are_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let fonts = fixture_fonts();
