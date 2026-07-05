@@ -94,6 +94,18 @@ const NEAR_DUP_TOP_N: usize = 10;
 /// relevant head, and drops the weakly-related 0.75–0.82 tail.
 const SEMANTIC_SCORE_FLOOR: f32 = 0.82;
 
+/// Minimum raw cosine for a find-similar neighbor. Distinct from
+/// [`SEMANTIC_SCORE_FLOOR`] because that value was tuned on *query→passage*
+/// cosines, whereas find-similar compares *passage↔passage* — a distribution
+/// that sits notably higher (two real slide texts share far more surface than a
+/// short query does with a passage; near-identical passages reach
+/// [`NEAR_DUP_THRESHOLD`] = 0.92). 0.86 is the deliberate midpoint: above the
+/// query→passage floor (passage↔passage cosines run hotter, so 0.82 would let
+/// weakly-related slides through) yet below the near-dup threshold (so genuinely
+/// related-but-not-duplicate slides still surface). Heuristic, pending empirical
+/// passage↔passage tuning against the live library.
+const SIMILAR_SCORE_FLOOR: f32 = 0.86;
+
 /// Raw near-duplicate clusters (O(n²)) for a vector-store snapshot, using the
 /// library's tuned threshold + fan-out. Pure compute on the snapshot — no DB, no
 /// `Library` — so the desktop host runs it in `spawn_blocking` off the
@@ -1258,8 +1270,9 @@ impl Library {
                 })
                 .into_iter()
                 // Drop below-floor neighbors (raw cosine) so find-similar shows
-                // only genuinely related slides, not unrelated padding.
-                .filter(|(_, s)| *s >= SEMANTIC_SCORE_FLOOR)
+                // only genuinely related slides, not unrelated padding. Uses the
+                // passage↔passage floor, not the (lower) query→passage one.
+                .filter(|(_, s)| *s >= SIMILAR_SCORE_FLOOR)
                 .map(|(i, s)| (store.slide_ids()[i], s))
                 .collect()
         };
@@ -3061,6 +3074,58 @@ mod tests {
         assert_eq!(hits.len(), lex.len(), "vector arm floored to empty → FTS hits only");
         assert!(hits.iter().all(|h| h.snippet.contains("<mark>")), "only FTS-marked hits remain");
         assert_eq!(hits[0].slide.id, lex[0].slide.id, "the lexical hit survives fusion");
+    }
+
+    #[test]
+    fn hybrid_hydrates_vector_only_hits_missing_from_fts() {
+        // The semantic-only hydration branch: a fused hit present in the vector
+        // arm but ABSENT from the FTS arm must still be returned, hydrated via
+        // fetch_slides_with_decks with a fallback (non-<mark>) snippet.
+        //
+        // Build a single-body-word slide (embed text == "revenue"), then delete
+        // its row from the FTS table so the lexical arm can't match it. The
+        // FakeEmbedder scores the "revenue" query at cosine 1.0 (above the floor),
+        // so the vector arm is the ONLY arm carrying the slide into the fused top.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Deck")
+            .slide(SlideSpec::new("").bullets(&["revenue"]))
+            .write_to(&dir.path().join("d.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.set_embedder(Some(Arc::new(FakeEmbedder::new(32))));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let slide_id = lib
+            .decks()
+            .unwrap()
+            .into_iter()
+            .flat_map(|d| lib.slides_for_deck(d.id).unwrap())
+            .find(|s| s.body_text == "revenue")
+            .expect("the revenue slide exists")
+            .id;
+
+        // Precondition: lexical alone finds it via FTS.
+        assert_eq!(lib.search("revenue", &SearchFilters::default()).unwrap().len(), 1);
+
+        // Drop the slide's FTS row directly (the FTS table is content-owning, so a
+        // plain DELETE works): the lexical arm now misses it entirely.
+        lib.conn.execute("DELETE FROM slides_fts WHERE rowid = ?1", [slide_id]).unwrap();
+        assert!(
+            lib.search("revenue", &SearchFilters::default()).unwrap().is_empty(),
+            "precondition: FTS no longer matches the slide"
+        );
+
+        // Hybrid: the FTS arm contributes nothing, the vector arm scores cosine
+        // 1.0 → the slide must still surface, hydrated with a fallback snippet (no
+        // <mark>) and the RRF fusion score.
+        let hy = SearchFilters { search_mode: Some("hybrid".into()), ..Default::default() };
+        let hits = lib.search("revenue", &hy).unwrap();
+        assert_eq!(hits.len(), 1, "vector-only hit is hydrated into the results");
+        assert_eq!(hits[0].slide.id, slide_id);
+        assert!(!hits[0].snippet.contains("<mark>"), "vector-only hit gets a fallback snippet");
+        assert_eq!(hits[0].snippet, "revenue", "fallback snippet is the body text");
+        assert!(hits[0].score > 0.0, "carries the RRF fusion score");
     }
 
     #[test]
