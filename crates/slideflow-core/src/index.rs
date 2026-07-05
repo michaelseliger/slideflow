@@ -30,7 +30,7 @@
 //!   tasks. `Library` is `Send` (no `!Send` fields) so it can live in a Mutex.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -294,6 +294,7 @@ impl Library {
                 2 => tx.execute_batch(MIGRATIONS_V2)?,
                 3 => tx.execute_batch(MIGRATIONS_V3)?,
                 4 => tx.execute_batch(MIGRATIONS_V4)?,
+                5 => tx.execute_batch(MIGRATIONS_V5)?,
                 _ => unreachable!("no migration for schema v{next}"),
             }
             // PRAGMA cannot bind params — format the (internal, trusted) integer.
@@ -594,6 +595,36 @@ impl Library {
         Ok(())
     }
 
+    /// Every distinct font family named across the indexed library, each with an
+    /// `embedded` flag set when ANY indexed deck embeds it. Alphabetical
+    /// (case-insensitive). Drives the Fonts settings panel; empty until decks are
+    /// (re)scanned under the `deck_fonts`-collecting [`INDEX_VERSION`], so the UI
+    /// shows a "rescan" hint on an empty result.
+    pub fn library_font_families(&self) -> Result<Vec<(String, bool)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT family, MAX(embedded) FROM deck_fonts \
+             GROUP BY family COLLATE NOCASE ORDER BY family COLLATE NOCASE",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Absolute paths of every indexed deck that embeds at least one font, so the
+    /// host can reopen just those to harvest their embedded faces (most decks
+    /// embed none — this keeps harvesting cheap).
+    pub fn decks_with_embedded_fonts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.path FROM decks d \
+             JOIN deck_fonts f ON f.deck_id = d.id WHERE f.embedded = 1 ORDER BY d.path",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     fn index_deck(
         &mut self,
         root_id: i64,
@@ -692,6 +723,17 @@ impl Library {
                 params![sid, slide.title, slide.body_text, slide.notes, deck_terms],
             )?;
         }
+
+        // Refresh this deck's font inventory (WS-F). Replace wholesale so a
+        // re-scan after an edit that dropped a font leaves no stale rows.
+        tx.execute("DELETE FROM deck_fonts WHERE deck_id=?1", params![deck_id])?;
+        for (family, embedded) in &deck.fonts {
+            tx.execute(
+                "INSERT OR IGNORE INTO deck_fonts(deck_id, family, embedded) VALUES(?1,?2,?3)",
+                params![deck_id, family, *embedded as i64],
+            )?;
+        }
+
         tx.commit()?;
 
         // With a model attached, embed any of this deck's slide texts not already
@@ -2272,13 +2314,20 @@ fn fallback_snippet(body: &str) -> String {
 
 /// Bump to force a one-time reindex of every deck (e.g. when the extraction
 /// logic or FTS content changes) — a new version makes every stored hash stale.
-const INDEX_VERSION: u32 = 2;
+///
+/// v3 (WS-F): the scan now also collects each deck's font inventory into
+/// `deck_fonts`. Existing libraries' decks predate that table, so bumping here
+/// makes every stored `content_hash` stale (it hashes `v{INDEX_VERSION}:…`),
+/// which un-skips them on the next incremental scan and backfills their fonts —
+/// no separate backfill job, no per-deck bookkeeping. The Fonts settings panel
+/// degrades gracefully (empty + "rescan" hint) until that scan runs.
+const INDEX_VERSION: u32 = 3;
 
 /// Highest schema version this build knows how to migrate to. `PRAGMA
 /// user_version` tracks the DB's current level; [`Library::migrate`] applies
 /// each `MIGRATIONS_V*` step in order until the DB reaches this. Distinct from
 /// INDEX_VERSION: a schema migration is not a re-parse trigger.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// v1 additive migration: new deck/scan/root columns and the diagnostics tables
 /// (scan_issues/render_issues/export_picks). ADD COLUMN NOT NULL all carry a
@@ -2373,6 +2422,24 @@ CREATE TABLE IF NOT EXISTS embeddings(
     vector    BLOB NOT NULL,
     PRIMARY KEY(model_id, text_hash)
 );
+"#;
+
+/// v5 additive migration: the per-deck font inventory (WS-F) feeding the Fonts
+/// settings panel. One row per (deck, named family); `embedded` flags a family
+/// the deck actually embeds (so the host can harvest just those). Cascades on
+/// deck delete. Its own frozen version step (see the freeze rule on
+/// [`MIGRATIONS_V2`]); the idempotent `IF NOT EXISTS` heals a DB that somehow
+/// picked the table up early. Rows are populated by the scan, gated behind the
+/// bumped [`INDEX_VERSION`] so existing decks backfill on their next rescan.
+const MIGRATIONS_V5: &str = r#"
+-- WS-F: per-deck font inventory
+CREATE TABLE IF NOT EXISTS deck_fonts(
+    deck_id  INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+    family   TEXT NOT NULL,
+    embedded INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(deck_id, family)
+);
+CREATE INDEX IF NOT EXISTS idx_deck_fonts_family ON deck_fonts(family);
 "#;
 
 fn content_hash(mtime: i64, size: i64) -> String {
@@ -2480,6 +2547,10 @@ struct ExtractedDeck {
     width_emu: i64,
     height_emu: i64,
     slides: Vec<ExtractedSlide>,
+    /// Every distinct font family this deck names (theme + run typefaces), each
+    /// flagged `true` when the deck embeds that family. Persisted into
+    /// `deck_fonts` for the Fonts settings inventory.
+    fonts: Vec<(String, bool)>,
 }
 
 /// Parse a deck fully (outside any DB transaction). Any parse error here makes
@@ -2522,6 +2593,23 @@ fn extract_deck(path: &Path) -> Result<ExtractedDeck> {
         });
     }
 
+    // Font inventory: every family the deck names (theme + run typefaces),
+    // unioned with the families it embeds (which live in presentation.xml, not
+    // the parts `deck_font_names` scans), each flagged whether it is embedded.
+    let embedded: BTreeSet<String> =
+        pf.embedded_font_set().fonts.iter().map(|f| f.family.clone()).collect();
+    let mut named = deck_font_names(&pf);
+    for e in &embedded {
+        named.insert(e.clone());
+    }
+    let fonts: Vec<(String, bool)> = named
+        .into_iter()
+        .map(|fam| {
+            let is_embedded = embedded.iter().any(|e| e.eq_ignore_ascii_case(&fam));
+            (fam, is_embedded)
+        })
+        .collect();
+
     Ok(ExtractedDeck {
         file_name,
         title,
@@ -2529,7 +2617,78 @@ fn extract_deck(path: &Path) -> Result<ExtractedDeck> {
         width_emu: pf.slide_width_emu,
         height_emu: pf.slide_height_emu,
         slides,
+        fonts,
     })
+}
+
+/// Every distinct font family a deck NAMES: the theme major/minor fonts plus
+/// every explicit `<a:latin>` / `<a:ea>` / `<a:cs>` typeface across its slides,
+/// layouts, and masters. Theme-reference placeholders (`+mn-lt`, `+mj-ea`, …)
+/// are skipped — they resolve to the concrete `fontScheme` names, which are
+/// collected directly. Bullet-glyph fonts (`<a:buFont>`) are deliberately
+/// excluded. A cheap byte scan over the already-inflated package (no XML parse,
+/// no render) — this is the font *inventory*, not a rendering decision.
+fn deck_font_names(pf: &PresentationFile) -> BTreeSet<String> {
+    let mut fams: BTreeSet<String> = BTreeSet::new();
+    for name in pf.package.part_names() {
+        let interesting = name.ends_with(".xml")
+            && (name.starts_with("ppt/slides/")
+                || name.starts_with("ppt/slideLayouts/")
+                || name.starts_with("ppt/slideMasters/")
+                || name.starts_with("ppt/theme/"));
+        if !interesting {
+            continue;
+        }
+        if let Some(bytes) = pf.package.part(name) {
+            if let Ok(xml) = std::str::from_utf8(bytes) {
+                collect_typefaces(xml, &mut fams);
+            }
+        }
+    }
+    fams
+}
+
+/// Pull every text-font `typeface="X"` value out of a DrawingML part, skipping
+/// empty names and `+…` theme references. Only `<a:latin>` / `<a:ea>` / `<a:cs>`
+/// tags count (the run + fontScheme text fonts); `<a:buFont>` bullet fonts and
+/// `<a:font script=…>` fallback entries are ignored.
+fn collect_typefaces(xml: &str, out: &mut BTreeSet<String>) {
+    const KEY: &str = "typeface=\"";
+    let mut from = 0;
+    while let Some(rel) = xml[from..].find(KEY) {
+        let attr_pos = from + rel;
+        let val_start = attr_pos + KEY.len();
+        from = val_start;
+        // Enclosing tag: scan back to the nearest '<'. Only latin/ea/cs carry a
+        // text font here.
+        let Some(lt) = xml[..attr_pos].rfind('<') else { continue };
+        let tag = &xml[lt + 1..attr_pos];
+        let is_text_font =
+            tag.starts_with("a:latin") || tag.starts_with("a:ea") || tag.starts_with("a:cs");
+        if !is_text_font {
+            continue;
+        }
+        let Some(end) = xml[val_start..].find('"') else { break };
+        let name = xml_unescape(&xml[val_start..val_start + end]);
+        let trimmed = name.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('+') {
+            out.insert(trimmed.to_string());
+        }
+    }
+}
+
+/// Decode the handful of XML entities a `typeface` attribute value may carry
+/// (font family names like `A&amp;B`). `&amp;` is undone last so it can't
+/// re-introduce a decoded entity.
+fn xml_unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Filesystem watcher over the library roots. Keep the returned value alive
@@ -2715,6 +2874,43 @@ mod tests {
         assert_eq!(roots[0].deck_count, 2);
         assert_eq!(roots[0].slide_count, 3);
         assert!(roots[0].last_scan_unix.is_some());
+    }
+
+    #[test]
+    fn scan_collects_deck_font_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        // A names a licensed corporate font via its theme; embeds nothing.
+        DeckSpec::new("Corp")
+            .font("VilleroyBoch")
+            .slide(SlideSpec::new("Hi").bullets(&["x"]))
+            .write_to(&dir.path().join("corp.pptx"))
+            .unwrap();
+        // B names Aptos AND embeds a Grafton face.
+        DeckSpec::new("Embeds")
+            .font("Aptos")
+            .embed_font("Grafton", vec![(false, false, crate::fixtures::sample_ttf())])
+            .slide(SlideSpec::new("Hi").bullets(&["y"]))
+            .write_to(&dir.path().join("embeds.pptx"))
+            .unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let fams = lib.library_font_families().unwrap();
+        let names: Vec<&str> = fams.iter().map(|(f, _)| f.as_str()).collect();
+        assert!(names.contains(&"VilleroyBoch"), "corp theme font listed: {names:?}");
+        assert!(names.contains(&"Aptos"), "embeds theme font listed: {names:?}");
+        assert!(names.contains(&"Grafton"), "embedded family listed: {names:?}");
+
+        // Only the embedded family carries the embedded flag.
+        assert!(fams.iter().any(|(f, e)| f == "Grafton" && *e), "Grafton embedded");
+        assert!(fams.iter().any(|(f, e)| f == "VilleroyBoch" && !*e), "VilleroyBoch only named");
+
+        // Just the embedding deck is reported for harvesting.
+        let embedding = lib.decks_with_embedded_fonts().unwrap();
+        assert_eq!(embedding.len(), 1);
+        assert!(embedding[0].ends_with("embeds.pptx"), "got {embedding:?}");
     }
 
     #[test]
@@ -4802,6 +4998,51 @@ mod tests {
 
         // A v4-stamped DB reopening must NOT error: the non-idempotent ALTERs
         // are guarded by user_version and never run twice.
+        let again = Library::open(&db_path).unwrap();
+        let version: i64 =
+            again.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// WS-F heal: a DB stamped at 4 WITHOUT the `deck_fonts` table gains it on
+    /// reopen — the v5 step runs for it. Its DDL is idempotent (`IF NOT EXISTS`),
+    /// so a v5-stamped DB reopening never errors.
+    #[test]
+    fn reopening_heals_db_stamped_v4_without_deck_fonts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+        drop(Library::open(&db_path).unwrap()); // fresh DB, fully migrated
+
+        {
+            // Strip the v5 objects and stamp the DB back to 4 — the state of a
+            // library last touched by a build without the font-inventory step.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_deck_fonts_family;
+                 DROP TABLE deck_fonts;
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+            assert!(conn.prepare("SELECT family FROM deck_fonts").is_err());
+        }
+
+        // Reopen: migrate() finds user_version == 4 < SCHEMA_VERSION and runs
+        // EXACTLY the v5 batch.
+        let lib = Library::open(&db_path).unwrap();
+        let version: i64 =
+            lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            lib.conn.prepare("SELECT deck_id, family, embedded FROM deck_fonts").is_ok(),
+            "deck_fonts recreated by the v5 step"
+        );
+        assert!(
+            lib.library_font_families().unwrap().is_empty(),
+            "empty until decks are rescanned under the bumped INDEX_VERSION"
+        );
+        drop(lib);
+
+        // A v5-stamped DB reopening must NOT error.
         let again = Library::open(&db_path).unwrap();
         let version: i64 =
             again.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
