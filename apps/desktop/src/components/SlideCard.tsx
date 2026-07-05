@@ -39,8 +39,9 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
     if (e.metaKey || e.ctrlKey) app.toggleSelect(index);
     else if (e.shiftKey) app.rangeSelect(index);
     else {
+      // Selection only — the Inspector opens exclusively via its toggle (⌘I /
+      // header button / palette) or menu actions that target its content.
       app.selectOnly(index);
-      if (!app.inspectorVisible) app.setInspector(true);
     }
   };
 
