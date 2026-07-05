@@ -19,8 +19,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::index::Library;
 use slideflow_core::model::{
-    ComposeReport, DeckRecord, RootRecord, SearchFilters, SearchHit, SlidePick, SlideRecord,
-    StatsOverview,
+    ComposeReport, DeckRecord, FitMode, RootRecord, SearchFilters, SearchHit, SlidePick,
+    SlideRecord, StatsOverview,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
@@ -391,6 +391,10 @@ pub struct ComposeArgs {
     pub output_path: String,
     pub title: String,
     pub include_notes: bool,
+    /// How to fit aspect-mismatched slides. Absent (the frontend omits it unless
+    /// the tray actually mixes aspect ratios) means "don't scale, just warn".
+    #[serde(default)]
+    pub fit_mode: Option<FitMode>,
 }
 
 #[tauri::command]
@@ -406,6 +410,7 @@ pub async fn compose_deck(
         output_path,
         title,
         include_notes,
+        fit_mode,
     } = args;
     let record_title = title.clone();
     let record_picks = picks.clone();
@@ -413,6 +418,7 @@ pub async fn compose_deck(
         let opts = ComposeOptions {
             title,
             include_notes,
+            fit_mode,
         };
         compose(&picks, Path::new(&output_path), &opts).map_err(e)
     })

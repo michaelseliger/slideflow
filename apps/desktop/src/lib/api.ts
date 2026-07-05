@@ -7,6 +7,7 @@
 import type {
   ComposeReport,
   DeckRecord,
+  FitMode,
   RootRecord,
   ScanEvent,
   SearchFilters,
@@ -234,6 +235,7 @@ export function composeDeck(
   outputPath: string,
   title: string,
   includeNotes: boolean,
+  fitMode?: FitMode,
 ): Promise<ComposeReport> {
   return isTauri()
     ? tauriInvoke("compose_deck", {
@@ -242,9 +244,10 @@ export function composeDeck(
           output_path: outputPath,
           title,
           include_notes: includeNotes,
+          fit_mode: fitMode,
         },
       })
-    : mock.composeDeck(picks, outputPath, title, includeNotes);
+    : mock.composeDeck(picks, outputPath, title, includeNotes, fitMode);
 }
 
 // ---------------------------------------------------------------------------

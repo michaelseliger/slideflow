@@ -30,3 +30,29 @@ export function mismatchedDimUids(items: TrayItem[]): Set<string> {
   }
   return out;
 }
+
+/** Same-aspect epsilon test, mirroring `scale::is_same_aspect` in the engine:
+ *  `|aw·bh − bw·ah| ≤ 0.001·bw·bh`. `b` is the reference (output) canvas. */
+function sameAspect(a: { w: number; h: number }, b: { w: number; h: number }): boolean {
+  const lhs = Math.abs(a.w * b.h - b.w * a.h);
+  const rhs = 0.001 * b.w * b.h;
+  return lhs <= rhs;
+}
+
+/**
+ * Whether the tray mixes *aspect ratios* (as opposed to just sizes). The first
+ * pick is the reference canvas; a later deck with a known but differently-shaped
+ * canvas makes this true. Same-aspect resizes are auto-scaled by the engine and
+ * are NOT a mismatch here — this gates the fit-mode choice, which only matters
+ * when scaling is genuinely ambiguous. Unknown dims never count.
+ */
+export function trayHasAspectMismatch(items: TrayItem[]): boolean {
+  if (items.length < 2) return false;
+  const ref = deckDims(items[0]);
+  if (!ref) return false;
+  for (let i = 1; i < items.length; i += 1) {
+    const d = deckDims(items[i]);
+    if (d && !sameAspect(d, ref)) return true;
+  }
+  return false;
+}

@@ -108,14 +108,20 @@ export interface SlidePick {
   slide_index: number;
 }
 
+/** How to fit aspect-mismatched slides on export. Mirrors `FitMode` (serde
+ *  snake_case). */
+export type FitMode = "ensure_fit" | "maximize";
+
 /** Result of composing a new deck. Mirrors `ComposeReport`. */
 export interface ComposeReport {
   output_path: string;
   slides_written: number;
   /** Number of distinct source decks that contributed slides. */
   source_decks: number;
-  /** Non-fatal notes. */
+  /** Non-fatal warnings. */
   warnings: string[];
+  /** Neutral, informational notes (e.g. a deck scaled to the output size). */
+  notes: string[];
 }
 
 /** Library-wide stats. Mirrors the desktop `Stats` command struct. */

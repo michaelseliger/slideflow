@@ -6,6 +6,7 @@ import type {
   ComposeReport,
   DeckRecord,
   ExportRecord,
+  FitMode,
   RootRecord,
   SearchHistoryEntry,
   SearchHit,
@@ -358,6 +359,7 @@ export const mock = {
     outputPath: string,
     title: string,
     _includeNotes: boolean,
+    _fitMode?: FitMode,
   ): Promise<ComposeReport> => {
     // Simulate assembly latency so the progress UI is exercised in the browser.
     await new Promise((r) => setTimeout(r, 700));
@@ -375,6 +377,7 @@ export const mock = {
       slides_written: picks.length,
       source_decks: decks.size,
       warnings: [],
+      notes: [],
     };
   },
 

@@ -14,7 +14,8 @@ import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
 import { dirname, prefersReducedMotion } from "../lib/utils";
 import { readExportPreset, writeExportPreset } from "../lib/exportPreset";
-import type { ComposeReport } from "../lib/types";
+import { trayHasAspectMismatch } from "../lib/trayDims";
+import type { ComposeReport, FitMode } from "../lib/types";
 import * as api from "../lib/api";
 
 type Phase =
@@ -30,8 +31,12 @@ export default function ExportSheet() {
   const items = useTray((s) => s.items);
   const reduce = prefersReducedMotion();
 
+  // Only when the tray mixes aspect ratios is the fit ambiguous enough to ask.
+  const hasAspectMismatch = trayHasAspectMismatch(items);
+
   const [title, setTitle] = useState("Slideflow Deck");
   const [includeNotes, setIncludeNotes] = useState(false);
+  const [fitMode, setFitMode] = useState<FitMode>("ensure_fit");
   const [phase, setPhase] = useState<Phase>({ step: "form" });
   const [presetApplied, setPresetApplied] = useState(false);
   const confettiFired = useRef(false);
@@ -77,7 +82,15 @@ export default function ExportSheet() {
     }, Math.max(60, 500 / total));
 
     try {
-      const report = await api.composeDeck(picks, outputPath, safe, includeNotes);
+      // Send the fit mode only when a mixed-aspect tray actually surfaced the
+      // choice; a same-aspect tray leaves it unset (the engine auto-scales).
+      const report = await api.composeDeck(
+        picks,
+        outputPath,
+        safe,
+        includeNotes,
+        hasAspectMismatch ? fitMode : undefined,
+      );
       window.clearInterval(timer);
       // Remember what was actually used (folder only — never the filename).
       writeExportPreset({
@@ -177,6 +190,46 @@ export default function ExportSheet() {
                     Include speaker notes
                   </label>
 
+                  {hasAspectMismatch && (
+                    <fieldset className="mb-4">
+                      <legend className="mb-1.5 text-caption font-medium text-subtle">
+                        Mixed slide sizes
+                      </legend>
+                      <label className="mb-1.5 flex items-start gap-2 text-body text-ink">
+                        <input
+                          type="radio"
+                          name="fit-mode"
+                          checked={fitMode === "ensure_fit"}
+                          onChange={() => setFitMode("ensure_fit")}
+                          className="mt-1 h-3.5 w-3.5 accent-[rgb(var(--accent-rgb))]"
+                        />
+                        <span>
+                          Ensure fit
+                          <span className="text-subtle">
+                            {" "}
+                            — scale to fit, letterbox
+                          </span>
+                        </span>
+                      </label>
+                      <label className="flex items-start gap-2 text-body text-ink">
+                        <input
+                          type="radio"
+                          name="fit-mode"
+                          checked={fitMode === "maximize"}
+                          onChange={() => setFitMode("maximize")}
+                          className="mt-1 h-3.5 w-3.5 accent-[rgb(var(--accent-rgb))]"
+                        />
+                        <span>
+                          Maximize
+                          <span className="text-subtle">
+                            {" "}
+                            — fill the slide, may crop
+                          </span>
+                        </span>
+                      </label>
+                    </fieldset>
+                  )}
+
                   <div className="mb-4 flex items-start gap-2 rounded-[6px] bg-accent/[0.08] p-2.5 text-caption text-subtle">
                     <ShieldCheck size={15} className="mt-0.5 shrink-0 text-accent" />
                     <span>
@@ -253,6 +306,13 @@ export default function ExportSheet() {
                     <div className="mt-2 rounded-[6px] bg-amber-500/10 p-2 text-left text-caption text-amber-600">
                       {phase.report.warnings.map((w, i) => (
                         <div key={i}>{w}</div>
+                      ))}
+                    </div>
+                  )}
+                  {phase.report.notes.length > 0 && (
+                    <div className="mt-2 rounded-[6px] bg-ink/5 p-2 text-left text-caption text-subtle">
+                      {phase.report.notes.map((n, i) => (
+                        <div key={i}>{n}</div>
                       ))}
                     </div>
                   )}
