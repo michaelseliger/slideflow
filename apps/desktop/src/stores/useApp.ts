@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import type {
   DeckRecord,
   RootRecord,
+  SavedSearch,
   ScanEvent,
   ScanIssue,
   SearchFilters,
@@ -23,7 +24,7 @@ export type Grouping = "flat" | "deck";
 export type SortMode = "name" | "added" | "modified" | "exported";
 
 export interface NavTarget {
-  type: "all" | "root" | "deck" | "favorites" | "stats";
+  type: "all" | "root" | "deck" | "favorites" | "stats" | "saved";
   id?: number;
 }
 
@@ -106,6 +107,7 @@ interface AppState {
   // --- library data ---
   roots: RootRecord[];
   decks: DeckRecord[];
+  savedSearches: SavedSearch[];
   stats: Stats;
   ready: boolean;
 
@@ -160,6 +162,11 @@ interface AppState {
   refreshExportCounts: () => Promise<void>;
   setNav: (nav: NavTarget) => Promise<void>;
   refresh: () => Promise<void>;
+
+  // saved searches
+  saveCurrentSearch: (name: string) => Promise<void>;
+  renameSavedSearch: (id: number, name: string) => Promise<void>;
+  deleteSavedSearch: (id: number) => Promise<void>;
 
   // selection
   selectOnly: (index: number) => void;
@@ -218,6 +225,7 @@ let recordTimer: number | undefined;
 export const useApp = create<AppState>((set, get) => ({
   roots: [],
   decks: [],
+  savedSearches: [],
   stats: { deck_count: 0, slide_count: 0 },
   ready: false,
 
@@ -266,13 +274,14 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   reloadLibrary: async () => {
-    const [roots, decks, stats, exportCounts] = await Promise.all([
+    const [roots, decks, stats, exportCounts, savedSearches] = await Promise.all([
       api.listRoots(),
       api.getDecks(),
       api.getStats(),
       api.getExportCounts(),
+      api.listSavedSearches(),
     ]);
-    set({ roots, decks, stats, exportCounts });
+    set({ roots, decks, stats, exportCounts, savedSearches });
     useTray.getState().reconcile(decks);
   },
 
@@ -326,7 +335,14 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setNav: async (nav) => {
-    set({ nav, query: "" });
+    if (nav.type === "saved") {
+      // Restore the saved query + filters into the header so the user sees and
+      // can edit them; fall back to a clean slate if the id has vanished.
+      const saved = get().savedSearches.find((s) => s.id === nav.id);
+      set(saved ? { nav, query: saved.query, filters: saved.filters } : { nav, query: "" });
+    } else {
+      set({ nav, query: "" });
+    }
     await get().refresh();
   },
 
@@ -407,6 +423,52 @@ export const useApp = create<AppState>((set, get) => ({
       window.clearTimeout(slowTimer);
       if (token === searchToken && slow) set({ searching: false });
       if (token === searchToken) set({ searching: false });
+    }
+  },
+
+  // --- saved searches ----------------------------------------------------
+
+  saveCurrentSearch: async (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const { query, filters } = get();
+    try {
+      const saved = await api.saveSearch(trimmed, query, filters);
+      // The backend appends at the end; mirror that ordering locally.
+      set({ savedSearches: [...get().savedSearches, saved] });
+      toast.success("Search saved");
+    } catch (err) {
+      toast.error(`Couldn't save search: ${String(err)}`);
+    }
+  },
+
+  renameSavedSearch: async (id, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      await api.renameSavedSearch(id, trimmed);
+      set({
+        savedSearches: get().savedSearches.map((s) =>
+          s.id === id ? { ...s, name: trimmed } : s,
+        ),
+      });
+    } catch (err) {
+      toast.error(`Couldn't rename search: ${String(err)}`);
+    }
+  },
+
+  deleteSavedSearch: async (id) => {
+    try {
+      await api.deleteSavedSearch(id);
+      const { nav } = get();
+      set({ savedSearches: get().savedSearches.filter((s) => s.id !== id) });
+      // If the deleted search was the active view, fall back to All Slides.
+      if (nav.type === "saved" && nav.id === id) {
+        await get().setNav({ type: "all" });
+      }
+      toast.info("Saved search deleted");
+    } catch (err) {
+      toast.error(`Couldn't delete search: ${String(err)}`);
     }
   },
 

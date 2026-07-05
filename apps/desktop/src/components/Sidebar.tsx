@@ -7,6 +7,7 @@ import {
   Loader2,
   Star,
   BarChart3,
+  Bookmark,
   Info,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
@@ -21,6 +22,7 @@ export default function Sidebar() {
   const collapsed = useApp((s) => s.sidebarCollapsed);
   const roots = useApp((s) => s.roots);
   const decks = useApp((s) => s.decks);
+  const savedSearches = useApp((s) => s.savedSearches);
   const stats = useApp((s) => s.stats);
   const nav = useApp((s) => s.nav);
   const scan = useApp((s) => s.scan);
@@ -30,6 +32,10 @@ export default function Sidebar() {
   const [deckMenu, setDeckMenu] = useState<{ x: number; y: number; deckId: number } | null>(
     null,
   );
+  const [savedMenu, setSavedMenu] = useState<{ x: number; y: number; id: number } | null>(
+    null,
+  );
+  const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
 
   const isActive = (type: string, id?: number) =>
     nav.type === type && nav.id === id;
@@ -87,6 +93,50 @@ export default function Sidebar() {
             }}
           />
         ))}
+
+        {savedSearches.length > 0 && (
+          <>
+            {!collapsed && <SectionLabel>Saved Searches</SectionLabel>}
+            {savedSearches.map((s) =>
+              renaming && renaming.id === s.id && !collapsed ? (
+                <div key={s.id} className="mb-0.5 px-2 py-0.5">
+                  <input
+                    autoFocus
+                    defaultValue={renaming.value}
+                    spellCheck={false}
+                    aria-label="Rename saved search"
+                    className="selectable w-full rounded-[6px] border border-accent bg-canvas px-2 py-1 text-body text-ink outline-none"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        void useApp
+                          .getState()
+                          .renameSavedSearch(s.id, (e.target as HTMLInputElement).value);
+                        setRenaming(null);
+                      } else if (e.key === "Escape") {
+                        setRenaming(null);
+                      }
+                    }}
+                    onBlur={() => setRenaming(null)}
+                  />
+                </div>
+              ) : (
+                <Row
+                  key={s.id}
+                  icon={<Bookmark size={15} />}
+                  label={s.name}
+                  tooltip={s.query || s.name}
+                  active={isActive("saved", s.id)}
+                  collapsed={collapsed}
+                  onClick={() => void setNav({ type: "saved", id: s.id })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setSavedMenu({ x: e.clientX, y: e.clientY, id: s.id });
+                  }}
+                />
+              ),
+            )}
+          </>
+        )}
 
         {decks.length > 0 && (
           <>
@@ -197,6 +247,31 @@ export default function Sidebar() {
               },
             ] as MenuItem[];
           })()}
+        />
+      )}
+
+      {savedMenu && (
+        <ContextMenu
+          x={savedMenu.x}
+          y={savedMenu.y}
+          onClose={() => setSavedMenu(null)}
+          items={
+            [
+              {
+                label: "Rename",
+                onClick: () => {
+                  const s = savedSearches.find((x) => x.id === savedMenu.id);
+                  setRenaming({ id: savedMenu.id, value: s?.name ?? "" });
+                },
+              },
+              {
+                label: "Delete",
+                danger: true,
+                separatorBefore: true,
+                onClick: () => void useApp.getState().deleteSavedSearch(savedMenu.id),
+              },
+            ] as MenuItem[]
+          }
         />
       )}
 

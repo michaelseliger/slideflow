@@ -9,6 +9,7 @@ import type {
   DeckRecord,
   FitMode,
   RootRecord,
+  SavedSearch,
   ScanEvent,
   SearchFilters,
   SearchHit,
@@ -153,6 +154,37 @@ export function getDeckSlides(deckId: number): Promise<SlideRecord[]> {
   return isTauri()
     ? tauriInvoke("get_deck_slides", { deckId })
     : mock.getDeckSlides(deckId);
+}
+
+// ---------------------------------------------------------------------------
+// Saved searches
+// ---------------------------------------------------------------------------
+
+export function listSavedSearches(): Promise<SavedSearch[]> {
+  return isTauri() ? tauriInvoke("list_saved_searches") : mock.listSavedSearches();
+}
+
+/** Persist the current query + filters under `name`; resolves to the stored row. */
+export function saveSearch(
+  name: string,
+  query: string,
+  filters: SearchFilters,
+): Promise<SavedSearch> {
+  return isTauri()
+    ? tauriInvoke("save_search", { name, query, filters })
+    : mock.saveSearch(name, query, filters);
+}
+
+export function renameSavedSearch(id: number, name: string): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("rename_saved_search", { id, name })
+    : mock.renameSavedSearch(id, name);
+}
+
+export function deleteSavedSearch(id: number): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("delete_saved_search", { id })
+    : mock.deleteSavedSearch(id);
 }
 
 // ---------------------------------------------------------------------------

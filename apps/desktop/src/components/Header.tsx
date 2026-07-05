@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Search,
   SlidersHorizontal,
@@ -10,10 +11,14 @@ import {
   Plus,
   Command as CommandIcon,
   Loader2,
+  HelpCircle,
+  Bookmark,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import {cx, basename, stripMarks, deckDisplayName } from "../lib/utils";
 import FilterPopover from "./FilterPopover";
+import SearchHelpPopover from "./SearchHelpPopover";
+import SaveSearchPopover from "./SaveSearchPopover";
 import SortMenu from "./SortMenu";
 
 /** Unified titlebar toolbar (draggable) + the thin count/chips strip beneath.
@@ -32,6 +37,9 @@ export default function Header() {
   const nav = useApp((s) => s.nav);
   const roots = useApp((s) => s.roots);
   const decks = useApp((s) => s.decks);
+  const savedSearches = useApp((s) => s.savedSearches);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
 
   const activeChips = countChips(filters);
 
@@ -56,23 +64,48 @@ export default function Header() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search every slide…"
-            className="selectable h-8 w-full rounded-[7px] border border-hairline/10 bg-surface/80 pl-8 pr-8 text-body text-ink shadow-sm outline-none placeholder:text-subtle/70 focus:border-accent focus:bg-surface"
+            className="selectable h-8 w-full rounded-[7px] border border-hairline/10 bg-surface/80 pl-8 pr-14 text-body text-ink shadow-sm outline-none placeholder:text-subtle/70 focus:border-accent focus:bg-surface"
           />
           {searching ? (
             <Loader2
               size={14}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 animate-spin text-subtle"
+              className="absolute right-8 top-1/2 -translate-y-1/2 animate-spin text-subtle"
             />
           ) : query ? (
             <button
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-subtle hover:bg-ink/10"
+              className="absolute right-8 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-subtle hover:bg-ink/10"
               onClick={() => setQuery("")}
               title="Clear (esc)"
             >
               <X size={13} />
             </button>
           ) : null}
+          <button
+            className={cx(
+              "absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-0.5 transition-colors",
+              helpOpen ? "text-accent" : "text-subtle hover:bg-ink/10 hover:text-ink",
+            )}
+            onClick={() => setHelpOpen((v) => !v)}
+            title="Search syntax"
+            aria-label="Search syntax help"
+          >
+            <HelpCircle size={14} />
+          </button>
+          {helpOpen && <SearchHelpPopover onClose={() => setHelpOpen(false)} />}
         </div>
+
+        {query.trim() && (
+          <div className="no-drag relative flex items-center gap-1">
+            <ToolbarBtn
+              title="Save this search"
+              active={saveOpen}
+              onClick={() => setSaveOpen((v) => !v)}
+            >
+              <Bookmark size={15} />
+            </ToolbarBtn>
+            {saveOpen && <SaveSearchPopover onClose={() => setSaveOpen(false)} />}
+          </div>
+        )}
 
         <div className="no-drag relative flex items-center gap-1">
           <ToolbarBtn
@@ -117,7 +150,7 @@ export default function Header() {
         <span className="tabnum shrink-0">
           {query.trim()
             ? `${results.length} result${results.length === 1 ? "" : "s"}`
-            : navLabel(nav, roots, decks, results.length)}
+            : navLabel(nav, roots, decks, savedSearches, results.length)}
         </span>
 
         {/* Active filter chips */}
@@ -224,12 +257,17 @@ function navLabel(
   nav: ReturnType<typeof useApp.getState>["nav"],
   roots: ReturnType<typeof useApp.getState>["roots"],
   decks: ReturnType<typeof useApp.getState>["decks"],
+  savedSearches: ReturnType<typeof useApp.getState>["savedSearches"],
   count: number,
 ) {
   const suffix = ` · ${count} slide${count === 1 ? "" : "s"}`;
   if (nav.type === "all") return "All Slides" + suffix;
   if (nav.type === "favorites") return "Favorites" + suffix;
   if (nav.type === "stats") return "Statistics";
+  if (nav.type === "saved") {
+    const s = savedSearches.find((x) => x.id === nav.id);
+    return (s ? s.name : "Saved Search") + suffix;
+  }
   if (nav.type === "root") {
     const r = roots.find((x) => x.id === nav.id);
     return (r ? basename(r.path) : "Folder") + suffix;

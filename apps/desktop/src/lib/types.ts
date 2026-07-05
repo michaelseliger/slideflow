@@ -70,6 +70,18 @@ export interface SearchFilters {
   sort?: string | null;
 }
 
+/** A user-saved search: a named query plus the filters active when saved.
+ *  Mirrors `SavedSearch`. */
+export interface SavedSearch {
+  id: number;
+  name: string;
+  /** The advanced-syntax query string (may be empty for a filters-only search). */
+  query: string;
+  filters: SearchFilters;
+  /** When it was saved (unix seconds). */
+  created_unix: number;
+}
+
 /** A watched root folder. Mirrors `RootRecord`. */
 export interface RootRecord {
   id: number;

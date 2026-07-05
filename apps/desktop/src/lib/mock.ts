@@ -8,6 +8,8 @@ import type {
   ExportRecord,
   FitMode,
   RootRecord,
+  SavedSearch,
+  SearchFilters,
   SearchHistoryEntry,
   SearchHit,
   SlidePick,
@@ -464,6 +466,36 @@ export const mock = {
 
   getExportCounts: async (): Promise<Record<string, number>> => ({ ...mockExportCounts }),
 
+  // --- saved searches ------------------------------------------------------
+
+  listSavedSearches: async (): Promise<SavedSearch[]> => structuredClone(mockSavedSearches),
+
+  saveSearch: async (
+    name: string,
+    query: string,
+    filters: SearchFilters,
+  ): Promise<SavedSearch> => {
+    const rec: SavedSearch = {
+      id: mockSavedId++,
+      name,
+      query,
+      filters: structuredClone(filters),
+      created_unix: Math.floor(Date.now() / 1000),
+    };
+    mockSavedSearches.push(rec);
+    return structuredClone(rec);
+  },
+
+  renameSavedSearch: async (id: number, name: string): Promise<void> => {
+    const s = mockSavedSearches.find((x) => x.id === id);
+    if (s) s.name = name;
+  },
+
+  deleteSavedSearch: async (id: number): Promise<void> => {
+    const i = mockSavedSearches.findIndex((x) => x.id === id);
+    if (i >= 0) mockSavedSearches.splice(i, 1);
+  },
+
   setAutoUpdateEnabled: async (enabled: boolean): Promise<void> => {
     mockAutoUpdate = enabled;
   },
@@ -477,6 +509,11 @@ let mockAutoUpdate = true;
 
 const mockSearches: SearchHistoryEntry[] = [];
 const mockExports: ExportRecord[] = [];
+
+// Saved searches survive clearIndex() (like favorites), mirroring the native
+// clear() which whitelists the tables it wipes and leaves saved_searches alone.
+let mockSavedId = 1;
+const mockSavedSearches: SavedSearch[] = [];
 
 // Seed plausible export counts so "Most exported" differentiates before any
 // compose in browser mode (the real backend starts empty for existing users).
