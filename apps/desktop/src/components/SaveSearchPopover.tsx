@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../stores/useApp";
 
-/** Names and persists the current query + active filters as a saved search.
- *  Styled to match {@link FilterPopover}. */
+/** Names and persists the current query + active filters as a saved search. */
 export default function SaveSearchPopover({ onClose }: { onClose: () => void }) {
   const query = useApp((s) => s.query);
   const saveCurrentSearch = useApp((s) => s.saveCurrentSearch);

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import {
   Search,
-  SlidersHorizontal,
   X,
   PanelRight,
   PanelLeft,
@@ -18,7 +17,6 @@ import {
 import { useApp } from "../stores/useApp";
 import { useSemantic } from "../stores/useSemantic";
 import {cx, basename, stripMarks, deckDisplayName } from "../lib/utils";
-import FilterPopover from "./FilterPopover";
 import SearchHelpPopover from "./SearchHelpPopover";
 import SaveSearchPopover from "./SaveSearchPopover";
 import SortMenu from "./SortMenu";
@@ -31,8 +29,6 @@ export default function Header() {
   const setQuery = useApp((s) => s.setQuery);
   const searching = useApp((s) => s.searching);
   const filters = useApp((s) => s.filters);
-  const filterOpen = useApp((s) => s.filterPopoverOpen);
-  const setFilterOpen = useApp((s) => s.setFilterPopoverOpen);
   const results = useApp((s) => s.results);
   const grouping = useApp((s) => s.grouping);
   const setGrouping = useApp((s) => s.setGrouping);
@@ -46,8 +42,6 @@ export default function Header() {
   const searchMode = useApp((s) => s.searchMode);
   const setSearchMode = useApp((s) => s.setSearchMode);
   const semanticReady = useSemantic((s) => s.status?.state === "ready");
-
-  const activeChips = countChips(filters);
 
   return (
     <header className="material hairline-b relative z-30 shrink-0">
@@ -142,22 +136,6 @@ export default function Header() {
             </ModeBtn>
           </div>
         )}
-
-        <div className="no-drag relative flex items-center gap-1">
-          <ToolbarBtn
-            title="Filters"
-            active={filterOpen || activeChips > 0}
-            onClick={() => setFilterOpen(!filterOpen)}
-          >
-            <SlidersHorizontal size={15} />
-            {activeChips > 0 && (
-              <span className="tabnum ml-1 rounded-full bg-accent px-1 text-[10px] font-semibold text-white">
-                {activeChips}
-              </span>
-            )}
-          </ToolbarBtn>
-          {filterOpen && <FilterPopover onClose={() => setFilterOpen(false)} />}
-        </div>
 
         <div className="no-drag flex items-center gap-1">
           <ToolbarBtn
@@ -280,14 +258,6 @@ function fmt(unix: number) {
     month: "short",
     day: "numeric",
   });
-}
-function countChips(f: ReturnType<typeof useApp.getState>["filters"]) {
-  let n = 0;
-  if (f.deck_query) n += 1;
-  if (f.path_prefix) n += 1;
-  if (f.modified_from) n += 1;
-  if (f.modified_to) n += 1;
-  return n;
 }
 function navLabel(
   nav: ReturnType<typeof useApp.getState>["nav"],

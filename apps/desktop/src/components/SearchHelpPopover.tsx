@@ -1,8 +1,7 @@
 import { useEffect, useRef } from "react";
 
 /** Compact reference for the search box's advanced syntax. Purely informational
- *  — the engine owns all parsing; this popover never touches the query. Styled
- *  to match {@link FilterPopover}. */
+ *  — the engine owns all parsing; this popover never touches the query. */
 export default function SearchHelpPopover({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
 

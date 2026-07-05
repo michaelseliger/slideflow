@@ -153,7 +153,6 @@ interface AppState {
   sidebarCollapsed: boolean;
   inspectorVisible: boolean;
   commandOpen: boolean;
-  filterPopoverOpen: boolean;
   exportOpen: boolean;
   aboutOpen: boolean;
   settingsOpen: boolean;
@@ -175,7 +174,6 @@ interface AppState {
 
   setQuery: (q: string) => void;
   setFilters: (patch: Partial<SearchFilters>) => void;
-  clearFilters: () => void;
   setGrouping: (g: Grouping) => void;
   setSortMode: (m: SortMode) => void;
   setSearchMode: (m: SearchMode) => void;
@@ -207,7 +205,6 @@ interface AppState {
   toggleInspector: () => void;
   setInspector: (v: boolean) => void;
   setCommandOpen: (v: boolean) => void;
-  setFilterPopoverOpen: (v: boolean) => void;
   setExportOpen: (v: boolean) => void;
   setAboutOpen: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
@@ -275,7 +272,6 @@ export const useApp = create<AppState>((set, get) => ({
   sidebarCollapsed: false,
   inspectorVisible: false,
   commandOpen: false,
-  filterPopoverOpen: false,
   exportOpen: false,
   aboutOpen: false,
   settingsOpen: false,
@@ -329,11 +325,6 @@ export const useApp = create<AppState>((set, get) => ({
 
   setFilters: (patch) => {
     set({ filters: { ...get().filters, ...patch } });
-    void get().refresh();
-  },
-
-  clearFilters: () => {
-    set({ filters: {} });
     void get().refresh();
   },
 
@@ -594,7 +585,6 @@ export const useApp = create<AppState>((set, get) => ({
   toggleInspector: () => set((s) => ({ inspectorVisible: !s.inspectorVisible })),
   setInspector: (v) => set({ inspectorVisible: v }),
   setCommandOpen: (v) => set({ commandOpen: v }),
-  setFilterPopoverOpen: (v) => set({ filterPopoverOpen: v }),
   setExportOpen: (v) => set({ exportOpen: v }),
   setAboutOpen: (v) => set({ aboutOpen: v }),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
