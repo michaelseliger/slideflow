@@ -13,7 +13,7 @@ const RELEASE_URL = "https://github.com/michaelseliger/slideflow/releases/tag/v"
 /** Inline update status under the version line. States mirror `useUpdater`;
  *  release notes deliberately link to the GitHub release page (the notes baked
  *  into latest.json are frozen at CI time, before the draft body is written). */
-function UpdateStatus() {
+export function UpdateStatus() {
   const phase = useUpdater((s) => s.phase);
   const version = useUpdater((s) => s.version);
   const progress = useUpdater((s) => s.progress);

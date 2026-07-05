@@ -10,6 +10,7 @@ import {
   PanelRight,
   PanelLeft,
   Info,
+  Settings,
   Trash2,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
@@ -94,6 +95,13 @@ export default function CommandPalette() {
         hint: "⌘I",
         icon: <PanelRight size={15} />,
         run: () => app.toggleInspector(),
+      },
+      {
+        id: "settings",
+        label: "Settings…",
+        hint: "⌘,",
+        icon: <Settings size={15} />,
+        run: () => app.setSettingsOpen(true),
       },
       {
         id: "about",

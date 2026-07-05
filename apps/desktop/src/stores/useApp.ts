@@ -95,6 +95,7 @@ interface AppState {
   filterPopoverOpen: boolean;
   exportOpen: boolean;
   aboutOpen: boolean;
+  settingsOpen: boolean;
   gridCols: number;
 
   // --- theme ---
@@ -140,6 +141,7 @@ interface AppState {
   setFilterPopoverOpen: (v: boolean) => void;
   setExportOpen: (v: boolean) => void;
   setAboutOpen: (v: boolean) => void;
+  setSettingsOpen: (v: boolean) => void;
   incCols: () => void;
   decCols: () => void;
 
@@ -195,6 +197,7 @@ export const useApp = create<AppState>((set, get) => ({
   filterPopoverOpen: false,
   exportOpen: false,
   aboutOpen: false,
+  settingsOpen: false,
   gridCols: (() => {
     const n = Number(localStorage.getItem(COLS_KEY));
     return Number.isFinite(n) && n >= 3 && n <= 10 ? n : 5;
@@ -408,6 +411,7 @@ export const useApp = create<AppState>((set, get) => ({
   setFilterPopoverOpen: (v) => set({ filterPopoverOpen: v }),
   setExportOpen: (v) => set({ exportOpen: v }),
   setAboutOpen: (v) => set({ aboutOpen: v }),
+  setSettingsOpen: (v) => set({ settingsOpen: v }),
 
   incCols: () => {
     const n = Math.min(10, get().gridCols + 1);

@@ -17,6 +17,7 @@ import StatsView from "./components/StatsView";
 import CommandPalette from "./components/CommandPalette";
 import ExportSheet from "./components/ExportSheet";
 import AboutSheet from "./components/AboutSheet";
+import SettingsSheet from "./components/SettingsSheet";
 import ConfirmDialog from "./components/ConfirmDialog";
 import Toaster from "./components/Toaster";
 
@@ -116,6 +117,10 @@ export default function App() {
           case "i":
             e.preventDefault();
             app.toggleInspector();
+            return;
+          case ",":
+            e.preventDefault();
+            app.setSettingsOpen(true);
             return;
           case "t":
             e.preventDefault();
@@ -251,6 +256,7 @@ export default function App() {
       <CommandPalette />
       <ExportSheet />
       <AboutSheet />
+      <SettingsSheet />
       <ConfirmDialog />
       <Toaster />
     </div>

@@ -300,6 +300,13 @@ export function restartToUpdate(): Promise<void> {
   return mockRestartToUpdate();
 }
 
+/** Enable/disable automatic (boot + daily) update checks. Manual checks are unaffected. */
+export function setAutoUpdateEnabled(enabled: boolean): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("set_auto_update_enabled", { enabled })
+    : mock.setAutoUpdateEnabled(enabled);
+}
+
 // Browser-mode fake update flow, opt-in so `pnpm dev` isn't nagged:
 //   localStorage.setItem("slideflow:mockUpdate", "1")
 const mockUpdateListeners = new Set<(ev: UpdateEvent) => void>();

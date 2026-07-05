@@ -73,7 +73,12 @@ pub fn run() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_secs(5));
-                    tauri::async_runtime::block_on(updates::run_update_flow(handle.clone()));
+                    // Gate each cycle on the user's preference so disabling
+                    // auto-updates skips the silent check while the daily loop
+                    // keeps ticking (honored on the next cycle).
+                    if updates::auto_update_enabled(&handle) {
+                        tauri::async_runtime::block_on(updates::run_update_flow(handle.clone()));
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(60 * 60 * 24 - 5));
                 });
             }
@@ -102,6 +107,7 @@ pub fn run() {
             updates::updates_supported,
             updates::check_for_updates,
             updates::restart_to_update,
+            updates::set_auto_update_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Slideflow")

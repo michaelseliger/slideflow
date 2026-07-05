@@ -418,6 +418,8 @@ export const mock = {
     last_scan_issues: [],
     render_drops: [],
   }),
+
+  setAutoUpdateEnabled: async (_enabled: boolean): Promise<void> => {},
 };
 
 const mockSearches: SearchHistoryEntry[] = [];

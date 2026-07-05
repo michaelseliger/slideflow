@@ -11,6 +11,7 @@
 //! `tauri.conf.json`; the endpoint is the `latest.json` asset of the latest
 //! *published* GitHub release.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -77,6 +78,42 @@ pub fn updates_supported() -> bool {
 #[tauri::command]
 pub fn check_for_updates(app: AppHandle) {
     tauri::async_runtime::spawn(run_update_flow(app));
+}
+
+fn auto_update_pref_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("auto-update"))
+}
+
+/// Interpret the persisted preference. "0" (trimmed) = disabled; a missing file
+/// or any other contents = enabled — v0.3.0 shipped auto-update always-on, so
+/// existing installs (no file) stay enabled.
+fn pref_enabled_from_str(contents: Option<&str>) -> bool {
+    match contents {
+        Some(s) => s.trim() != "0",
+        None => true,
+    }
+}
+
+/// Whether automatic (boot + daily) update checks should run. Read by the
+/// scheduler in lib.rs each cycle.
+pub fn auto_update_enabled(app: &AppHandle) -> bool {
+    pref_enabled_from_str(
+        auto_update_pref_path(app)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .as_deref(),
+    )
+}
+
+/// Persist whether automatic update checks run. Manual "Check for Updates…" is
+/// unaffected. Takes effect on the next scheduler cycle (does not cancel an
+/// in-flight download).
+#[tauri::command]
+pub fn set_auto_update_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let path = auto_update_pref_path(&app).ok_or_else(|| "resolve app config dir".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, if enabled { "1" } else { "0" }).map_err(|e| e.to_string())
 }
 
 /// Install the downloaded update and relaunch as the new version.
@@ -192,5 +229,36 @@ pub fn install_pending_on_exit(app: &AppHandle) {
     let pending = state.update.lock().ok().and_then(|mut guard| guard.take());
     if let Some((update, bytes)) = pending {
         let _ = update.install(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pref_enabled_from_str;
+
+    #[test]
+    fn missing_file_defaults_enabled() {
+        // No preference file — existing installs stay on auto-update.
+        assert!(pref_enabled_from_str(None));
+    }
+
+    #[test]
+    fn zero_disables() {
+        assert!(!pref_enabled_from_str(Some("0")));
+    }
+
+    #[test]
+    fn one_enables() {
+        assert!(pref_enabled_from_str(Some("1")));
+    }
+
+    #[test]
+    fn trims_whitespace_around_zero() {
+        assert!(!pref_enabled_from_str(Some(" 0\n")));
+    }
+
+    #[test]
+    fn empty_defaults_enabled() {
+        assert!(pref_enabled_from_str(Some("")));
     }
 }
