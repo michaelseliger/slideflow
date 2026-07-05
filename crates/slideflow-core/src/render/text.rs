@@ -87,6 +87,15 @@ impl Ctx<'_> {
         for line in &tl.lines {
             cursor += line.space_before;
             if !line.spans.is_empty() {
+                // Record the typefaces actually rendered, so the SVG assembler
+                // knows which embedded fonts to emit as @font-face.
+                for s in &line.spans {
+                    if let Some(tf) = s.typeface.as_deref() {
+                        if !tf.is_empty() {
+                            self.used_fonts.insert(tf.to_string());
+                        }
+                    }
+                }
                 let max_size = line.spans.iter().map(|s| s.size_pt).fold(0.0_f64, f64::max);
                 self.emit_line_highlight(line, rect, tl.r_ins, cursor, max_size);
                 let baseline = cursor + max_size * 0.8;

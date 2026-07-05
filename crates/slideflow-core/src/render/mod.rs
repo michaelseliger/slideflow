@@ -38,11 +38,14 @@
 //! - Escape all text. The SVG is injected into the app's webview via
 //!   `<img src=data:>` — it must not contain scripts or external references.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use roxmltree::{Document, Node};
 
 use crate::error::{Error, Result};
+use crate::pptx::embedded_fonts::{embedded_font_set, font_media_type};
 use crate::pptx::PresentationFile;
 
 mod color;
@@ -66,7 +69,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 4;
+pub const RENDER_VERSION: u32 = 5;
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
@@ -239,6 +242,8 @@ pub fn render_slide(
         grad_cache: HashMap::new(),
         shadow_cache: HashMap::new(),
         dropped: Vec::new(),
+        used_fonts: BTreeSet::new(),
+        font_notes: Vec::new(),
     };
 
     // Background: the first of slide → layout → master that declares a `<p:bg>`
@@ -309,14 +314,24 @@ pub fn render_slide(
         }
     }
 
+    // Embed any used, embeddable fonts as `@font-face` in <defs>. Runs after all
+    // text is emitted, since it depends on the set of families the slide used.
+    let font_defs = ctx.font_face_defs();
+
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"><defs>{defs}</defs>{body}</svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"><defs>{font_defs}{defs}</defs>{body}</svg>"#,
         w = fnum(w_pt),
         h = fnum(h_pt),
         defs = ctx.defs,
         body = ctx.body
     );
-    Ok(RenderOutcome { svg, dropped: dedup_sorted(ctx.dropped) })
+
+    // Fold embedded-font skip notes into the dropped-construct telemetry.
+    let mut dropped = dedup_sorted(ctx.dropped);
+    dropped.extend(ctx.font_notes);
+    dropped.sort_unstable();
+    dropped.dedup();
+    Ok(RenderOutcome { svg, dropped })
 }
 
 /// Deduplicate and sort per-slide drop kinds into owned strings.
@@ -324,6 +339,13 @@ fn dedup_sorted(mut v: Vec<&'static str>) -> Vec<String> {
     v.sort_unstable();
     v.dedup();
     v.into_iter().map(String::from).collect()
+}
+
+/// Escape a font-family name for use inside a CSS double-quoted string (the
+/// `@font-face` `font-family`). Real font names contain no XML/CSS specials, so
+/// this only guards the backslash and quote that would corrupt the string.
+fn css_font_family(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// A neutral gray placeholder SVG used by the UI while a thumbnail hydrates.
@@ -390,6 +412,13 @@ struct Ctx<'a> {
     /// (may contain duplicates; deduped + sorted at the tail into
     /// [`RenderOutcome::dropped`]).
     dropped: Vec<&'static str>,
+    /// Font families actually emitted by text runs on this slide. Drives which
+    /// embedded fonts get an `@font-face` block — only families the slide uses
+    /// are embedded, to keep preview SVGs small.
+    used_fonts: BTreeSet<String>,
+    /// Dynamic dropped-construct notes for embedded fonts that were skipped
+    /// (unsupported format / too large); merged into [`RenderOutcome::dropped`].
+    font_notes: Vec<String>,
 }
 
 impl Ctx<'_> {
@@ -398,6 +427,56 @@ impl Ctx<'_> {
     /// call private `Ctx` methods.
     fn record_drop(&mut self, kind: &'static str) {
         self.dropped.push(kind);
+    }
+
+    /// Build a `<style>` block of `@font-face` rules for the deck's embedded
+    /// fonts whose family this slide actually used, and record a dropped note
+    /// for any *used* family whose embedded font had to be skipped. Returns an
+    /// empty string when nothing is embedded (the overwhelmingly common case) or
+    /// when no used family is embedded — so SVGs never carry unused fonts.
+    fn font_face_defs(&mut self) -> String {
+        if self.used_fonts.is_empty() {
+            return String::new();
+        }
+        let set = embedded_font_set(self.pf);
+        if set.fonts.is_empty() && set.skipped.is_empty() {
+            return String::new();
+        }
+
+        let mut css = String::new();
+        let mut seen: HashMap<(String, bool, bool), ()> = HashMap::new();
+        for f in &set.fonts {
+            if !self.used_fonts.iter().any(|u| u.eq_ignore_ascii_case(&f.family)) {
+                continue;
+            }
+            // Each (family, weight, style) variant at most once.
+            if seen.insert((f.family.to_ascii_lowercase(), f.bold, f.italic), ()).is_some() {
+                continue;
+            }
+            let (mime, format) = font_media_type(&f.bytes);
+            css.push_str(&format!(
+                r#"@font-face{{font-family:"{family}";font-weight:{weight};font-style:{style};src:url(data:{mime};base64,{data}) format("{format}");}}"#,
+                family = css_font_family(&f.family),
+                weight = if f.bold { "bold" } else { "normal" },
+                style = if f.italic { "italic" } else { "normal" },
+                data = B64.encode(&f.bytes),
+            ));
+        }
+
+        // Surface skip notes only for families this slide referenced.
+        for s in &set.skipped {
+            if self.used_fonts.iter().any(|u| u.eq_ignore_ascii_case(&s.family))
+                && !self.font_notes.contains(&s.note)
+            {
+                self.font_notes.push(s.note.clone());
+            }
+        }
+
+        if css.is_empty() {
+            String::new()
+        } else {
+            format!("<style>{css}</style>")
+        }
     }
 
     fn render_shape(&mut self, node: Node, tf: Transform) {
@@ -735,7 +814,7 @@ mod tests {
     use super::text::wrap;
     use super::{render_slide, render_slide_svg, svg_placeholder, RenderOptions, RenderOutcome};
     use crate::error::Error;
-    use crate::fixtures::{DeckSpec, SlideSpec};
+    use crate::fixtures::{sample_ttf, DeckSpec, SlideSpec};
     use crate::opc::Package;
     use crate::pptx::PresentationFile;
 
@@ -1986,5 +2065,54 @@ mod tests {
         assert_eq!(svg.matches("<rect").count(), 1, "only the background rect: {svg}");
         assert!(!svg.contains("<line"), "no table gridlines: {svg}");
         assert!(!svg.contains("<text"), "no cell text: {svg}");
+    }
+
+    #[test]
+    fn used_embedded_font_emits_one_font_face() {
+        // Theme font = embedded family, so the title/body runs use it.
+        let deck = DeckSpec::new("Deck")
+            .font("Grafton")
+            .embed_font("Grafton", vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("Hello").bullets(&["A point"]));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+
+        assert_eq!(svg.matches("@font-face").count(), 1, "exactly one @font-face: {svg}");
+        assert!(svg.contains(r#"font-family:"Grafton""#), "font-face names the family: {svg}");
+        assert!(svg.contains("src:url(data:font/ttf;base64,"), "base64 payload embedded: {svg}");
+        assert!(svg.contains("<style>@font-face"), "@font-face lives in a <style> in <defs>: {svg}");
+        assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn embedded_font_not_used_is_not_embedded() {
+        // The deck embeds "Ghostly" but nothing on the slide references it
+        // (theme font stays the default), so no @font-face may be emitted.
+        let deck = DeckSpec::new("Deck")
+            .embed_font("Ghostly", vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("Hello"));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+
+        assert!(!svg.contains("@font-face"), "unused embedded font must not bloat the SVG: {svg}");
+    }
+
+    #[test]
+    fn oversized_embedded_font_is_skipped_and_noted() {
+        let mut big = sample_ttf();
+        big.resize(5 * 1024 * 1024 + 16, 0); // valid magic, over the 5 MB cap
+        let deck = DeckSpec::new("Deck")
+            .font("Bulky")
+            .embed_font("Bulky", vec![(false, false, big)])
+            .slide(SlideSpec::new("Hello"));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let outcome = render_slide(&pf, 1, &RenderOptions::default()).unwrap();
+
+        assert!(!outcome.svg.contains("@font-face"), "oversized font not embedded: {}", outcome.svg);
+        assert!(
+            outcome.dropped.iter().any(|d| d.contains("Bulky") && d.contains("too large")),
+            "dropped telemetry notes the skip: {:?}",
+            outcome.dropped
+        );
     }
 }
