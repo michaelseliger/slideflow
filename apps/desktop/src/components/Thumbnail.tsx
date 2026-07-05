@@ -22,7 +22,7 @@ export default function Thumbnail({
   enabled = true,
   rounded = true,
 }: ThumbnailProps) {
-  const uri = useSlidePreview(slideId, "thumb", enabled);
+  const { src: uri } = useSlidePreview(slideId, "thumb", enabled);
   return (
     <div
       className={cx(

@@ -33,6 +33,9 @@ impl Ctx<'_> {
             .map(|u| u.ends_with("/table"))
             .unwrap_or(false)
         {
+            // Non-table graphicFrame (chart/SmartArt/OLE/…): skip drawing, but
+            // record what construct kind we dropped for the telemetry badge.
+            self.record_drop(classify_graphic(a(gdata, "uri").unwrap_or("")));
             return;
         }
         let Some(tbl) = ch(gdata, "tbl") else { return };
@@ -215,6 +218,19 @@ impl Ctx<'_> {
             .map(|w| w / EMU_PER_PT)
             .unwrap_or(1.0);
         Some(Stroke::solid(color, width_pt))
+    }
+}
+
+/// Classify a non-table `graphicData` uri into a telemetry drop kind.
+fn classify_graphic(uri: &str) -> &'static str {
+    if uri.contains("/chart") {
+        "chart"
+    } else if uri.contains("/diagram") {
+        "smartart"
+    } else if uri.contains("/ole") || uri.contains("oleObject") {
+        "ole"
+    } else {
+        "unknown-shape"
     }
 }
 

@@ -159,6 +159,12 @@ export interface RenderDropStat {
   slides: number;
 }
 
+/** Mirrors the desktop `SlidePreview` command struct. */
+export interface SlidePreview {
+  path: string;
+  dropped: string[];
+}
+
 /** Full stats-view payload. Mirrors `StatsOverview`. */
 export interface StatsOverview {
   deck_count: number;

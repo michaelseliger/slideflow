@@ -92,6 +92,17 @@ impl Default for RenderOptions {
     }
 }
 
+/// The result of rendering one slide: the SVG string plus the set of
+/// unsupported construct kinds the renderer silently skipped (deduplicated and
+/// sorted per slide — a slide with two charts yields `["chart"]`, not
+/// `["chart", "chart"]`). Kinds are one of chart/smartart/ole/unsupported-image/
+/// unknown-shape. Feeds the "Approximate preview" badge and Stats telemetry.
+#[derive(Debug, Clone)]
+pub struct RenderOutcome {
+    pub svg: String,
+    pub dropped: Vec<String>,
+}
+
 impl RenderOptions {
     /// Small grid thumbnail: images downscaled hard.
     pub fn thumb() -> Self {
@@ -107,11 +118,23 @@ impl RenderOptions {
 }
 
 /// Render one slide (1-based index) of an opened presentation to an SVG string.
+/// Thin wrapper over [`render_slide`] for the ~75 existing tests / examples /
+/// e2e that only need the SVG and don't care about drop telemetry.
 pub fn render_slide_svg(
     pf: &PresentationFile,
     slide_index: usize,
     options: &RenderOptions,
 ) -> Result<String> {
+    render_slide(pf, slide_index, options).map(|o| o.svg)
+}
+
+/// Render one slide (1-based index), returning the SVG string plus the set of
+/// unsupported construct kinds skipped along the way (see [`RenderOutcome`]).
+pub fn render_slide(
+    pf: &PresentationFile,
+    slide_index: usize,
+    options: &RenderOptions,
+) -> Result<RenderOutcome> {
     let slide_part = pf.slide_part(slide_index)?.to_string();
     let slide_bytes = pf.package.require_part(&slide_part)?;
     let slide_xml = std::str::from_utf8(slide_bytes)
@@ -215,6 +238,7 @@ pub fn render_slide_svg(
         grad_id: 0,
         grad_cache: HashMap::new(),
         shadow_cache: HashMap::new(),
+        dropped: Vec::new(),
     };
 
     // Background: the first of slide → layout → master that declares a `<p:bg>`
@@ -285,13 +309,21 @@ pub fn render_slide_svg(
         }
     }
 
-    Ok(format!(
+    let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"><defs>{defs}</defs>{body}</svg>"#,
         w = fnum(w_pt),
         h = fnum(h_pt),
         defs = ctx.defs,
         body = ctx.body
-    ))
+    );
+    Ok(RenderOutcome { svg, dropped: dedup_sorted(ctx.dropped) })
+}
+
+/// Deduplicate and sort per-slide drop kinds into owned strings.
+fn dedup_sorted(mut v: Vec<&'static str>) -> Vec<String> {
+    v.sort_unstable();
+    v.dedup();
+    v.into_iter().map(String::from).collect()
 }
 
 /// A neutral gray placeholder SVG used by the UI while a thumbnail hydrates.
@@ -354,9 +386,20 @@ struct Ctx<'a> {
     /// Serialized-shadow → filter-id (`sh0`, `sh1`, …), so identical outer
     /// shadows emit one `<filter>` def.
     shadow_cache: HashMap<String, String>,
+    /// Unsupported construct kinds silently skipped while rendering this slide
+    /// (may contain duplicates; deduped + sorted at the tail into
+    /// [`RenderOutcome::dropped`]).
+    dropped: Vec<&'static str>,
 }
 
 impl Ctx<'_> {
+    /// Record that an unsupported construct of `kind` was skipped on this slide.
+    /// Private is fine — table.rs/image.rs are descendant modules and already
+    /// call private `Ctx` methods.
+    fn record_drop(&mut self, kind: &'static str) {
+        self.dropped.push(kind);
+    }
+
     fn render_shape(&mut self, node: Node, tf: Transform) {
         match node.tag_name().name() {
             "sp" => self.render_sp(node, tf),
@@ -366,7 +409,10 @@ impl Ctx<'_> {
             "cxnSp" => self.render_sp(node, tf),
             // graphicFrame: tables render; charts/SmartArt/OLE skip gracefully.
             "graphicFrame" => self.render_graphic_frame(node, tf),
-            _ => {} // unknowns: skip gracefully.
+            // Structural (non-shape) spTree children reach here in the slide and
+            // the master/layout static passes; they are not dropped content.
+            "nvGrpSpPr" | "grpSpPr" | "extLst" => {}
+            _ => self.record_drop("unknown-shape"), // unknowns: skip gracefully.
         }
     }
 
@@ -658,7 +704,7 @@ fn esc(s: &str) -> String {
 mod tests {
     use super::image::downscale_raster;
     use super::text::wrap;
-    use super::{render_slide_svg, svg_placeholder, RenderOptions};
+    use super::{render_slide, render_slide_svg, svg_placeholder, RenderOptions, RenderOutcome};
     use crate::error::Error;
     use crate::fixtures::{DeckSpec, SlideSpec};
     use crate::opc::Package;
@@ -754,6 +800,31 @@ mod tests {
         assert!(svg.contains("• "), "expected bullet prefix");
         assert!(!svg.contains("<script"));
         assert_no_external_refs(&svg);
+    }
+
+    #[test]
+    fn graphic_frame_chart_is_counted_as_dropped() {
+        let shapes = concat!(
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="5" name="Chart"/>"#,
+            r#"<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>"#,
+            r#"<p:xfrm><a:off x="838200" y="365125"/><a:ext cx="4000000" cy="3000000"/></p:xfrm>"#,
+            r#"<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">"#,
+            r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" "#,
+            r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId2"/>"#,
+            r#"</a:graphicData></a:graphic></p:graphicFrame>"#,
+        );
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let outcome = render_slide(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(outcome.dropped, vec!["chart".to_string()]);
+    }
+
+    #[test]
+    fn plain_slide_has_no_drops() {
+        let deck = DeckSpec::new("Deck")
+            .slide(SlideSpec::new("Hello Title").bullets(&["First point", "Second point"]));
+        let pf = PresentationFile::from_bytes(&deck.build()).unwrap();
+        let outcome: RenderOutcome = render_slide(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(outcome.dropped.is_empty(), "unexpected drops: {:?}", outcome.dropped);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import { toast } from "../stores/useToast";
 import { useSlidePreview } from "../lib/useSlideSvg";
 import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import * as api from "../lib/api";
+import ApproxBadge from "./ApproxBadge";
 
 /** Finder-style Quick Look: a large centered preview with arrow-key navigation
  *  (wired globally in App) and speaker notes. Space/Esc dismiss. */
@@ -14,7 +15,7 @@ export default function PeekModal() {
   const results = useApp((s) => s.results);
   const reduce = prefersReducedMotion();
   const hit = peekIndex != null ? results[peekIndex] : null;
-  const previewSrc = useSlidePreview(hit?.slide.id ?? null, "full");
+  const { src: previewSrc, dropped } = useSlidePreview(hit?.slide.id ?? null, "full");
   const inTray = useTray((s) =>
     hit ? s.items.some((i) => i.uid === `${hit.slide.deck_id}:${hit.slide.slide_index}`) : false,
   );
@@ -62,6 +63,11 @@ export default function PeekModal() {
                   {deckDisplayName(hit.deck)} · Slide {hit.slide.slide_index} of{" "}
                   {hit.deck.slide_count}
                 </div>
+                {dropped.length > 0 && (
+                  <div className="mt-1">
+                    <ApproxBadge dropped={dropped} variant="peek" />
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <button

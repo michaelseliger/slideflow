@@ -300,6 +300,16 @@ export const mock = {
     svgById.get(slideId) ??
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="540" fill="#eee"/></svg>`,
 
+  // Deterministic sample drops so the "Approximate" badge is visible in `pnpm dev`.
+  getSlideDropped: (slideId: number): string[] =>
+    slideId === 3
+      ? ["chart"]
+      : slideId === 15
+        ? ["smartart"]
+        : slideId === 22
+          ? ["ole", "unsupported-image"]
+          : [],
+
   search: async (
     query: string,
     filters: {
@@ -438,7 +448,10 @@ export const mock = {
       [...mockDecks].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, 5),
     ),
     last_scan_issues: [MOCK_SCAN_ISSUE],
-    render_drops: [],
+    render_drops: [
+      { kind: "chart", slides: 2 },
+      { kind: "smartart", slides: 1 },
+    ],
   }),
 
   setAutoUpdateEnabled: async (_enabled: boolean): Promise<void> => {},

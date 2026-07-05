@@ -29,7 +29,7 @@
 //! - All methods are synchronous; the desktop layer wraps them in blocking
 //!   tasks. `Library` is `Send` (no `!Send` fields) so it can live in a Mutex.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -44,8 +44,8 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    DeckRecord, ExportRecord, RootRecord, ScanEvent, ScanIssue, ScanRecord, SearchFilters,
-    SearchHit, SearchHistoryEntry, SlideRecord, StatsOverview,
+    DeckRecord, ExportRecord, RenderDropStat, RootRecord, ScanEvent, ScanIssue, ScanRecord,
+    SearchFilters, SearchHit, SearchHistoryEntry, SlideRecord, StatsOverview,
 };
 use crate::pptx::PresentationFile;
 
@@ -695,6 +695,88 @@ impl Library {
         )?)
     }
 
+    /// Persist (upsert) the set of dropped-construct kinds for a rendered slide,
+    /// keyed by `(deck_path, slide_index)` and guarded by `content_hash` so a
+    /// later edit invalidates the row. An empty `dropped` deletes any existing
+    /// row rather than storing `[]`, keeping the table free of no-drop noise.
+    pub fn record_render_issues(
+        &mut self,
+        deck_path: &str,
+        slide_index: i64,
+        content_hash: &str,
+        dropped: &[String],
+    ) -> Result<()> {
+        if dropped.is_empty() {
+            self.conn.execute(
+                "DELETE FROM render_issues WHERE deck_path=?1 AND slide_index=?2",
+                params![deck_path, slide_index],
+            )?;
+            return Ok(());
+        }
+        let json = serde_json::to_string(dropped).unwrap_or_else(|_| "[]".into());
+        self.conn.execute(
+            "INSERT INTO render_issues(deck_path, slide_index, content_hash, dropped, updated_unix) \
+             VALUES(?1,?2,?3,?4,?5) \
+             ON CONFLICT(deck_path, slide_index) DO UPDATE SET \
+             content_hash=excluded.content_hash, dropped=excluded.dropped, \
+             updated_unix=excluded.updated_unix",
+            params![deck_path, slide_index, content_hash, json, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// The dropped-construct kinds recorded for a slide, but only when the stored
+    /// row's `content_hash` still matches (a missing row OR a stale hash both
+    /// return empty — the cached render no longer describes the current file).
+    pub fn render_issues_for(
+        &self,
+        deck_path: &str,
+        slide_index: i64,
+        content_hash: &str,
+    ) -> Result<Vec<String>> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT content_hash, dropped FROM render_issues \
+                 WHERE deck_path=?1 AND slide_index=?2",
+                params![deck_path, slide_index],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((stored_hash, json)) if stored_hash == content_hash => {
+                serde_json::from_str::<Vec<String>>(&json).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        })
+    }
+
+    /// Aggregate live render drops by construct kind for the stats view. The JOIN
+    /// on `decks(path, content_hash)` drops stale rows (file edited since the
+    /// render) and orphans (deck removed), so only current previews are counted.
+    /// Each slide's kinds are pre-deduped on write, so `+= 1` per kind per row is
+    /// a distinct-slide count. Sorted by slide count desc, then kind asc.
+    fn render_drops(&self) -> Result<Vec<RenderDropStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ri.dropped FROM render_issues ri \
+             JOIN decks d ON d.path = ri.deck_path AND d.content_hash = ri.content_hash",
+        )?;
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            let json = row?;
+            for kind in serde_json::from_str::<Vec<String>>(&json).unwrap_or_default() {
+                *counts.entry(kind).or_insert(0) += 1;
+            }
+        }
+        let mut stats: Vec<RenderDropStat> = counts
+            .into_iter()
+            .map(|(kind, slides)| RenderDropStat { kind, slides })
+            .collect();
+        stats.sort_by(|a, b| b.slides.cmp(&a.slides).then_with(|| a.kind.cmp(&b.kind)));
+        Ok(stats)
+    }
+
     /// `(deck_path, content_hash)` for every indexed deck — the valid-set for
     /// [`crate::thumbs::sweep_thumbs`].
     pub fn all_deck_hashes(&self) -> Result<HashSet<(String, String)>> {
@@ -933,9 +1015,7 @@ impl Library {
             recent_exports,
             largest_decks,
             last_scan_issues,
-            // Empty in step0: step6 replaces render_drops with a
-            // render_issues aggregation.
-            render_drops: Vec::new(),
+            render_drops: self.render_drops()?,
         })
     }
 }
@@ -2068,5 +2148,33 @@ mod tests {
         // A valid pattern still stores fine afterwards.
         let updated = lib.set_root_excludes(root_id, &["**/x.pptx".into()]).unwrap();
         assert_eq!(updated.exclude_globs, vec!["**/x.pptx".to_string()]);
+    }
+
+    #[test]
+    fn render_issues_roundtrip() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.record_render_issues("/decks/a.pptx", 3, "hashA", &["chart".into(), "smartart".into()])
+            .unwrap();
+        assert_eq!(
+            lib.render_issues_for("/decks/a.pptx", 3, "hashA").unwrap(),
+            vec!["chart".to_string(), "smartart".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_issues_hash_mismatch_returns_empty() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.record_render_issues("/decks/a.pptx", 3, "hashA", &["chart".into()]).unwrap();
+        // A stale content hash means the cached render no longer describes the file.
+        assert!(lib.render_issues_for("/decks/a.pptx", 3, "hashB").unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_render_issues_empty_deletes_row() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.record_render_issues("/decks/a.pptx", 3, "hashA", &["chart".into()]).unwrap();
+        // Re-recording an empty set removes the row rather than storing "[]".
+        lib.record_render_issues("/decks/a.pptx", 3, "hashA", &[]).unwrap();
+        assert!(lib.render_issues_for("/decks/a.pptx", 3, "hashA").unwrap().is_empty());
     }
 }

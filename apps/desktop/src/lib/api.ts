@@ -12,6 +12,7 @@ import type {
   SearchFilters,
   SearchHit,
   SlidePick,
+  SlidePreview,
   SlideRecord,
   Stats,
   StatsOverview,
@@ -161,24 +162,25 @@ export function getDeckSlides(deckId: number): Promise<SlideRecord[]> {
 export type PreviewTier = "thumb" | "full";
 
 /**
- * A string usable directly as an `<img src>` for a slide's preview.
+ * An `<img src>` for a slide's preview plus the set of unsupported construct
+ * kinds the renderer skipped (feeds the "Approximate" badge).
  *
  * In the native app the SVG is rendered + cached to a file and served over the
  * `asset:` protocol (via `convertFileSrc`), so the potentially multi-MB SVG
  * never crosses IPC and the webview caches it by URL. In browser-mock mode the
- * mock SVG string is wrapped as a data URI. Both are plain `<img src>` values,
- * so callers stay mode-agnostic.
+ * mock SVG string is wrapped as a data URI. Both `src` values are plain
+ * `<img src>` values, so callers stay mode-agnostic.
  */
-export async function getSlidePreviewSrc(
+export async function getSlidePreview(
   slideId: number,
   tier: PreviewTier,
-): Promise<string> {
+): Promise<{ src: string; dropped: string[] }> {
   if (isTauri()) {
-    const path = await tauriInvoke<string>("get_slide_preview", { slideId, tier });
+    const res = await tauriInvoke<SlidePreview>("get_slide_preview", { slideId, tier });
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    return convertFileSrc(path);
+    return { src: convertFileSrc(res.path), dropped: res.dropped };
   }
-  return svgToDataUri(await mock.getSlideSvg(slideId));
+  return { src: svgToDataUri(await mock.getSlideSvg(slideId)), dropped: mock.getSlideDropped(slideId) };
 }
 
 // ---------------------------------------------------------------------------

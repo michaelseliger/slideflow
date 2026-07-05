@@ -16,6 +16,7 @@ import type { StatsOverview } from "../lib/types";
 import { useApp } from "../stores/useApp";
 import { deckDisplayName, formatBytes, formatModified, basename } from "../lib/utils";
 import * as api from "../lib/api";
+import { dropKindLabel } from "./ApproxBadge";
 
 /** Statistics view: library counts, index timing, and recent activity
  *  (searches, exports). Swaps in for the grid via the sidebar. */
@@ -238,6 +239,29 @@ export default function StatsView() {
                       {formatBytes(d.size_bytes)}
                     </span>
                   </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+
+        {/* Approximate previews: constructs the renderer skips (charts, etc.) */}
+        <Section icon={<AlertTriangle size={14} />} title="Approximate previews">
+          {overview.render_drops.length === 0 ? (
+            <Empty>No unsupported content found in the previews you've opened yet.</Empty>
+          ) : (
+            <ul>
+              {overview.render_drops.map((r) => (
+                <li
+                  key={r.kind}
+                  className="flex items-center gap-3 rounded-[6px] px-2 py-1.5"
+                >
+                  <span className="min-w-0 flex-1 truncate text-body text-ink capitalize">
+                    {dropKindLabel(r.kind)}
+                  </span>
+                  <span className="tabnum shrink-0 text-caption text-subtle">
+                    {r.slides} slide{r.slides === 1 ? "" : "s"}
+                  </span>
                 </li>
               ))}
             </ul>

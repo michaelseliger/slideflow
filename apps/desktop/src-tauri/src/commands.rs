@@ -23,7 +23,7 @@ use slideflow_core::model::{
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
-use slideflow_core::render::{render_slide_svg, RenderOptions};
+use slideflow_core::render::{render_slide, RenderOptions};
 use slideflow_core::thumbs::{sweep_thumbs, thumb_file_name, ThumbTier};
 
 /// Shared, Tauri-managed application state.
@@ -278,12 +278,20 @@ pub async fn get_deck_slides(
 /// serve a removed slide's SVG to whatever new slide inherited its id. The DB
 /// lookup runs *before* the cache check so an unknown (deleted) id errors instead
 /// of matching a stale file.
+/// A rendered slide preview: the cache-file path plus the set of unsupported
+/// construct kinds the renderer skipped (feeds the "Approximate" badge).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlidePreview {
+    pub path: String,
+    pub dropped: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn get_slide_preview(
     state: State<'_, AppState>,
     slide_id: i64,
     tier: String,
-) -> Result<String, String> {
+) -> Result<SlidePreview, String> {
     let tier = ThumbTier::parse(&tier);
     let (deck_path, content_hash, slide_index) = {
         let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
@@ -295,9 +303,14 @@ pub async fn get_slide_preview(
 
     // Fast path: a present, non-empty cache file is served straight from disk —
     // no permit, no open, no render. Kept ahead of the semaphore so cache hits
-    // never queue behind in-flight renders.
+    // never queue behind in-flight renders. The drop set is a cheap indexed
+    // point-read from render_issues (empty when the row is missing/stale).
     if cache_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-        return Ok(cache_path.to_string_lossy().into_owned());
+        let dropped = {
+            let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+            lib.render_issues_for(&deck_path, slide_index, &content_hash).unwrap_or_default()
+        };
+        return Ok(SlidePreview { path: cache_path.to_string_lossy().into_owned(), dropped });
     }
 
     // Bound how many renders inflate a deck + rasterize at once.
@@ -326,15 +339,24 @@ pub async fn get_slide_preview(
         ThumbTier::Full => RenderOptions::preview(),
     };
     let idx = slide_index as usize;
-    let svg = tauri::async_runtime::spawn_blocking(move || {
-        render_slide_svg(&pf, idx, &options).map_err(e)
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        render_slide(&pf, idx, &options).map_err(e)
     })
     .await
     .map_err(e)??;
 
-    write_cache_atomic(&state.thumbs_dir, &cache_path, svg.as_bytes());
+    // Persist the drop telemetry (best-effort — the badge is an optional signal).
+    {
+        let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+        let _ = lib.record_render_issues(&deck_path, slide_index, &content_hash, &outcome.dropped);
+    }
 
-    Ok(cache_path.to_string_lossy().into_owned())
+    write_cache_atomic(&state.thumbs_dir, &cache_path, outcome.svg.as_bytes());
+
+    Ok(SlidePreview {
+        path: cache_path.to_string_lossy().into_owned(),
+        dropped: outcome.dropped,
+    })
 }
 
 /// Write `bytes` to `final_path` atomically: a uniquely named temp file in the

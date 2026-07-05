@@ -7,7 +7,9 @@ import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
 import * as api from "../lib/api";
 import Thumbnail from "./Thumbnail";
+import ApproxBadge from "./ApproxBadge";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
+import { useSlidePreview } from "../lib/useSlideSvg";
 import { DRAG_MIME, buildDragEntries, makeDragGhost } from "../lib/dnd";
 
 interface SlideCardProps {
@@ -20,6 +22,8 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
   const selected = useApp((s) => s.selectedIds.has(slide.id));
   const inTray = useTray((s) => s.items.some((i) => i.uid === `${slide.deck_id}:${slide.slide_index}`));
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Shares Thumbnail's (slide, "thumb") cache key, so no extra backend call.
+  const { dropped } = useSlidePreview(slide.id, "thumb");
   const reduce = prefersReducedMotion();
 
   const onClick = (e: React.MouseEvent) => {
@@ -155,7 +159,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
               </QuickBtn>
             </div>
 
-            {(inTray || slide.favorite) && (
+            {(inTray || slide.favorite || dropped.length > 0) && (
               <div className="absolute left-1.5 top-1.5 flex flex-col gap-1">
                 {inTray && (
                   <div className="rounded-full bg-accent p-0.5 text-white shadow">
@@ -167,6 +171,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
                     <Star size={11} className="fill-current" />
                   </div>
                 )}
+                {dropped.length > 0 && <ApproxBadge dropped={dropped} variant="tile" />}
               </div>
             )}
           </div>

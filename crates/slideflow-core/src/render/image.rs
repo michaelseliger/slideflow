@@ -112,13 +112,13 @@ impl Ctx<'_> {
         ));
     }
 
-    fn pic_data_uri(&self, node: Node) -> Option<String> {
+    fn pic_data_uri(&mut self, node: Node) -> Option<String> {
         let blip = ch(node, "blipFill").and_then(|b| ch(b, "blip"))?;
         self.blip_data_uri(blip)
     }
 
     /// Resolve an `a:blip` (from a `p:pic` or a shape `blipFill`) to a data URI.
-    fn blip_data_uri(&self, blip: Node) -> Option<String> {
+    fn blip_data_uri(&mut self, blip: Node) -> Option<String> {
         // Prefer a vector (SVG) source when present. PowerPoint stores it in an
         // a:extLst extension (<asvg:svgBlip r:embed>) and keeps the raster
         // r:embed only as a fallback — so try the SVG first, and fall through to
@@ -138,8 +138,12 @@ impl Ctx<'_> {
 
     /// Encode a resolved image part (by part name) as a data URI, applying the
     /// same content-type gate and thumbnail downscaling as blip embedding.
-    fn data_uri_for_target(&self, target: &str) -> Option<String> {
-        let bytes = self.pf.package.part(target)?;
+    fn data_uri_for_target(&mut self, target: &str) -> Option<String> {
+        // Hoist the Copy `&'a PresentationFile` so the byte slice carries
+        // lifetime 'a and is provably independent of the `&mut self` borrow —
+        // that's what lets us call `record_drop` below without aliasing `bytes`.
+        let pf = self.pf;
+        let bytes = pf.package.part(target)?;
         let ct = self
             .content_types
             .as_ref()
@@ -153,11 +157,16 @@ impl Ctx<'_> {
                 .then(|| format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
         }
         // EMF can't be rendered by browsers, but photo EMFs are metafile
-        // wrappers around one big embedded bitmap — extract and embed that.
+        // wrappers around one big embedded bitmap — extract and embed that. A
+        // vector-only EMF yields nothing, so count it as an unsupported image.
         if ct == "image/x-emf" || ct == "image/emf" {
-            return self.emf_data_uri(bytes);
+            return self.emf_data_uri(bytes).or_else(|| {
+                self.record_drop("unsupported-image");
+                None
+            });
         }
         if !(ct == "image/png" || ct == "image/jpeg" || ct == "image/gif") {
+            self.record_drop("unsupported-image");
             return None; // unsupported raster (WMF/TIFF/…): skip gracefully.
         }
         // Downscale oversized rasters for lightweight thumbnails; on any decode
