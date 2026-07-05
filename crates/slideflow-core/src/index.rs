@@ -743,9 +743,9 @@ impl Library {
 
         // Fold the parsed date bounds into the caller's filters, combining
         // restrictively (max of the froms, min of the tos) so a `before:`/`after:`
-        // in the query box can only narrow a range the FilterPopover set. EVERY
-        // retrieval arm below — FTS, browse, and vector post-filtering — sees
-        // these effective filters.
+        // in the query box can only narrow a range the caller's filters already
+        // set. EVERY retrieval arm below — FTS, browse, and vector
+        // post-filtering — sees these effective filters.
         let mut eff = filters.clone();
         eff.modified_from = max_opt(eff.modified_from, parsed.after);
         eff.modified_to = min_opt(eff.modified_to, parsed.before);
