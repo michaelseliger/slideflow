@@ -72,8 +72,10 @@ pub fn near_dup_clusters_for(store: &VectorStore) -> Vec<Vec<i64>> {
 }
 /// Pool size taken from each retrieval arm before reciprocal-rank fusion.
 const HYBRID_POOL: usize = 200;
-/// Embedding batch size fed to the model at once.
-const EMBED_BATCH: usize = 32;
+/// Embedding batch size fed to the model at once. 64 (up from 32) cuts matmul
+/// dispatch overhead for a little more peak RAM; the desktop backfill chunks
+/// `pending` by this too, so one lock-free `embed_passages` covers one batch.
+pub const EMBED_BATCH: usize = 64;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roots(
@@ -229,6 +231,14 @@ impl Library {
     /// Whether a model is attached (semantic features available).
     pub fn has_embedder(&self) -> bool {
         self.embedder.is_some()
+    }
+
+    /// A cloned handle to the attached embedder, if any. Lets the desktop backfill
+    /// snapshot the embedder under a short lock and then run the CPU-bound
+    /// `embed_passages` with NO library lock held (it stores the result via
+    /// [`store_embedding_vectors`] under a separate short lock).
+    pub fn embedder_handle(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder.clone()
     }
 
     /// Drop the lazily-loaded vector store and memoized near-dup clusters. Call
@@ -1364,19 +1374,39 @@ impl Library {
             }
             let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
             let vectors = embedder.embed_passages(&texts)?;
-            let tx = self.conn.transaction()?;
-            for ((th, _), mut vec) in chunk.iter().zip(vectors) {
-                crate::embed::store::l2_normalize(&mut vec); // normalize at write time
-                let blob = vec_to_blob(&vec);
-                tx.execute(
-                    "INSERT OR IGNORE INTO embeddings(model_id, text_hash, dims, vector) \
-                     VALUES(?1,?2,?3,?4)",
-                    params![model_id, th, dims as i64, blob],
-                )?;
-                written += 1;
-            }
-            tx.commit()?;
+            written += self.store_embedding_vectors(&model_id, dims, chunk, vectors)?;
         }
+        Ok(written)
+    }
+
+    /// L2-normalize `vectors` (one per pair in `chunk`, same order) and
+    /// `INSERT OR IGNORE` them under `model_id`/`dims` in a single transaction;
+    /// returns the number of rows attempted (== `chunk.len()`). This is the
+    /// DB-write half of the embedding pipeline, split out so the desktop backfill
+    /// can run the CPU-bound `embed_passages` with NO library lock held and then
+    /// re-lock only for this store. `INSERT OR IGNORE` makes a redundant embed
+    /// race (an interleaved inline scan already vectorized the same text)
+    /// correctness-neutral — the second write is silently dropped.
+    pub fn store_embedding_vectors(
+        &mut self,
+        model_id: &str,
+        dims: usize,
+        chunk: &[(String, String)],
+        vectors: Vec<Vec<f32>>,
+    ) -> Result<usize> {
+        let mut written = 0usize;
+        let tx = self.conn.transaction()?;
+        for ((th, _), mut vec) in chunk.iter().zip(vectors) {
+            crate::embed::store::l2_normalize(&mut vec); // normalize at write time
+            let blob = vec_to_blob(&vec);
+            tx.execute(
+                "INSERT OR IGNORE INTO embeddings(model_id, text_hash, dims, vector) \
+                 VALUES(?1,?2,?3,?4)",
+                params![model_id, th, dims as i64, blob],
+            )?;
+            written += 1;
+        }
+        tx.commit()?;
         Ok(written)
     }
 
@@ -3005,6 +3035,88 @@ mod tests {
         assert_eq!(embedding_rows(&lib), 2);
         assert_eq!(fake.passage_count(), 2);
         assert_eq!(lib.embedding_counts().unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn store_embedding_vectors_is_idempotent() {
+        // Split-phase backfill: embed off-lock, then store under a short re-lock.
+        // Storing the same chunk twice must be a no-op (INSERT OR IGNORE), never a
+        // duplicate row — covers a redundant embed racing an inline scan.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Alpha").bullets(&["aaa"]))
+            .slide(SlideSpec::new("Beta").bullets(&["bbb"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib); // no embedder yet → nothing embedded inline
+
+        let fake = Arc::new(FakeEmbedder::new(16));
+        lib.set_embedder(Some(fake.clone()));
+        let embedder = lib.embedder_handle().expect("embedder attached");
+        let model_id = embedder.id().to_string();
+        let dims = embedder.dims();
+
+        let pending = lib.pending_embedding_texts().unwrap();
+        assert_eq!(pending.len(), 2);
+        let texts: Vec<String> = pending.iter().map(|(_, t)| t.clone()).collect();
+
+        let n = lib
+            .store_embedding_vectors(&model_id, dims, &pending, embedder.embed_passages(&texts).unwrap())
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(embedding_rows(&lib), 2);
+
+        // Re-store the identical snapshot → both rows already present, ignored.
+        lib.store_embedding_vectors(&model_id, dims, &pending, embedder.embed_passages(&texts).unwrap())
+            .unwrap();
+        assert_eq!(embedding_rows(&lib), 2, "idempotent: no duplicate rows");
+    }
+
+    #[test]
+    fn snapshot_store_then_delete_leaves_no_orphan() {
+        // Models the restructured backfill's Phase B: snapshot pending under a
+        // short lock, embed off-lock, but a scan deletes a slide before we store.
+        // The stored vector for the vanished text must be reaped by the tail's
+        // cleanup_orphan_embeddings — no orphan survives.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Keep").bullets(&["keep me around"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Gone").bullets(&["delete me soon please"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let fake = Arc::new(FakeEmbedder::new(16));
+        lib.set_embedder(Some(fake.clone()));
+        let embedder = lib.embedder_handle().unwrap();
+        let model_id = embedder.id().to_string();
+        let dims = embedder.dims();
+
+        // Snapshot BOTH pending texts, then embed off-lock (as the backfill does).
+        let pending = lib.pending_embedding_texts().unwrap();
+        assert_eq!(pending.len(), 2);
+        let texts: Vec<String> = pending.iter().map(|(_, t)| t.clone()).collect();
+        let vectors = embedder.embed_passages(&texts).unwrap();
+
+        // Interleaved scan removes b.pptx's slide between snapshot and store.
+        std::fs::remove_file(dir.path().join("b.pptx")).unwrap();
+        scan_silent(&mut lib);
+
+        // Store the pre-delete snapshot: writes a vector for the now-gone text too.
+        lib.store_embedding_vectors(&model_id, dims, &pending, vectors).unwrap();
+        assert_eq!(embedding_rows(&lib), 2, "both stored, incl. the vanished text");
+
+        // The tail reaps the embedding whose text no longer backs any slide.
+        let removed = lib.cleanup_orphan_embeddings().unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(embedding_rows(&lib), 1, "only the surviving slide's vector remains");
     }
 
     #[test]
