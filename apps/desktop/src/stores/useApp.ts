@@ -16,6 +16,7 @@ import type {
   TagRecord,
 } from "../lib/types";
 import { useTray } from "./useTray";
+import { useSemantic } from "./useSemantic";
 import { toast } from "./useToast";
 import { clearSlideSvgCache } from "../lib/useSlideSvg";
 import { deckDisplayName } from "../lib/utils";
@@ -23,9 +24,10 @@ import { deckDisplayName } from "../lib/utils";
 export type ThemeMode = "light" | "dark" | "system";
 export type Grouping = "flat" | "deck";
 export type SortMode = "name" | "added" | "modified" | "exported";
+export type SearchMode = "lexical" | "semantic" | "hybrid";
 
 export interface NavTarget {
-  type: "all" | "root" | "deck" | "favorites" | "stats" | "saved" | "tag";
+  type: "all" | "root" | "deck" | "favorites" | "stats" | "saved" | "tag" | "duplicates";
   id?: number;
 }
 
@@ -52,6 +54,7 @@ export interface ConfirmConfig {
 const THEME_KEY = "slideflow.theme";
 const COLS_KEY = "slideflow.gridCols";
 const SORT_KEY = "slideflow.sort.v1";
+const SEARCH_MODE_KEY = "slideflow.searchMode.v1";
 
 function loadTheme(): ThemeMode {
   const v = localStorage.getItem(THEME_KEY);
@@ -62,6 +65,13 @@ function loadSortMode(): SortMode {
   const v = localStorage.getItem(SORT_KEY);
   // Default 'modified' preserves today's browse order (modified DESC).
   return v === "name" || v === "added" || v === "modified" || v === "exported" ? v : "modified";
+}
+
+function loadSearchMode(): SearchMode {
+  const v = localStorage.getItem(SEARCH_MODE_KEY);
+  // Default hybrid: it only takes effect once the model is ready (searches
+  // pass the mode only then), so plain installs stay purely lexical.
+  return v === "lexical" || v === "semantic" || v === "hybrid" ? v : "hybrid";
 }
 
 /** Reorder loaded browse hits by `mode`. `cmpDeck` is a total order on decks so
@@ -123,6 +133,9 @@ interface AppState {
   searching: boolean;
   grouping: Grouping;
   sortMode: SortMode;
+  /** Retrieval mode for text queries; applied only while the semantic model is
+   *  ready (otherwise searches stay lexical). Persisted. */
+  searchMode: SearchMode;
   exportCounts: Record<string, number>;
 
   // --- selection ---
@@ -161,6 +174,7 @@ interface AppState {
   clearFilters: () => void;
   setGrouping: (g: Grouping) => void;
   setSortMode: (m: SortMode) => void;
+  setSearchMode: (m: SearchMode) => void;
   refreshExportCounts: () => Promise<void>;
   setNav: (nav: NavTarget) => Promise<void>;
   refresh: () => Promise<void>;
@@ -246,6 +260,7 @@ export const useApp = create<AppState>((set, get) => ({
   searching: false,
   grouping: "flat",
   sortMode: loadSortMode(),
+  searchMode: loadSearchMode(),
   exportCounts: {},
 
   selectedIds: new Set(),
@@ -334,6 +349,13 @@ export const useApp = create<AppState>((set, get) => ({
     if (browsing) void get().refresh();
   },
 
+  setSearchMode: (m) => {
+    localStorage.setItem(SEARCH_MODE_KEY, m);
+    set({ searchMode: m });
+    // The mode only shapes ranked text searches; browsing is unaffected.
+    if (get().query.trim() !== "") void get().refresh();
+  },
+
   refreshExportCounts: async () => {
     const exportCounts = await api.getExportCounts();
     const { query, nav, results, sortMode } = get();
@@ -360,8 +382,9 @@ export const useApp = create<AppState>((set, get) => ({
     const token = ++searchToken;
     const { query, filters, nav, decks } = get();
 
-    // The stats view fetches its own data; keep the grid empty behind it.
-    if (nav.type === "stats") {
+    // The stats and duplicates views fetch their own data; keep the grid empty
+    // behind them.
+    if (nav.type === "stats" || nav.type === "duplicates") {
       set({ results: [], selectedIds: new Set(), anchorIndex: null, searching: false });
       return;
     }
@@ -381,6 +404,12 @@ export const useApp = create<AppState>((set, get) => ({
       // carry the browse sort so the backend LIMIT window is chosen by the
       // active key (ignored by full-text search, which is bm25-ranked).
       const eff: SearchFilters = { ...filters, sort: get().sortMode };
+      // Ranked text searches carry the retrieval mode — but only while the
+      // model is actually ready, so a plain install never even asks for
+      // semantic ranking (the backend would silently degrade anyway).
+      if (query.trim() !== "" && useSemantic.getState().isReady()) {
+        eff.search_mode = get().searchMode;
+      }
       if (nav.type === "root") {
         const root = get().roots.find((r) => r.id === nav.id);
         if (root) eff.path_prefix = root.path;

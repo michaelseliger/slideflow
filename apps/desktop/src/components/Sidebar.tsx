@@ -8,6 +8,7 @@ import {
   Star,
   BarChart3,
   Bookmark,
+  Copy,
   Info,
   Tag,
 } from "lucide-react";
@@ -83,6 +84,14 @@ export default function Sidebar() {
           active={isActive("favorites")}
           collapsed={collapsed}
           onClick={() => void setNav({ type: "favorites" })}
+        />
+
+        <Row
+          icon={<Copy size={15} />}
+          label="Duplicates"
+          active={isActive("duplicates")}
+          collapsed={collapsed}
+          onClick={() => void setNav({ type: "duplicates" })}
         />
 
         <Row

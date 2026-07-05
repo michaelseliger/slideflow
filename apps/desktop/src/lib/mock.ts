@@ -5,6 +5,8 @@
 import type {
   ComposeReport,
   DeckRecord,
+  DuplicateGroup,
+  EmbeddingStatus,
   ExportRecord,
   ExportReport,
   FitMode,
@@ -13,6 +15,7 @@ import type {
   SearchFilters,
   SearchHistoryEntry,
   SearchHit,
+  SimilarSlide,
   SlideDragPaths,
   SlidePick,
   SlideRecord,
@@ -93,6 +96,9 @@ const DECK_SEEDS: DeckSeed[] = [
       { title: "Welcome New Folks", body: "Twelve new teammates across product, sales, and support." },
       { title: "Customer Wins", body: "Three lighthouse logos went live this month." },
       { title: "What We Learned", body: "Ship smaller, measure sooner, and talk to users weekly." },
+      // Deliberate EXACT duplicate of the Q3 Business Review churn slide, so
+      // browser mode demos duplicate detection + the tray warning.
+      { title: "Churn Down to 4.1%", body: "Gross churn improved on the back of the new onboarding flow." },
       { title: "Open Q&A", body: "Drop questions in the thread; we'll get to all of them." },
     ],
   },
@@ -122,6 +128,10 @@ const DECK_SEEDS: DeckSeed[] = [
       { title: "Elevation", body: "Hairline separators over heavy borders. Soft shadows on lift." },
       { title: "Motion", body: "Spring physics on meaningful moments only. Respect reduced motion." },
       { title: "Dark Mode", body: "Elevated greys, matted thumbnails, vibrant text on materials only." },
+      // Deliberate NEAR duplicate of the Product Roadmap search slide (same
+      // title, slightly reworded body) — demos the "near" duplicate badge once
+      // the mock model is "downloaded".
+      { title: "Ship Instant Search", body: "Sub-100ms keystroke-to-results on the local FTS5 index." },
     ],
   },
 ];
@@ -172,6 +182,17 @@ let mockDecks: DeckRecord[] = [];
 let mockSlides: SlideRecord[] = [];
 const svgById = new Map<number, string>();
 
+/** Tiny deterministic hash (djb2, hex) — identical title+body across decks
+ *  collide, mirroring the engine's authored-content hash semantics. */
+function fakeContentHash(title: string, body: string): string {
+  const s = `${title} ${body}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  }
+  return `mock-${h.toString(16).padStart(8, "0")}`;
+}
+
 function buildMockLibrary() {
   mockDecks = [];
   mockSlides = [];
@@ -205,6 +226,7 @@ function buildMockLibrary() {
         notes: s.notes ?? null,
         thumb_path: null,
         favorite: false,
+        content_hash: fakeContentHash(s.title, s.body),
       };
       mockSlides.push(rec);
       svgById.set(slideId, svgFor(seed, s.title, s.body));
@@ -352,9 +374,19 @@ export const mock = {
       deck_query?: string | null;
       favorites_only?: boolean | null;
       tag_id?: number | null;
+      search_mode?: string | null;
     } = {},
   ): Promise<SearchHit[]> => {
     const q = query.trim().toLowerCase();
+    // Semantic/hybrid only kick in with the mock model "ready" (like native,
+    // which silently degrades to lexical otherwise).
+    const mode = filters.search_mode ?? "lexical";
+    const semantic =
+      q.length > 0 &&
+      (mode === "semantic" || mode === "hybrid") &&
+      mockSemanticEnabled &&
+      mockModelDownloaded;
+    const qTokens = q.split(/\s+/).filter(Boolean);
     const hits: SearchHit[] = [];
     for (const slide of mockSlides) {
       const deck = mockDecks.find((d) => d.id === slide.deck_id)!;
@@ -376,16 +408,28 @@ export const mock = {
       const hay = `${slide.title ?? ""} ${slide.body_text} ${
         slide.notes ?? ""
       }`.toLowerCase();
-      const matched = !q || hay.includes(q);
-      if (!matched) continue;
+      const lexicalMatch = !q || hay.includes(q);
+      // Fake "semantic" recall: any shared word counts, so reworded slides
+      // surface without an exact substring (demoing semantic-only hits).
+      const tokenOverlap = semantic
+        ? qTokens.filter((t) => hay.includes(t)).length
+        : 0;
+      if (!lexicalMatch && !(semantic && tokenOverlap > 0)) continue;
+      if (mode === "semantic" && !semantic && !lexicalMatch) continue;
       const source = slide.body_text.toLowerCase().includes(q)
         ? slide.body_text
         : slide.title ?? slide.body_text;
       hits.push({
         slide: structuredClone(slide),
         deck: structuredClone(deck),
-        snippet: highlight(source, query),
-        score: q ? (slide.title?.toLowerCase().includes(q) ? 2 : 1) : 0,
+        // Semantic-only hits carry a plain (mark-free) snippet, like native.
+        snippet: lexicalMatch
+          ? highlight(source, query)
+          : source.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 160),
+        score: q
+          ? (lexicalMatch ? (slide.title?.toLowerCase().includes(q) ? 2 : 1) : 0) +
+            tokenOverlap * 0.3
+          : 0,
       });
     }
     hits.sort((a, b) => b.score - a.score || a.slide.id - b.slide.id);
@@ -629,9 +673,120 @@ export const mock = {
   // Mirror the native get_auto_update_enabled read-back so the Settings toggle
   // can reconcile against the backend's source of truth in browser mode too.
   getAutoUpdateEnabled: async (): Promise<boolean> => mockAutoUpdate,
+
+  // --- semantic search -------------------------------------------------------
+
+  getEmbeddingStatus: async (): Promise<EmbeddingStatus> => ({
+    state: mockModelDownloading
+      ? "downloading"
+      : !mockSemanticEnabled
+        ? "disabled"
+        : !mockModelDownloaded
+          ? "not_downloaded"
+          : "ready",
+    model_id: "intfloat/multilingual-e5-small",
+    dims: 384,
+    embedded_slides: mockEmbeddedSlides,
+    total_slides: mockSlides.length,
+    error: null,
+  }),
+
+  setSemanticSearchEnabled: async (enabled: boolean): Promise<void> => {
+    mockSemanticEnabled = enabled;
+  },
+
+  deleteEmbeddingModel: async (): Promise<void> => {
+    mockModelDownloaded = false;
+    mockSemanticEnabled = false;
+    mockEmbeddedSlides = 0;
+  },
+
+  // Hooks for the fake download/backfill drivers in api.ts.
+  setModelDownloading: (downloading: boolean): void => {
+    mockModelDownloading = downloading;
+  },
+  setModelDownloaded: (downloaded: boolean): void => {
+    mockModelDownloaded = downloaded;
+  },
+  setAllEmbedded: (): void => {
+    mockEmbeddedSlides = mockSlides.length;
+  },
+
+  getSimilarSlides: async (slideId: number, limit: number): Promise<SimilarSlide[]> => {
+    if (!mockSemanticEnabled || !mockModelDownloaded) return [];
+    const anchor = mockSlides.find((s) => s.id === slideId);
+    if (!anchor) return [];
+    const anchorWords = new Set(
+      `${anchor.title ?? ""} ${anchor.body_text}`.toLowerCase().split(/\W+/).filter(Boolean),
+    );
+    const scored = mockSlides
+      // Exclude the anchor and exact-content twins, like native.
+      .filter((s) => s.id !== slideId && s.content_hash !== anchor.content_hash)
+      .map((s) => {
+        const words = new Set(
+          `${s.title ?? ""} ${s.body_text}`.toLowerCase().split(/\W+/).filter(Boolean),
+        );
+        let overlap = 0;
+        for (const w of anchorWords) if (words.has(w)) overlap += 1;
+        const union = anchorWords.size + words.size - overlap;
+        return { slide: s, score: union > 0 ? overlap / union : 0 };
+      })
+      .sort((a, b) => b.score - a.score || a.slide.id - b.slide.id)
+      .slice(0, limit);
+    return scored.map(({ slide, score }) => ({
+      slide: structuredClone(slide),
+      deck: structuredClone(mockDecks.find((d) => d.id === slide.deck_id)!),
+      // Map Jaccard (0..1) into a plausible cosine range for the UI.
+      score: 0.55 + score * 0.44,
+    }));
+  },
+
+  listDuplicateGroups: async (): Promise<DuplicateGroup[]> => {
+    const groups: DuplicateGroup[] = [];
+    const newestFirst = (a: { deck: DeckRecord }, b: { deck: DeckRecord }) =>
+      b.deck.modified_unix - a.deck.modified_unix;
+    const withDeck = (s: SlideRecord) => ({
+      slide: structuredClone(s),
+      deck: structuredClone(mockDecks.find((d) => d.id === s.deck_id)!),
+    });
+    // Exact groups: identical content_hash (always available — no model needed).
+    const byHash = new Map<string, SlideRecord[]>();
+    for (const s of mockSlides) {
+      if (!s.content_hash) continue;
+      const list = byHash.get(s.content_hash) ?? [];
+      list.push(s);
+      byHash.set(s.content_hash, list);
+    }
+    for (const list of byHash.values()) {
+      if (list.length < 2) continue;
+      groups.push({ kind: "exact", score: null, slides: list.map(withDeck).sort(newestFirst) });
+    }
+    // Near groups (model required): same title, different content (the seeded
+    // reworded pair).
+    if (mockSemanticEnabled && mockModelDownloaded) {
+      const byTitle = new Map<string, SlideRecord[]>();
+      for (const s of mockSlides) {
+        if (!s.title) continue;
+        const list = byTitle.get(s.title) ?? [];
+        list.push(s);
+        byTitle.set(s.title, list);
+      }
+      for (const list of byTitle.values()) {
+        const distinct = new Set(list.map((s) => s.content_hash));
+        if (list.length < 2 || distinct.size < 2) continue;
+        groups.push({ kind: "near", score: 0.94, slides: list.map(withDeck).sort(newestFirst) });
+      }
+    }
+    groups.sort((a, b) => b.slides.length - a.slides.length);
+    return groups;
+  },
 };
 
 let mockAutoUpdate = true;
+let mockSemanticEnabled = false;
+let mockModelDownloaded = false;
+let mockModelDownloading = false;
+let mockEmbeddedSlides = 0;
 
 const mockSearches: SearchHistoryEntry[] = [];
 const mockExports: ExportRecord[] = [];

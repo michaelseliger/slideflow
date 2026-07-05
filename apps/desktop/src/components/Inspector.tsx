@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Plus, FileText, Check, Star, X } from "lucide-react";
+import { FolderOpen, Plus, FileText, Check, Star, Sparkles, X } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
+import { useSemantic } from "../stores/useSemantic";
 import { toast } from "../stores/useToast";
 import { deckDisplayName, formatModified, formatBytes } from "../lib/utils";
 import * as api from "../lib/api";
+import type { SimilarSlide } from "../lib/types";
 import Thumbnail from "./Thumbnail";
 
 /** Right inspector: large preview + source metadata + matched-text context for
@@ -73,6 +75,8 @@ export default function Inspector() {
               </div>
             </div>
           )}
+
+          <SimilarSlides slideId={hit.slide.id} />
 
           <div className="mt-4 flex flex-col gap-2">
             <button
@@ -196,6 +200,72 @@ function TagEditor({ slideId }: { slideId: number }) {
           <option key={n} value={n} />
         ))}
       </datalist>
+    </div>
+  );
+}
+
+/** "Similar slides" (AI): the top semantic neighbors of the inspected slide.
+ *  Rendered only while the model is ready; loads lazily per selection. */
+function SimilarSlides({ slideId }: { slideId: number }) {
+  const ready = useSemantic((s) => s.status?.state === "ready");
+  const [similar, setSimilar] = useState<SimilarSlide[] | null>(null);
+
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    setSimilar(null);
+    api
+      .getSimilarSlides(slideId, 6)
+      .then((res) => {
+        if (alive) setSimilar(res);
+      })
+      .catch(() => {
+        if (alive) setSimilar([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [slideId, ready]);
+
+  if (!ready) return null;
+
+  return (
+    <div className="mt-3">
+      <div className="mb-1 flex items-center gap-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+        <Sparkles size={11} />
+        Similar slides
+      </div>
+      {similar == null ? (
+        <div className="text-caption text-subtle">Searching…</div>
+      ) : similar.length === 0 ? (
+        <div className="text-caption text-subtle">No similar slides found.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {similar.map((s) => (
+            <button
+              key={s.slide.id}
+              onClick={() => void useApp.getState().setNav({ type: "deck", id: s.deck.id })}
+              title={`Open ${deckDisplayName(s.deck)}`}
+              className="flex w-full items-center gap-2 rounded-[6px] p-1 text-left transition-colors hover:bg-ink/5"
+            >
+              <div className="w-16 shrink-0 overflow-hidden rounded-[4px] shadow-tile">
+                <Thumbnail slideId={s.slide.id} rounded={false} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-caption font-medium text-ink">
+                  {s.slide.title || deckDisplayName(s.deck)}
+                </div>
+                <div className="truncate text-caption text-subtle">
+                  {deckDisplayName(s.deck)} · #{s.slide.slide_index}
+                </div>
+              </div>
+              <span className="tabnum shrink-0 text-caption text-subtle/80">
+                {Math.round(s.score * 100)}%
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

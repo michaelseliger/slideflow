@@ -13,8 +13,10 @@ import {
   Loader2,
   HelpCircle,
   Bookmark,
+  Sparkles,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
+import { useSemantic } from "../stores/useSemantic";
 import {cx, basename, stripMarks, deckDisplayName } from "../lib/utils";
 import FilterPopover from "./FilterPopover";
 import SearchHelpPopover from "./SearchHelpPopover";
@@ -41,6 +43,9 @@ export default function Header() {
   const tags = useApp((s) => s.tags);
   const [helpOpen, setHelpOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
+  const searchMode = useApp((s) => s.searchMode);
+  const setSearchMode = useApp((s) => s.setSearchMode);
+  const semanticReady = useSemantic((s) => s.status?.state === "ready");
 
   const activeChips = countChips(filters);
 
@@ -105,6 +110,36 @@ export default function Header() {
               <Bookmark size={15} />
             </ToolbarBtn>
             {saveOpen && <SaveSearchPopover onClose={() => setSaveOpen(false)} />}
+          </div>
+        )}
+
+        {/* Retrieval-mode toggle — only once the semantic model is ready. */}
+        {semanticReady && (
+          <div className="no-drag flex items-center overflow-hidden rounded-[6px] border border-hairline/10">
+            <ModeBtn
+              title="Exact — match the words you type"
+              active={searchMode === "lexical"}
+              onClick={() => setSearchMode("lexical")}
+            >
+              <span className="text-[11px] font-semibold">Aa</span>
+            </ModeBtn>
+            <ModeBtn
+              title="Semantic — match by meaning"
+              active={searchMode === "semantic"}
+              onClick={() => setSearchMode("semantic")}
+            >
+              <Sparkles size={12} />
+            </ModeBtn>
+            <ModeBtn
+              title="Hybrid — exact and semantic combined"
+              active={searchMode === "hybrid"}
+              onClick={() => setSearchMode("hybrid")}
+            >
+              <span className="flex items-center gap-0.5 text-[11px] font-semibold">
+                Aa
+                <Sparkles size={10} />
+              </span>
+            </ModeBtn>
           </div>
         )}
 
@@ -270,6 +305,7 @@ function navLabel(
     const s = savedSearches.find((x) => x.id === nav.id);
     return (s ? s.name : "Saved Search") + suffix;
   }
+  if (nav.type === "duplicates") return "Duplicates";
   if (nav.type === "root") {
     const r = roots.find((x) => x.id === nav.id);
     return (r ? basename(r.path) : "Folder") + suffix;
@@ -300,6 +336,32 @@ function ToolbarBtn({
       className={cx(
         "flex h-8 items-center justify-center rounded-[6px] px-2 transition-colors",
         active ? "bg-accent/[0.14] text-accent" : "text-subtle hover:bg-ink/8 hover:text-ink",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Toolbar-height segmented-control button for the retrieval-mode toggle. */
+function ModeBtn({
+  children,
+  title,
+  onClick,
+  active,
+}: {
+  children: React.ReactNode;
+  title: string;
+  onClick: () => void;
+  active?: boolean;
+}) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className={cx(
+        "flex h-8 w-9 items-center justify-center transition-colors",
+        active ? "bg-accent text-white" : "text-subtle hover:bg-ink/8",
       )}
     >
       {children}

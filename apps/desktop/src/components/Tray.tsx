@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
-import { X, ChevronDown, Download, AlertTriangle, Trash2, Ratio } from "lucide-react";
+import { X, ChevronDown, Download, AlertTriangle, Trash2, Ratio, Copy } from "lucide-react";
 import { useTray, type TrayItem } from "../stores/useTray";
 import { useApp } from "../stores/useApp";
 import { toast } from "../stores/useToast";
@@ -57,6 +57,18 @@ export default function Tray() {
   const movedCount = items.filter((i) => i.moved).length;
   const mismatched = mismatchedDimUids(items);
   const mismatchCount = mismatched.size;
+  // Pure-frontend duplicate warning: picks whose slides share an authored-
+  // content hash are the same slide — exporting both is almost never intended.
+  const dupCount = (() => {
+    const counts = new Map<string, number>();
+    for (const i of items) {
+      const h = i.slide.content_hash;
+      if (h) counts.set(h, (counts.get(h) ?? 0) + 1);
+    }
+    let n = 0;
+    for (const c of counts.values()) if (c > 1) n += c;
+    return n;
+  })();
 
   return (
     <motion.section
@@ -107,6 +119,16 @@ export default function Tray() {
           >
             <Ratio size={12} />
             {mismatchCount} off-size
+          </span>
+        )}
+
+        {dupCount > 0 && (
+          <span
+            className="flex items-center gap-1 text-caption text-amber-500"
+            title="Some picks have identical content — the exported deck would contain the same slide more than once"
+          >
+            <Copy size={12} />
+            {dupCount} duplicates
           </span>
         )}
 

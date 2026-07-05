@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useApp, applyTheme } from "./stores/useApp";
 import { useTray } from "./stores/useTray";
 import { useUpdater } from "./stores/useUpdater";
+import { useSemantic } from "./stores/useSemantic";
 import * as api from "./lib/api";
 import { cmdKey } from "./lib/utils";
 
@@ -14,6 +15,7 @@ import EmptyState from "./components/EmptyState";
 import ZeroResults from "./components/ZeroResults";
 import PeekModal from "./components/PeekModal";
 import StatsView from "./components/StatsView";
+import DuplicatesView from "./components/DuplicatesView";
 import CommandPalette from "./components/CommandPalette";
 import ExportSheet from "./components/ExportSheet";
 import AboutSheet from "./components/AboutSheet";
@@ -56,6 +58,7 @@ export default function App() {
   useEffect(() => {
     void useApp.getState().init();
     void useUpdater.getState().init();
+    void useSemantic.getState().init();
     const unlisteners: Array<() => void> = [];
     api
       .onScanEvent((ev) => useApp.getState().handleScanEvent(ev))
@@ -258,6 +261,8 @@ export default function App() {
             <main className="min-w-0 flex-1 bg-canvas">
               {navType === "stats" ? (
                 <StatsView />
+              ) : navType === "duplicates" ? (
+                <DuplicatesView />
               ) : showEmptyOnboarding ? (
                 <EmptyState />
               ) : results.length === 0 && !searching ? (

@@ -7,14 +7,19 @@
 import type {
   ComposeReport,
   DeckRecord,
+  DuplicateGroup,
+  EmbedEvent,
+  EmbeddingStatus,
   ExportEvent,
   ExportReport,
   FitMode,
+  ModelDownloadEvent,
   RootRecord,
   SavedSearch,
   ScanEvent,
   SearchFilters,
   SearchHit,
+  SimilarSlide,
   SlideDragPaths,
   SlidePick,
   SlidePreview,
@@ -542,6 +547,141 @@ async function mockCheckForUpdates(): Promise<void> {
 async function mockRestartToUpdate(): Promise<void> {
   await sleep(400);
   window.location.reload();
+}
+
+// ---------------------------------------------------------------------------
+// Semantic search (local E5 model, downloaded on consent)
+//
+// The Rust side (`src-tauri/src/semantic.rs`) owns the model download, the
+// enable preference, and the embedding backfill; the frontend mirrors state
+// via `get_embedding_status` + the `model:download` / `embed:event` streams.
+// ---------------------------------------------------------------------------
+
+export function getEmbeddingStatus(): Promise<EmbeddingStatus> {
+  return isTauri() ? tauriInvoke("get_embedding_status") : mock.getEmbeddingStatus();
+}
+
+export function setSemanticSearchEnabled(enabled: boolean): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("set_semantic_search_enabled", { enabled })
+    : mock.setSemanticSearchEnabled(enabled);
+}
+
+/** Start (or resume) the ~490 MB model download. Resolves to false when a
+ *  download is already running. Progress arrives on `model:download`. */
+export function downloadEmbeddingModel(): Promise<boolean> {
+  if (isTauri()) return tauriInvoke("download_embedding_model");
+  return mockDownloadModel();
+}
+
+export function cancelModelDownload(): Promise<void> {
+  if (isTauri()) return tauriInvoke("cancel_model_download");
+  mockDownloadCanceled = true;
+  return Promise.resolve();
+}
+
+/** Remove the model files from disk and disable semantic search. */
+export function deleteEmbeddingModel(): Promise<void> {
+  return isTauri() ? tauriInvoke("delete_embedding_model") : mock.deleteEmbeddingModel();
+}
+
+/** Re-run indexing: embed every slide text still missing a vector. Resolves to
+ *  false when a backfill is already running (or no model is loaded). */
+export function startEmbedBackfill(): Promise<boolean> {
+  if (isTauri()) return tauriInvoke("start_embed_backfill");
+  return mockStartBackfill();
+}
+
+export function cancelEmbedBackfill(): Promise<void> {
+  if (isTauri()) return tauriInvoke("cancel_embed_backfill");
+  return Promise.resolve();
+}
+
+/** Slides semantically closest to `slideId`. Empty when the model is absent. */
+export function getSimilarSlides(slideId: number, limit = 12): Promise<SimilarSlide[]> {
+  return isTauri()
+    ? tauriInvoke("get_similar_slides", { slideId, limit })
+    : mock.getSimilarSlides(slideId, limit);
+}
+
+/** Duplicate slide clusters (exact always; near when the model is loaded). */
+export function listDuplicateGroups(): Promise<DuplicateGroup[]> {
+  return isTauri() ? tauriInvoke("list_duplicate_groups") : mock.listDuplicateGroups();
+}
+
+/** Subscribe to `model:download` progress events. Returns an unlisten fn. */
+export async function onModelDownloadEvent(
+  handler: (ev: ModelDownloadEvent) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen<ModelDownloadEvent>("model:download", (e) => handler(e.payload));
+    return un;
+  }
+  mockModelListeners.add(handler);
+  return () => mockModelListeners.delete(handler);
+}
+
+/** Subscribe to `embed:event` backfill events. Returns an unlisten fn. */
+export async function onEmbedEvent(
+  handler: (ev: EmbedEvent) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen<EmbedEvent>("embed:event", (e) => handler(e.payload));
+    return un;
+  }
+  mockEmbedListeners.add(handler);
+  return () => mockEmbedListeners.delete(handler);
+}
+
+// Browser-mode fake model download + backfill, so `pnpm dev` demos the whole
+// consent → download → indexing → ready flow without a native shell.
+const mockModelListeners = new Set<(ev: ModelDownloadEvent) => void>();
+const mockEmbedListeners = new Set<(ev: EmbedEvent) => void>();
+let mockDownloadCanceled = false;
+function emitMockModel(ev: ModelDownloadEvent) {
+  for (const l of mockModelListeners) l(ev);
+}
+function emitMockEmbed(ev: EmbedEvent) {
+  for (const l of mockEmbedListeners) l(ev);
+}
+async function mockDownloadModel(): Promise<boolean> {
+  mockDownloadCanceled = false;
+  mock.setModelDownloading(true);
+  const total = 490 * 1024 * 1024;
+  for (let i = 1; i <= 20; i++) {
+    await sleep(180);
+    if (mockDownloadCanceled) {
+      mock.setModelDownloading(false);
+      emitMockModel({ kind: "canceled" });
+      return true;
+    }
+    emitMockModel({
+      kind: "progress",
+      file: "model.safetensors",
+      downloaded: (total / 20) * i,
+      total,
+      overall_downloaded: (total / 20) * i,
+      overall_total: total,
+    });
+  }
+  mock.setModelDownloading(false);
+  mock.setModelDownloaded(true);
+  emitMockModel({ kind: "done" });
+  void mockStartBackfill();
+  return true;
+}
+async function mockStartBackfill(): Promise<boolean> {
+  const total = (await mock.getStats()).slide_count;
+  emitMockEmbed({ kind: "started", total });
+  for (let done = 1; done <= total; done++) {
+    await sleep(60);
+    emitMockEmbed({ kind: "progress", done, total });
+  }
+  mock.setAllEmbedded();
+  emitMockEmbed({ kind: "finished" });
+  return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,8 @@ use slideflow_core::export::{
 };
 use slideflow_core::index::Library;
 use slideflow_core::model::{
-    ComposeReport, DeckRecord, ExportReport, FitMode, RootRecord, SavedSearch, SearchFilters,
-    SearchHit, SlidePick, SlideRecord, StatsOverview, TagRecord,
+    ComposeReport, DeckRecord, DuplicateGroup, ExportReport, FitMode, RootRecord, SavedSearch,
+    SearchFilters, SearchHit, SimilarSlide, SlidePick, SlideRecord, StatsOverview, TagRecord,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
@@ -197,8 +197,21 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
         if let Some(valid) = valid {
             sweep_thumbs(&state.thumbs_dir, &valid);
         }
-        if let Err(err) = result {
-            let _ = app_for_thread.emit("scan:error", err.to_string());
+        match result {
+            Err(err) => {
+                let _ = app_for_thread.emit("scan:error", err.to_string());
+            }
+            Ok(()) => {
+                // The scan wrote through the scan connection; the interactive
+                // connection's in-memory vector/near-dup caches are now stale.
+                if let Ok(lib) = state.library.lock() {
+                    lib.invalidate_vector_cache();
+                }
+                // While semantic search is enabled, embed whatever this scan's
+                // inline path didn't cover (e.g. pre-hashing decks skipped as
+                // unchanged). No-op when disabled or the model isn't loaded.
+                crate::semantic::spawn_backfill_if_enabled(&app_for_thread);
+            }
         }
     });
 
@@ -277,6 +290,29 @@ pub async fn get_deck_slides(
 ) -> Result<Vec<SlideRecord>, String> {
     let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
     lib.slides_for_deck(deck_id).map_err(e)
+}
+
+/// Slides semantically closest to a given slide (find-similar, roadmap #6).
+/// Empty — never an error — when the model is absent or the slide isn't
+/// embedded yet.
+#[tauri::command]
+pub async fn get_similar_slides(
+    state: State<'_, AppState>,
+    slide_id: i64,
+    limit: usize,
+) -> Result<Vec<SimilarSlide>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.get_similar_slides(slide_id, limit.min(50)).map_err(e)
+}
+
+/// Duplicate slide clusters: exact (identical content hash) always; near
+/// (embedding-similar) additionally when the model is loaded (roadmap #9).
+#[tauri::command]
+pub async fn list_duplicate_groups(
+    state: State<'_, AppState>,
+) -> Result<Vec<DuplicateGroup>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.list_duplicate_groups().map_err(e)
 }
 
 // ---------------------------------------------------------------------------

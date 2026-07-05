@@ -6,6 +6,7 @@
 //! opener / shell / updater plugins the frontend needs.
 
 mod commands;
+mod semantic;
 mod updates;
 
 use std::fs;
@@ -79,6 +80,13 @@ pub fn run() {
             app.manage(AppState::new(library, scan_library, thumbs_dir, dragout_dir));
             app.manage(updates::PendingUpdate::new());
 
+            // Semantic search: the E5 model lives under app-data (survives
+            // cache sweeps). If the user enabled the feature and the model is
+            // on disk, load + attach the embedder in the background.
+            let model_dir = data_dir.join("models").join("multilingual-e5-small");
+            app.manage(semantic::SemanticState::new(model_dir));
+            semantic::bootstrap_on_startup(&app.handle().clone());
+
             // Background auto-update: first check shortly after launch (so
             // boot I/O settles first), then daily while the app runs. Found
             // updates download silently; the frontend hears about it all via
@@ -120,6 +128,8 @@ pub fn run() {
             commands::save_search,
             commands::rename_saved_search,
             commands::delete_saved_search,
+            commands::get_similar_slides,
+            commands::list_duplicate_groups,
             commands::get_slide_preview,
             commands::compose_deck,
             commands::prepare_slide_drag,
@@ -144,6 +154,13 @@ pub fn run() {
             updates::restart_to_update,
             updates::set_auto_update_enabled,
             updates::get_auto_update_enabled,
+            semantic::get_embedding_status,
+            semantic::set_semantic_search_enabled,
+            semantic::download_embedding_model,
+            semantic::cancel_model_download,
+            semantic::delete_embedding_model,
+            semantic::start_embed_backfill,
+            semantic::cancel_embed_backfill,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Slideflow")

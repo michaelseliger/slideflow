@@ -69,6 +69,7 @@ function slide(deckId: number, idx: number): SlideRecord {
     notes: null,
     thumb_path: null,
     favorite: false,
+    content_hash: null,
   };
 }
 function item(deckId: number, idx: number): TrayItem {

@@ -4,6 +4,7 @@ import type { SearchHit, SlideDragPaths, SlidePick } from "../lib/types";
 import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
+import { useSemantic } from "../stores/useSemantic";
 import { toast } from "../stores/useToast";
 import * as api from "../lib/api";
 import Thumbnail from "./Thumbnail";
@@ -27,6 +28,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
   const { slide, deck, snippet } = hit;
   const selected = useApp((s) => s.selectedIds.has(slide.id));
   const inTray = useTray((s) => s.items.some((i) => i.uid === `${slide.deck_id}:${slide.slide_index}`));
+  const semanticReady = useSemantic((s) => s.status?.state === "ready");
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Shares Thumbnail's (slide, "thumb") cache key, so no extra backend call.
   const { dropped } = useSlidePreview(slide.id, "thumb");
@@ -165,6 +167,20 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
       label: "Find other slides from this deck",
       onClick: () => void useApp.getState().setNav({ type: "deck", id: deck.id }),
     },
+    // AI find-similar: only offered while the semantic model is ready. The
+    // results render in the Inspector's "Similar slides" section.
+    ...(semanticReady
+      ? [
+          {
+            label: "Find similar (AI)",
+            onClick: () => {
+              const app = useApp.getState();
+              app.selectOnly(index);
+              app.setInspector(true);
+            },
+          },
+        ]
+      : []),
   ];
 
   return (

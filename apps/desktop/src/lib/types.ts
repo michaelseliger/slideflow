@@ -41,6 +41,10 @@ export interface SlideRecord {
   thumb_path: string | null;
   /** User-starred slide (persisted by deck path + index, survives reindexing). */
   favorite: boolean;
+  /** Layout/theme-independent fingerprint of the slide's authored content;
+   *  identical values = exact duplicates. Null until (re)scanned by a build
+   *  that computes it. */
+  content_hash: string | null;
 }
 
 /** A search result: slide + owning deck + ranking info. Mirrors `SearchHit`. */
@@ -70,6 +74,10 @@ export interface SearchFilters {
   /** Browse-mode sort key; ignored by full-text search. Drives the browse
    *  ORDER BY so the limit window selects the correct top-N for the key. */
   sort?: string | null;
+  /** Retrieval mode: "lexical" (FTS bm25), "semantic" (embedding cosine), or
+   *  "hybrid" (rank fusion of both). Absent = lexical. Silently degrades to
+   *  lexical when no embedding model is available. */
+  search_mode?: string | null;
 }
 
 /** A user-saved search: a named query plus the filters active when saved.
@@ -234,3 +242,64 @@ export interface StatsOverview {
   last_scan_issues: ScanIssue[];
   render_drops: RenderDropStat[];
 }
+
+/** A slide semantically similar to a query slide. Mirrors `SimilarSlide`. */
+export interface SimilarSlide {
+  slide: SlideRecord;
+  deck: DeckRecord;
+  /** Cosine similarity to the anchor slide in [-1, 1] (higher = closer). */
+  score: number;
+}
+
+/** One slide (with its owning deck) inside a duplicate group. Mirrors
+ *  `DuplicateSlide`. */
+export interface DuplicateSlide {
+  slide: SlideRecord;
+  deck: DeckRecord;
+}
+
+/** A cluster of duplicate or near-duplicate slides. Mirrors `DuplicateGroup`. */
+export interface DuplicateGroup {
+  /** "exact" (identical content hash) or "near" (embedding-similar). */
+  kind: string;
+  /** Cohesion score for near groups; null for exact groups. */
+  score: number | null;
+  /** Members, newest-modified deck first (the UI badges the first as newest). */
+  slides: DuplicateSlide[];
+}
+
+/** Snapshot of the semantic-search subsystem. Mirrors `EmbeddingStatus`. */
+export interface EmbeddingStatus {
+  state: "disabled" | "not_downloaded" | "downloading" | "ready" | "error";
+  model_id: string;
+  dims: number;
+  /** Slides with a stored vector for the active model. */
+  embedded_slides: number;
+  /** Slides that carry indexable text (the achievable maximum). */
+  total_slides: number;
+  error: string | null;
+}
+
+/** Model-download lifecycle events streamed on `model:download`. Mirrors the
+ *  `ModelDownloadEvent` enum in `src-tauri/src/semantic.rs`
+ *  (serde `#[serde(tag = "kind", rename_all = "snake_case")]`). */
+export type ModelDownloadEvent =
+  | {
+      kind: "progress";
+      file: string;
+      downloaded: number;
+      total: number;
+      overall_downloaded: number;
+      overall_total: number;
+    }
+  | { kind: "done" }
+  | { kind: "canceled" }
+  | { kind: "error"; message: string };
+
+/** Embedding-backfill lifecycle events streamed on `embed:event`. Mirrors the
+ *  `EmbedEvent` enum in `src-tauri/src/semantic.rs`. */
+export type EmbedEvent =
+  | { kind: "started"; total: number }
+  | { kind: "progress"; done: number; total: number }
+  | { kind: "finished" }
+  | { kind: "error"; message: string };
