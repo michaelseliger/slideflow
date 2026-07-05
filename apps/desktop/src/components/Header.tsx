@@ -38,6 +38,7 @@ export default function Header() {
   const roots = useApp((s) => s.roots);
   const decks = useApp((s) => s.decks);
   const savedSearches = useApp((s) => s.savedSearches);
+  const tags = useApp((s) => s.tags);
   const [helpOpen, setHelpOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
 
@@ -150,7 +151,7 @@ export default function Header() {
         <span className="tabnum shrink-0">
           {query.trim()
             ? `${results.length} result${results.length === 1 ? "" : "s"}`
-            : navLabel(nav, roots, decks, savedSearches, results.length)}
+            : navLabel(nav, roots, decks, savedSearches, tags, results.length)}
         </span>
 
         {/* Active filter chips */}
@@ -258,6 +259,7 @@ function navLabel(
   roots: ReturnType<typeof useApp.getState>["roots"],
   decks: ReturnType<typeof useApp.getState>["decks"],
   savedSearches: ReturnType<typeof useApp.getState>["savedSearches"],
+  tags: ReturnType<typeof useApp.getState>["tags"],
   count: number,
 ) {
   const suffix = ` · ${count} slide${count === 1 ? "" : "s"}`;
@@ -271,6 +273,10 @@ function navLabel(
   if (nav.type === "root") {
     const r = roots.find((x) => x.id === nav.id);
     return (r ? basename(r.path) : "Folder") + suffix;
+  }
+  if (nav.type === "tag") {
+    const t = tags.find((x) => x.id === nav.id);
+    return (t ? `#${t.name}` : "Tag") + suffix;
   }
   const d = decks.find((x) => x.id === nav.id);
   return (d ? deckDisplayName(d) : "Deck") + suffix;

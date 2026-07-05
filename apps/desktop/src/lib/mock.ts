@@ -18,6 +18,7 @@ import type {
   SlideRecord,
   Stats,
   StatsOverview,
+  TagRecord,
 } from "./types";
 
 const EMU_W = 12_192_000;
@@ -260,6 +261,35 @@ function highlight(text: string, query: string): string {
   return out;
 }
 
+// --- tags (in-memory) ------------------------------------------------------
+// Assignments are keyed by slide id, which is deterministic across rebuilds, so
+// they survive a mock Clear & Rebuild just as native tags survive by
+// (deck_path, slide_index). `slide_count` counts only slides currently indexed.
+interface MockTag {
+  id: number;
+  name: string;
+}
+let mockTags: MockTag[] = [];
+let mockTagSeq = 0;
+const mockSlideTags = new Map<number, Set<number>>();
+
+function findTagByName(name: string): MockTag | undefined {
+  const lower = name.toLowerCase();
+  return mockTags.find((t) => t.name.toLowerCase() === lower);
+}
+function tagSlideCount(tagId: number): number {
+  const live = new Set(mockSlides.map((s) => s.id));
+  let n = 0;
+  for (const [sid, ids] of mockSlideTags) if (ids.has(tagId) && live.has(sid)) n += 1;
+  return n;
+}
+function toTagRecord(t: MockTag): TagRecord {
+  return { id: t.id, name: t.name, slide_count: tagSlideCount(t.id) };
+}
+function byName(a: TagRecord, b: TagRecord): number {
+  return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+}
+
 export const mock = {
   listRoots: async (): Promise<RootRecord[]> => structuredClone(mockRoots),
 
@@ -321,6 +351,7 @@ export const mock = {
       path_prefix?: string | null;
       deck_query?: string | null;
       favorites_only?: boolean | null;
+      tag_id?: number | null;
     } = {},
   ): Promise<SearchHit[]> => {
     const q = query.trim().toLowerCase();
@@ -331,6 +362,9 @@ export const mock = {
         continue;
       }
       if (filters.favorites_only && !slide.favorite) continue;
+      if (filters.tag_id != null && !mockSlideTags.get(slide.id)?.has(filters.tag_id)) {
+        continue;
+      }
       if (
         filters.deck_query &&
         !`${deck.title} ${deck.file_name}`
@@ -440,6 +474,55 @@ export const mock = {
     if (!deck) return false;
     deck.favorite = !deck.favorite;
     return deck.favorite;
+  },
+
+  // --- tags ----------------------------------------------------------------
+
+  listTags: async (): Promise<TagRecord[]> => mockTags.map(toTagRecord).sort(byName),
+
+  getSlideTags: async (slideId: number): Promise<TagRecord[]> => {
+    const ids = mockSlideTags.get(slideId) ?? new Set<number>();
+    return mockTags
+      .filter((t) => ids.has(t.id))
+      .map(toTagRecord)
+      .sort(byName);
+  },
+
+  setSlideTags: async (slideId: number, names: string[]): Promise<void> => {
+    const desired: number[] = [];
+    for (const raw of names) {
+      const name = raw.trim();
+      if (!name) continue;
+      let tag = findTagByName(name);
+      if (!tag) {
+        mockTagSeq += 1;
+        tag = { id: mockTagSeq, name };
+        mockTags.push(tag);
+      }
+      if (!desired.includes(tag.id)) desired.push(tag.id);
+    }
+    if (desired.length === 0) mockSlideTags.delete(slideId);
+    else mockSlideTags.set(slideId, new Set(desired));
+    // Prune tags with no remaining assignments anywhere.
+    const assigned = new Set<number>();
+    for (const ids of mockSlideTags.values()) for (const id of ids) assigned.add(id);
+    mockTags = mockTags.filter((t) => assigned.has(t.id));
+  },
+
+  renameTag: async (tagId: number, name: string): Promise<void> => {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Tag name cannot be empty");
+    const clash = mockTags.find(
+      (t) => t.id !== tagId && t.name.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (clash) throw new Error(`A tag named “${trimmed}” already exists`);
+    const t = mockTags.find((x) => x.id === tagId);
+    if (t) t.name = trimmed;
+  },
+
+  deleteTag: async (tagId: number): Promise<void> => {
+    mockTags = mockTags.filter((t) => t.id !== tagId);
+    for (const ids of mockSlideTags.values()) ids.delete(tagId);
   },
 
   // --- clear / rebuild -----------------------------------------------------

@@ -13,6 +13,7 @@ import type {
   SearchFilters,
   SearchHit,
   Stats,
+  TagRecord,
 } from "../lib/types";
 import { useTray } from "./useTray";
 import { toast } from "./useToast";
@@ -24,7 +25,7 @@ export type Grouping = "flat" | "deck";
 export type SortMode = "name" | "added" | "modified" | "exported";
 
 export interface NavTarget {
-  type: "all" | "root" | "deck" | "favorites" | "stats" | "saved";
+  type: "all" | "root" | "deck" | "favorites" | "stats" | "saved" | "tag";
   id?: number;
 }
 
@@ -108,6 +109,7 @@ interface AppState {
   roots: RootRecord[];
   decks: DeckRecord[];
   savedSearches: SavedSearch[];
+  tags: TagRecord[];
   stats: Stats;
   ready: boolean;
 
@@ -202,6 +204,12 @@ interface AppState {
   toggleFavoriteSlide: (slideId: number) => Promise<void>;
   toggleFavoriteDeck: (deckId: number) => Promise<void>;
 
+  // tags
+  loadTags: () => Promise<void>;
+  setSlideTags: (slideId: number, names: string[]) => Promise<void>;
+  renameTag: (tagId: number, name: string) => Promise<void>;
+  deleteTag: (tagId: number) => Promise<void>;
+
   // scan
   startScan: () => Promise<void>;
   handleScanEvent: (ev: ScanEvent) => void;
@@ -226,6 +234,7 @@ export const useApp = create<AppState>((set, get) => ({
   roots: [],
   decks: [],
   savedSearches: [],
+  tags: [],
   stats: { deck_count: 0, slide_count: 0 },
   ready: false,
 
@@ -274,14 +283,15 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   reloadLibrary: async () => {
-    const [roots, decks, stats, exportCounts, savedSearches] = await Promise.all([
+    const [roots, decks, stats, exportCounts, savedSearches, tags] = await Promise.all([
       api.listRoots(),
       api.getDecks(),
       api.getStats(),
       api.getExportCounts(),
       api.listSavedSearches(),
+      api.listTags(),
     ]);
-    set({ roots, decks, stats, exportCounts, savedSearches });
+    set({ roots, decks, stats, exportCounts, savedSearches, tags });
     useTray.getState().reconcile(decks);
   },
 
@@ -377,6 +387,9 @@ export const useApp = create<AppState>((set, get) => ({
       }
       if (nav.type === "favorites") {
         eff.favorites_only = true;
+      }
+      if (nav.type === "tag" && nav.id != null) {
+        eff.tag_id = nav.id;
       }
 
       if (nav.type === "deck" && nav.id != null && query.trim() === "") {
@@ -607,6 +620,59 @@ export const useApp = create<AppState>((set, get) => ({
       toast.success(fav ? "Deck added to Favorites" : "Deck removed from Favorites");
     } catch (err) {
       toast.error(`Couldn't update favorite: ${String(err)}`);
+    }
+  },
+
+  // --- tags ----------------------------------------------------------------
+
+  loadTags: async () => {
+    try {
+      set({ tags: await api.listTags() });
+    } catch (err) {
+      toast.error(`Couldn't load tags: ${String(err)}`);
+    }
+  },
+
+  setSlideTags: async (slideId, names) => {
+    try {
+      await api.setSlideTags(slideId, names);
+      await get().loadTags();
+      const { nav, tags } = get();
+      if (nav.type === "tag" && nav.id != null && !tags.some((t) => t.id === nav.id)) {
+        // The active tag was pruned (its last assignment was removed) — the tag
+        // view no longer exists, so fall back to All Slides.
+        await get().setNav({ type: "all" });
+      } else if (nav.type === "tag") {
+        // Membership in the current tag view may have changed — refresh the grid.
+        await get().refresh();
+      }
+    } catch (err) {
+      toast.error(`Couldn't update tags: ${String(err)}`);
+    }
+  },
+
+  renameTag: async (tagId, name) => {
+    try {
+      await api.renameTag(tagId, name);
+      await get().loadTags();
+      toast.success("Tag renamed");
+    } catch (err) {
+      toast.error(String(err));
+    }
+  },
+
+  deleteTag: async (tagId) => {
+    try {
+      await api.deleteTag(tagId);
+      // Leaving a now-deleted tag view falls back to All Slides.
+      const { nav } = get();
+      if (nav.type === "tag" && nav.id === tagId) {
+        await get().setNav({ type: "all" });
+      }
+      await get().loadTags();
+      toast.success("Tag deleted");
+    } catch (err) {
+      toast.error(`Couldn't delete tag: ${String(err)}`);
     }
   },
 

@@ -136,6 +136,14 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
       label: slide.favorite ? "Remove from Favorites" : "Add to Favorites",
       onClick: () => void useApp.getState().toggleFavoriteSlide(slide.id),
     },
+    {
+      label: "Tags…",
+      onClick: () => {
+        // Select this slide and open the inspector, where the tag editor lives.
+        useApp.getState().selectOnly(index);
+        useApp.getState().setInspector(true);
+      },
+    },
     { label: "Peek", onClick: () => useApp.getState().openPeek(index) },
     {
       label: "Save slide as .pptx…",

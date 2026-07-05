@@ -24,7 +24,7 @@ use slideflow_core::export::{
 use slideflow_core::index::Library;
 use slideflow_core::model::{
     ComposeReport, DeckRecord, ExportReport, FitMode, RootRecord, SavedSearch, SearchFilters,
-    SearchHit, SlidePick, SlideRecord, StatsOverview,
+    SearchHit, SlidePick, SlideRecord, StatsOverview, TagRecord,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
@@ -803,6 +803,56 @@ pub async fn toggle_favorite_deck(
 ) -> Result<bool, String> {
     let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
     lib.toggle_deck_favorite(deck_id).map_err(e)
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+/// All tags, alphabetical, each with a live indexed-slide count.
+#[tauri::command]
+pub async fn list_tags(state: State<'_, AppState>) -> Result<Vec<TagRecord>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.list_tags().map_err(e)
+}
+
+/// Tags currently assigned to one slide.
+#[tauri::command]
+pub async fn get_slide_tags(
+    state: State<'_, AppState>,
+    slide_id: i64,
+) -> Result<Vec<TagRecord>, String> {
+    let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.slide_tags(slide_id).map_err(e)
+}
+
+/// Replace the full set of tags on a slide (creates/prunes tags as needed).
+#[tauri::command]
+pub async fn set_slide_tags(
+    state: State<'_, AppState>,
+    slide_id: i64,
+    names: Vec<String>,
+) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.set_slide_tags(slide_id, &names).map_err(e)
+}
+
+/// Rename a tag; errors on a case-insensitive collision.
+#[tauri::command]
+pub async fn rename_tag(
+    state: State<'_, AppState>,
+    tag_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.rename_tag(tag_id, &name).map_err(e)
+}
+
+/// Delete a tag and all its slide assignments.
+#[tauri::command]
+pub async fn delete_tag(state: State<'_, AppState>, tag_id: i64) -> Result<(), String> {
+    let mut lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+    lib.delete_tag(tag_id).map_err(e)
 }
 
 // ---------------------------------------------------------------------------

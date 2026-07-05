@@ -1,4 +1,5 @@
-import { FolderOpen, Plus, FileText, Check, Star } from "lucide-react";
+import { useEffect, useState } from "react";
+import { FolderOpen, Plus, FileText, Check, Star, X } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
@@ -60,6 +61,8 @@ export default function Inspector() {
             <Meta label="Path" value={hit.deck.path} mono />
           </dl>
 
+          <TagEditor key={hit.slide.id} slideId={hit.slide.id} />
+
           {hit.slide.notes && (
             <div className="mt-3">
               <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
@@ -106,6 +109,94 @@ export default function Inspector() {
         </div>
       )}
     </aside>
+  );
+}
+
+/** Tags editor for the selected slide: removable chips + an input that
+ *  autocompletes existing tags (via a datalist) and creates a tag on Enter.
+ *  Persists the full set through the store, which reloads the sidebar counts. */
+function TagEditor({ slideId }: { slideId: number }) {
+  const allTags = useApp((s) => s.tags);
+  const [names, setNames] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
+  const listId = `taglist-${slideId}`;
+
+  useEffect(() => {
+    let alive = true;
+    void api.getSlideTags(slideId).then((tags) => {
+      if (alive) setNames(tags.map((t) => t.name));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [slideId]);
+
+  const persist = (next: string[]) => {
+    setNames(next);
+    void useApp.getState().setSlideTags(slideId, next);
+  };
+
+  const addDraft = () => {
+    const name = draft.trim();
+    setDraft("");
+    if (!name) return;
+    if (!names.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      persist([...names, name]);
+    }
+  };
+
+  const remove = (name: string) => persist(names.filter((n) => n !== name));
+
+  // Suggest existing tags not already applied to this slide.
+  const suggestions = allTags
+    .map((t) => t.name)
+    .filter((n) => !names.some((applied) => applied.toLowerCase() === n.toLowerCase()));
+
+  return (
+    <div className="mt-3">
+      <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+        Tags
+      </div>
+      {names.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1">
+          {names.map((n) => (
+            <span
+              key={n}
+              className="flex items-center gap-1 rounded-full bg-ink/8 py-0.5 pl-2 pr-1 text-caption text-ink"
+            >
+              {n}
+              <button
+                onClick={() => remove(n)}
+                title={`Remove ${n}`}
+                className="flex h-4 w-4 items-center justify-center rounded-full text-subtle hover:bg-ink/10 hover:text-ink"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            addDraft();
+          } else if (e.key === "Backspace" && draft === "" && names.length > 0) {
+            remove(names[names.length - 1]);
+          }
+        }}
+        list={listId}
+        placeholder="Add a tag…"
+        className="h-7 w-full rounded-[5px] border border-hairline/10 bg-canvas px-2 text-body text-ink outline-none focus:border-accent"
+      />
+      <datalist id={listId}>
+        {suggestions.map((n) => (
+          <option key={n} value={n} />
+        ))}
+      </datalist>
+    </div>
   );
 }
 

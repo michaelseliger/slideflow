@@ -9,6 +9,7 @@ import {
   BarChart3,
   Bookmark,
   Info,
+  Tag,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { cx, basename, deckDisplayName } from "../lib/utils";
@@ -23,6 +24,7 @@ export default function Sidebar() {
   const roots = useApp((s) => s.roots);
   const decks = useApp((s) => s.decks);
   const savedSearches = useApp((s) => s.savedSearches);
+  const tags = useApp((s) => s.tags);
   const stats = useApp((s) => s.stats);
   const nav = useApp((s) => s.nav);
   const scan = useApp((s) => s.scan);
@@ -36,6 +38,19 @@ export default function Sidebar() {
     null,
   );
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
+  const [tagMenu, setTagMenu] = useState<{ x: number; y: number; tagId: number } | null>(null);
+  const [renamingTag, setRenamingTag] = useState<{ id: number; draft: string } | null>(null);
+
+  const commitTagRename = () => {
+    if (!renamingTag) return;
+    const { id, draft } = renamingTag;
+    const tag = tags.find((t) => t.id === id);
+    setRenamingTag(null);
+    const trimmed = draft.trim();
+    if (tag && trimmed && trimmed !== tag.name) {
+      void useApp.getState().renameTag(id, trimmed);
+    }
+  };
 
   const isActive = (type: string, id?: number) =>
     nav.type === type && nav.id === id;
@@ -165,6 +180,48 @@ export default function Sidebar() {
             ))}
           </>
         )}
+
+        {tags.length > 0 && (
+          <>
+            {!collapsed && <SectionLabel>Tags</SectionLabel>}
+            {tags.map((t) =>
+              !collapsed && renamingTag?.id === t.id ? (
+                <div key={t.id} className="mb-0.5 px-2 py-0.5">
+                  <input
+                    autoFocus
+                    value={renamingTag.draft}
+                    onChange={(e) => setRenamingTag({ id: t.id, draft: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitTagRename();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setRenamingTag(null);
+                      }
+                    }}
+                    onBlur={commitTagRename}
+                    className="h-7 w-full rounded-[5px] border border-hairline/20 bg-canvas px-2 text-body text-ink outline-none focus:border-accent"
+                  />
+                </div>
+              ) : (
+                <Row
+                  key={t.id}
+                  icon={<Tag size={15} />}
+                  label={t.name}
+                  count={t.slide_count}
+                  active={isActive("tag", t.id)}
+                  collapsed={collapsed}
+                  onClick={() => void setNav({ type: "tag", id: t.id })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setTagMenu({ x: e.clientX, y: e.clientY, tagId: t.id });
+                  }}
+                />
+              ),
+            )}
+          </>
+        )}
       </nav>
 
       {/* Live scan progress. */}
@@ -272,6 +329,31 @@ export default function Sidebar() {
               },
             ] as MenuItem[]
           }
+        />
+      )}
+
+      {tagMenu && (
+        <ContextMenu
+          x={tagMenu.x}
+          y={tagMenu.y}
+          onClose={() => setTagMenu(null)}
+          items={(() => {
+            const tag = tags.find((t) => t.id === tagMenu.tagId);
+            return [
+              {
+                label: "Rename…",
+                onClick: () => {
+                  if (tag) setRenamingTag({ id: tag.id, draft: tag.name });
+                },
+              },
+              {
+                label: "Delete tag",
+                danger: true,
+                separatorBefore: true,
+                onClick: () => void useApp.getState().deleteTag(tagMenu.tagId),
+              },
+            ] as MenuItem[];
+          })()}
         />
       )}
 

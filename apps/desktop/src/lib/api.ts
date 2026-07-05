@@ -21,6 +21,7 @@ import type {
   SlideRecord,
   Stats,
   StatsOverview,
+  TagRecord,
   UpdateEvent,
 } from "./types";
 import { mock, MOCK_SCAN_ISSUE } from "./mock";
@@ -259,6 +260,37 @@ export function toggleFavoriteDeck(deckId: number): Promise<boolean> {
   return isTauri()
     ? tauriInvoke("toggle_favorite_deck", { deckId })
     : mock.toggleFavoriteDeck(deckId);
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+/** All tags, alphabetical, each with a live indexed-slide count. */
+export function listTags(): Promise<TagRecord[]> {
+  return isTauri() ? tauriInvoke("list_tags") : mock.listTags();
+}
+
+/** Tags currently assigned to one slide. */
+export function getSlideTags(slideId: number): Promise<TagRecord[]> {
+  return isTauri() ? tauriInvoke("get_slide_tags", { slideId }) : mock.getSlideTags(slideId);
+}
+
+/** Replace the full set of tags on a slide (creates/prunes tags as needed). */
+export function setSlideTags(slideId: number, names: string[]): Promise<void> {
+  return isTauri()
+    ? tauriInvoke("set_slide_tags", { slideId, names })
+    : mock.setSlideTags(slideId, names);
+}
+
+/** Rename a tag; rejects on a case-insensitive collision. */
+export function renameTag(tagId: number, name: string): Promise<void> {
+  return isTauri() ? tauriInvoke("rename_tag", { tagId, name }) : mock.renameTag(tagId, name);
+}
+
+/** Delete a tag and all its slide assignments. */
+export function deleteTag(tagId: number): Promise<void> {
+  return isTauri() ? tauriInvoke("delete_tag", { tagId }) : mock.deleteTag(tagId);
 }
 
 // ---------------------------------------------------------------------------

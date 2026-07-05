@@ -64,6 +64,8 @@ export interface SearchFilters {
   modified_to?: number | null;
   /** Only slides the user starred. */
   favorites_only?: boolean | null;
+  /** Only slides assigned this tag (by tag id). */
+  tag_id?: number | null;
   limit?: number | null;
   /** Browse-mode sort key; ignored by full-text search. Drives the browse
    *  ORDER BY so the limit window selects the correct top-N for the key. */
@@ -80,6 +82,13 @@ export interface SavedSearch {
   filters: SearchFilters;
   /** When it was saved (unix seconds). */
   created_unix: number;
+}
+
+/** A user-defined slide tag with a live indexed-slide count. Mirrors `TagRecord`. */
+export interface TagRecord {
+  id: number;
+  name: string;
+  slide_count: number;
 }
 
 /** A watched root folder. Mirrors `RootRecord`. */
