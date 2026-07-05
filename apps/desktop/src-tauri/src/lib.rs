@@ -6,6 +6,7 @@
 //! opener / shell / updater plugins the frontend needs.
 
 mod commands;
+mod fonts;
 mod semantic;
 mod updates;
 
@@ -60,6 +61,14 @@ pub fn run() {
             let _ = fs::remove_dir_all(&dragout_dir);
             fs::create_dir_all(&dragout_dir).expect("create dragout cache dir");
 
+            // App-local fonts (harvested / user-added / downloaded) live under
+            // app-DATA (survive cache sweeps). Create the source subdirs up front
+            // so the picker/harvest/download paths can just write into them.
+            let fonts_dir = data_dir.join("fonts");
+            for sub in ["harvested", "user", "downloaded"] {
+                let _ = fs::create_dir_all(fonts_dir.join(sub));
+            }
+
             let db_path = data_dir.join("library.db");
             let library = Library::open(&db_path).expect("open library database");
             // Second connection to the same WAL database so searches stay
@@ -79,6 +88,10 @@ pub fn run() {
 
             app.manage(AppState::new(library, scan_library, thumbs_dir, dragout_dir));
             app.manage(updates::PendingUpdate::new());
+            // App-local font database (render `AppFontSet` + export `fontdb`).
+            // Cheap to build (parses only the small app fonts dir; the system-
+            // font scan is deferred to first export).
+            app.manage(fonts::FontsState::new(fonts_dir));
 
             // Semantic search: the E5 model lives under app-data (survives
             // cache sweeps). If the user enabled the feature and the model is
@@ -149,6 +162,12 @@ pub fn run() {
             commands::reveal_in_finder,
             commands::open_file,
             commands::open_url,
+            fonts::list_library_fonts,
+            fonts::fonts_dir,
+            fonts::add_user_fonts,
+            fonts::remove_app_font,
+            fonts::download_font,
+            fonts::cancel_font_download,
             updates::updates_supported,
             updates::check_for_updates,
             updates::restart_to_update,

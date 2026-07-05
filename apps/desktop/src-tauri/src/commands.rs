@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::dragout::cache_key;
 use slideflow_core::export::{
-    export_pdf, export_pngs, render_slide_png_from, system_fonts, PdfOptions, PngOptions,
+    export_pdf, export_pngs, render_slide_png_from, PdfOptions, PngOptions,
 };
 use slideflow_core::index::Library;
 use slideflow_core::model::{
@@ -228,6 +228,11 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
                 // inline path didn't cover (e.g. pre-hashing decks skipped as
                 // unchanged). No-op when disabled or the model isn't loaded.
                 crate::semantic::spawn_backfill_if_enabled(&app_for_thread);
+                // Harvest any newly-indexed decks' embeddable fonts so every
+                // deck naming that family benefits. No-op when nothing embeds a
+                // font. Rebuilds the font set + invalidates previews if a new
+                // face lands.
+                crate::fonts::spawn_harvest_after_scan(&app_for_thread);
             }
         }
     });
@@ -430,6 +435,7 @@ pub struct SlidePreview {
 #[tauri::command]
 pub async fn get_slide_preview(
     state: State<'_, AppState>,
+    fonts: State<'_, crate::fonts::FontsState>,
     slide_id: i64,
     tier: String,
 ) -> Result<SlidePreview, String> {
@@ -474,11 +480,14 @@ pub async fn get_slide_preview(
         }
     };
 
-    // Render off the async runtime too — it's CPU-bound.
-    let options = match tier {
+    // Render off the async runtime too — it's CPU-bound. Inject the app-local
+    // font set so the full/peek tier embeds harvested/user/downloaded faces as
+    // @font-face under their real names (the thumb tier ignores it — no embed).
+    let mut options = match tier {
         ThumbTier::Thumb => RenderOptions::thumb(),
         ThumbTier::Full => RenderOptions::preview(),
     };
+    options.app_fonts = Some(fonts.app_set());
     let idx = slide_index as usize;
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         render_slide(&pf, idx, &options).map_err(e)
@@ -770,11 +779,11 @@ pub async fn prepare_slide_drag(
         compose(&[pick], &pptx_tmp, &opts).map_err(e)?;
         atomic_place(&pptx_tmp, &pptx_out).map_err(e)?;
 
-        // Rasterize the drag icon and write it atomically too. Resolve the font DB
-        // here (its first call scans all installed fonts) and open the source deck
-        // once — render_slide_png would otherwise reopen it — via the pf-taking
-        // wrapper.
-        let fonts = system_fonts();
+        // Rasterize the drag icon and write it atomically too. Resolve the app
+        // font DB here (its first call scans all installed fonts; it also carries
+        // harvested/user/downloaded faces) and open the source deck once —
+        // render_slide_png would otherwise reopen it — via the pf-taking wrapper.
+        let fonts = app_for_thread.state::<crate::fonts::FontsState>().db();
         let icon_pf = PresentationFile::open(Path::new(&src)).map_err(e)?;
         let png =
             render_slide_png_from(&icon_pf, slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
@@ -855,8 +864,10 @@ pub async fn export_tray_pdf(
     let out = output_path.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         // Resolve the font DB on the blocking thread: the first call scans every
-        // installed face (100–300 ms) and must not stall the IPC worker.
-        let fonts = system_fonts();
+        // installed face (100–300 ms) and must not stall the IPC worker. This is
+        // the app font database — system + bundled substitutes + harvested/user/
+        // downloaded fonts — so a licensed app font exports as itself.
+        let fonts = app_emit.state::<crate::fonts::FontsState>().db();
         let opts = PdfOptions { title };
         export_pdf(&picks, Path::new(&out), &opts, &fonts, &mut |done, total| {
             let _ = app_emit.emit("export:event", ExportEvent { done, total });
@@ -883,8 +894,8 @@ pub async fn export_tray_pngs(
     let app_emit = app.clone();
     let dir = out_dir.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        // Resolve the font DB on the blocking thread (see export_tray_pdf).
-        let fonts = system_fonts();
+        // Resolve the app font DB on the blocking thread (see export_tray_pdf).
+        let fonts = app_emit.state::<crate::fonts::FontsState>().db();
         let opts = PngOptions { target_width_px: width };
         export_pngs(&picks, Path::new(&dir), &opts, &fonts, &mut |done, total| {
             let _ = app_emit.emit("export:event", ExportEvent { done, total });
