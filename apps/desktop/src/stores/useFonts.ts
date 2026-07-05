@@ -77,9 +77,18 @@ export const useFonts = create<FontsStore>((set, get) => ({
     try {
       const paths = await api.pickFontFiles();
       if (paths.length === 0) return;
-      const fonts = await api.addUserFonts(paths);
+      const { added, errors, fonts } = await api.addUserFonts(paths);
       set({ fonts });
-      toast.success(paths.length === 1 ? "Font added" : `${paths.length} fonts added`);
+      if (added > 0) {
+        toast.success(added === 1 ? "Font added" : `${added} fonts added`);
+      }
+      if (errors.length > 0) {
+        toast.error(
+          errors.length === 1
+            ? `Couldn't add a font: ${errors[0]}`
+            : `Couldn't add ${errors.length} fonts: ${errors.join("; ")}`,
+        );
+      }
     } catch (err) {
       toast.error(`Couldn't add fonts: ${String(err)}`);
     }

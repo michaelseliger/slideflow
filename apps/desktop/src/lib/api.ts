@@ -15,6 +15,7 @@ import type {
   FitMode,
   FontDownloadEvent,
   FontFamily,
+  AddFontsResult,
   ModelDownloadEvent,
   RootRecord,
   SavedSearch,
@@ -705,9 +706,9 @@ export function fontsDir(): Promise<string> {
   return isTauri() ? tauriInvoke("fonts_dir") : mock.fontsDir();
 }
 
-/** Copy validated .ttf/.otf files into the user fonts folder; returns the
- *  refreshed list. */
-export function addUserFonts(paths: string[]): Promise<FontFamily[]> {
+/** Copy validated .ttf/.otf files into the user fonts folder; returns the real
+ *  installed count, per-file errors, and the refreshed list. */
+export function addUserFonts(paths: string[]): Promise<AddFontsResult> {
   return isTauri() ? tauriInvoke("add_user_fonts", { paths }) : mock.addUserFonts(paths);
 }
 

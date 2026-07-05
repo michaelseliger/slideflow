@@ -12,6 +12,7 @@ import type {
   FitMode,
   FontDownloadEvent,
   FontFamily,
+  AddFontsResult,
   RootRecord,
   SavedSearch,
   SearchFilters,
@@ -721,8 +722,14 @@ export const mock = {
   fontsDir: async (): Promise<string> =>
     "/Users/you/Library/Application Support/com.slideflow.app/fonts",
 
-  addUserFonts: async (paths: string[]): Promise<FontFamily[]> => {
+  addUserFonts: async (paths: string[]): Promise<AddFontsResult> => {
+    let added = 0;
+    const errors: string[] = [];
     for (const p of paths) {
+      if (!/\.(ttf|otf)$/i.test(p)) {
+        errors.push(`${p}: not a .ttf/.otf file`);
+        continue;
+      }
       const base = (p.split("/").pop() ?? "Font.ttf").replace(/\.(ttf|otf)$/i, "");
       const family = base.replace(/[-_].*$/, "");
       const existing = mockFonts.find((f) => f.family.toLowerCase() === family.toLowerCase());
@@ -741,9 +748,10 @@ export const mock = {
           download_source: null,
         });
       }
+      added += 1;
     }
-    emitMockFontsChanged();
-    return structuredClone(mockFonts);
+    if (added > 0) emitMockFontsChanged();
+    return { added, errors, fonts: structuredClone(mockFonts) };
   },
 
   removeAppFont: async (family: string): Promise<FontFamily[]> => {

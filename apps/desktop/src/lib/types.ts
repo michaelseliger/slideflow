@@ -323,6 +323,16 @@ export interface FontFamily {
   download_source: string | null;
 }
 
+/** Result of `add_user_fonts`: the real installed count, per-file errors (kept
+ *  even when some installed, so a partial failure surfaces honestly), and the
+ *  refreshed family list. Mirrors the desktop `AddFontsResult`
+ *  (`src-tauri/src/fonts.rs`). */
+export interface AddFontsResult {
+  added: number;
+  errors: string[];
+  fonts: FontFamily[];
+}
+
 /** Font-download lifecycle events streamed on `font:download`. Mirrors the
  *  `FontDownloadEvent` enum in `src-tauri/src/fonts.rs`
  *  (serde `#[serde(tag = "kind", rename_all = "snake_case")]`). */
