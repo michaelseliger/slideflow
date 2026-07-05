@@ -156,20 +156,27 @@ impl Ctx<'_> {
             return svg_is_safe(bytes)
                 .then(|| format!("data:image/svg+xml;base64,{}", B64.encode(bytes)));
         }
-        // EMF can't be rendered by browsers, but photo EMFs are metafile
-        // wrappers around one big embedded bitmap — extract and embed that. A
-        // vector-only EMF yields nothing, so count it as an unsupported image.
+        // EMF can't be rendered by browsers. Photo EMFs are metafile wrappers
+        // around one big embedded bitmap — extract and embed that. A vector-only
+        // EMF (paths, no bitmap — e.g. a logo) is interpreted into a
+        // self-contained SVG. Only when both fail is the image unsupported.
         if ct == "image/x-emf" || ct == "image/emf" {
-            return self.emf_data_uri(bytes).or_else(|| {
-                self.record_drop("unsupported-image");
-                None
-            });
+            if let Some(uri) = self.emf_data_uri(bytes) {
+                return Some(uri);
+            }
+            if let Some(svg) = emf_vector_svg(bytes) {
+                return Some(format!("data:image/svg+xml;base64,{}", B64.encode(svg.as_bytes())));
+            }
+            self.record_drop("unsupported-image");
+            return None;
         }
         // TIFF: browsers can't display it, but it's a plain raster — decode and
-        // re-encode as PNG (applying the thumbnail cap). Only a genuine decode
-        // failure counts as an unsupported image.
+        // re-encode as PNG (applying the thumbnail cap). The image crate (tiff
+        // feature) is the primary decoder; palette-color TIFFs, which tiff
+        // 0.11 rejects, fall back to the in-house uncompressed-subset decoder.
+        // Only when both fail does the image count as unsupported.
         if ct == "image/tiff" {
-            return match raster_to_png(bytes) {
+            return match raster_to_png(bytes).or_else(|| decode_uncompressed_tiff(bytes)) {
                 Some(png) => Some(self.png_data_uri(&png)),
                 None => {
                     self.record_drop("unsupported-image");
@@ -606,6 +613,202 @@ fn dib_to_image(bmi: &[u8], bits: &[u8]) -> Option<(&'static str, Vec<u8>)> {
     }
 }
 
+/// Minimal, defensive baseline-TIFF decoder — the fallback behind
+/// [`raster_to_png`] for what the tiff crate (0.11) rejects, most notably
+/// palette-color TIFFs as PowerPoint embeds them. Covers the uncompressed
+/// subset seen in real decks: `Compression = 1` (none), chunky
+/// (`PlanarConfiguration = 1`), strip-based, both byte orders (`II`/`MM`), and
+/// one of
+/// - palette-color (`PhotometricInterpretation = 3`), 4- or 8-bit indices
+///   expanded through the `ColorMap` (16-bit entries scaled by `/257`),
+/// - RGB / RGBA (`= 2`), 8 bits per sample, 3 or 4 samples,
+/// - grayscale (`= 0` white-is-zero / `= 1` black-is-zero), 8-bit.
+///
+/// Everything outside the subset — any other compression, bit depth, planar
+/// layout, or photometric — returns `None` (the caller then drops the image
+/// honestly rather than rendering something wrong). All reads are bounds-checked
+/// against untrusted input; a malformed file yields `None`, never a panic. A
+/// palette index beyond the supplied colormap is clamped to its last entry.
+fn decode_uncompressed_tiff(b: &[u8]) -> Option<Vec<u8>> {
+    let le = match b.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let r16 = |o: usize| -> Option<u16> {
+        let s = b.get(o..o + 2)?;
+        let a = [s[0], s[1]];
+        Some(if le { u16::from_le_bytes(a) } else { u16::from_be_bytes(a) })
+    };
+    let r32 = |o: usize| -> Option<u32> {
+        let s = b.get(o..o + 4)?;
+        let a: [u8; 4] = s.try_into().unwrap();
+        Some(if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) })
+    };
+    if r16(2)? != 42 {
+        return None;
+    }
+    let ifd = r32(4)? as usize;
+    let n = r16(ifd)? as usize;
+    if n == 0 || n > 512 {
+        return None;
+    }
+    // Collect (tag, field-type, count, value-field-offset) for every IFD entry.
+    let mut entries: Vec<(u16, u16, u32, usize)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let e = ifd.checked_add(2)?.checked_add(i.checked_mul(12)?)?;
+        entries.push((r16(e)?, r16(e + 2)?, r32(e + 4)?, e + 8));
+    }
+    let type_size = |t: u16| -> usize {
+        match t {
+            1 | 2 | 6 | 7 => 1, // BYTE / ASCII / SBYTE / UNDEFINED
+            3 | 8 => 2,         // SHORT / SSHORT
+            4 | 9 => 4,         // LONG / SLONG
+            _ => 0,
+        }
+    };
+    // All values of a tag, widened to u32 (only BYTE/SHORT/LONG are needed).
+    let values = |tag: u16| -> Option<Vec<u32>> {
+        let &(_, typ, count, valoff) = entries.iter().find(|e| e.0 == tag)?;
+        let ts = type_size(typ);
+        if ts == 0 {
+            return None;
+        }
+        let count = count as usize;
+        let total = ts.checked_mul(count)?;
+        let base = if total <= 4 { valoff } else { r32(valoff)? as usize };
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let o = base.checked_add(i.checked_mul(ts)?)?;
+            out.push(match ts {
+                1 => *b.get(o)? as u32,
+                2 => r16(o)? as u32,
+                _ => r32(o)?,
+            });
+        }
+        Some(out)
+    };
+    let first = |tag: u16| -> Option<u32> { values(tag)?.into_iter().next() };
+
+    let width = first(256)? as usize;
+    let height = first(257)? as usize;
+    if width == 0 || height == 0 || width.checked_mul(height)? > 40_000_000 {
+        return None;
+    }
+    if first(259).unwrap_or(1) != 1 {
+        return None; // only uncompressed
+    }
+    if first(284).unwrap_or(1) != 1 {
+        return None; // only chunky (interleaved) samples
+    }
+    if first(317).unwrap_or(1) != 1 {
+        return None; // predictors (horizontal differencing) unsupported
+    }
+    let photometric = first(262)?;
+    let spp = first(277).unwrap_or(1) as usize;
+    let bits = values(258).unwrap_or_else(|| vec![1]);
+    let rows_per_strip = match first(278) {
+        Some(0) | None => height,
+        Some(r) => r as usize,
+    };
+    let strip_offsets = values(273)?;
+    let strip_counts = values(279)?;
+    if strip_offsets.len() != strip_counts.len() || strip_offsets.is_empty() {
+        return None;
+    }
+
+    // Concatenate the strips (in IFD order = top-to-bottom) into one buffer.
+    let mut raw: Vec<u8> = Vec::new();
+    for (o, c) in strip_offsets.iter().zip(&strip_counts) {
+        let start = *o as usize;
+        let end = start.checked_add(*c as usize)?;
+        raw.extend_from_slice(b.get(start..end)?);
+    }
+    let _ = rows_per_strip; // strips are whole rows; sequential concat suffices.
+
+    // Resolve output channels and the packed source row width.
+    let (out_ch, row_bytes) = match photometric {
+        3 => {
+            let bpp = *bits.first()?;
+            if bpp != 4 && bpp != 8 {
+                return None;
+            }
+            let rb = if bpp == 8 { width } else { width.div_ceil(2) };
+            (3usize, rb)
+        }
+        2 => {
+            if (spp != 3 && spp != 4) || bits.iter().take(spp).any(|&x| x != 8) {
+                return None;
+            }
+            (spp, width.checked_mul(spp)?)
+        }
+        0 | 1 => {
+            if spp != 1 || *bits.first()? != 8 {
+                return None;
+            }
+            (3usize, width)
+        }
+        _ => return None,
+    };
+    if raw.len() < height.checked_mul(row_bytes)? {
+        return None;
+    }
+
+    let colormap = if photometric == 3 { Some(values(320)?) } else { None };
+    if let Some(cm) = &colormap {
+        if cm.len() < 3 {
+            return None;
+        }
+    }
+    let bpp = *bits.first().unwrap_or(&8);
+
+    let mut out: Vec<u8> = Vec::with_capacity(width.checked_mul(height)?.checked_mul(out_ch)?);
+    for y in 0..height {
+        let row = &raw[y * row_bytes..y * row_bytes + row_bytes];
+        for x in 0..width {
+            match photometric {
+                3 => {
+                    let cm = colormap.as_ref().unwrap();
+                    let nent = cm.len() / 3;
+                    let idx = if bpp == 8 {
+                        row[x] as usize
+                    } else {
+                        let byte = row[x / 2] as usize;
+                        if x % 2 == 0 {
+                            byte >> 4
+                        } else {
+                            byte & 0x0f
+                        }
+                    }
+                    .min(nent.saturating_sub(1));
+                    out.push((cm[idx] / 257) as u8);
+                    out.push((cm[nent + idx] / 257) as u8);
+                    out.push((cm[2 * nent + idx] / 257) as u8);
+                }
+                2 => {
+                    let base = x * spp;
+                    out.extend_from_slice(&row[base..base + spp]);
+                }
+                _ => {
+                    let v = row[x];
+                    let g = if photometric == 0 { 255 - v } else { v };
+                    out.extend_from_slice(&[g, g, g]);
+                }
+            }
+        }
+    }
+
+    let (w, h) = (width as u32, height as u32);
+    let img = if out_ch == 4 {
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, out)?)
+    } else {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, out)?)
+    };
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(png)
+}
+
 /// Downscale a raster whose longer edge exceeds `cap` pixels, returning the
 /// re-encoded `(content_type, bytes)`. Images with an alpha channel re-encode as
 /// PNG (to keep transparency); opaque images as JPEG q80 — JPEG-ing opaque
@@ -639,11 +842,536 @@ pub(crate) fn downscale_raster(bytes: &[u8], cap: u32) -> Option<(String, Vec<u8
     }
 }
 
+// ---------------------------------------------------------------------------
+// EMF vector-path interpreter
+// ---------------------------------------------------------------------------
+
+/// A GDI object stored in the EMF handle table: a fill brush or a stroke pen.
+/// `None` colour means the object paints nothing (NULL brush / NULL pen).
+#[derive(Clone, Copy)]
+enum EmfObj {
+    Brush(Option<(u8, u8, u8)>),
+    Pen(Option<(u8, u8, u8)>, f64),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PolyKind {
+    Line,
+    LineTo,
+    Bezier,
+    BezierTo,
+    Polygon,
+}
+
+fn ru32(r: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(r.get(o..o + 4)?.try_into().unwrap()))
+}
+fn ri32(r: &[u8], o: usize) -> Option<i32> {
+    Some(i32::from_le_bytes(r.get(o..o + 4)?.try_into().unwrap()))
+}
+fn ri16(r: &[u8], o: usize) -> Option<i16> {
+    Some(i16::from_le_bytes(r.get(o..o + 2)?.try_into().unwrap()))
+}
+/// A GDI `COLORREF` (`0x00bbggrr`) → `(r, g, b)`.
+fn colorref(v: u32) -> (u8, u8, u8) {
+    ((v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 16) & 0xff) as u8)
+}
+
+/// Interpret a vector-only EMF (path drawing, solid fills/strokes) into a
+/// self-contained SVG document. Photo EMFs go through [`emf_embedded_bitmap`]
+/// instead; this is the fallback for metafiles that draw with paths.
+///
+/// **Fidelity honesty:** harmless state records (comments, text alignment, bk
+/// mode, clip-region ops, …) are skipped, but any record that produces drawing
+/// output we do not model — text (`EXT/SMALLTEXTOUT`), blits, gradients, region
+/// fills, or any unrecognised opcode — makes the whole conversion return `None`,
+/// so the slide keeps its honest "approximate preview" placeholder rather than
+/// showing a partial image. Clipping (`SELECTCLIPPATH`) is intentionally ignored
+/// (an accepted v1 approximation: the clip paths in practice bound the drawing,
+/// so dropping them does not add visible content). All reads are bounds-checked;
+/// malformed input returns `None`, never panics.
+fn emf_vector_svg(b: &[u8]) -> Option<String> {
+    // EMR_HEADER (iType 1) with the " EMF" signature at offset 40.
+    if ru32(b, 0)? != 1 || b.get(40..44)? != b" EMF" {
+        return None;
+    }
+    // rclBounds (device units) → SVG viewBox.
+    let (bl, bt) = (ri32(b, 8)? as f64, ri32(b, 12)? as f64);
+    let (br, bb) = (ri32(b, 16)? as f64, ri32(b, 20)? as f64);
+    let (vw, vh) = (br - bl, bb - bt);
+    if vw <= 0.0 || vh <= 0.0 || vw > 100_000.0 || vh > 100_000.0 {
+        return None;
+    }
+
+    let mut st = EmfCtx::new();
+    let mut off = 0usize;
+    let mut records = 0u32;
+    while off + 8 <= b.len() {
+        let typ = ru32(b, off)?;
+        let size = ru32(b, off + 4)? as usize;
+        if size < 8 || !size.is_multiple_of(4) || off.checked_add(size)? > b.len() {
+            return None; // malformed → honest drop
+        }
+        records += 1;
+        if records > 500_000 {
+            return None;
+        }
+        if !st.handle(typ, &b[off..off + size]) {
+            return None; // unmodelled drawing output → honest drop
+        }
+        if typ == 14 {
+            break; // EMR_EOF
+        }
+        off += size;
+    }
+    if st.body.is_empty() {
+        return None; // nothing drawable — let the caller drop it
+    }
+    Some(format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{} {} {} {}" width="{}" height="{}">{}</svg>"#,
+        fnum(bl),
+        fnum(bt),
+        fnum(vw),
+        fnum(vh),
+        fnum(vw),
+        fnum(vh),
+        st.body
+    ))
+}
+
+/// Mutable graphics state for [`emf_vector_svg`].
+struct EmfCtx {
+    win_org: (f64, f64),
+    win_ext: (f64, f64),
+    vp_org: (f64, f64),
+    vp_ext: (f64, f64),
+    map_mode: u32,
+    objects: std::collections::HashMap<u32, EmfObj>,
+    pen: Option<(u8, u8, u8)>,
+    pen_w: f64,
+    brush: Option<(u8, u8, u8)>,
+    evenodd: bool,
+    in_path: bool,
+    d: String,
+    cur: (f64, f64),
+    body: String,
+}
+
+impl EmfCtx {
+    fn new() -> Self {
+        // GDI defaults: MM_TEXT, black pen, white brush, ALTERNATE fill mode.
+        EmfCtx {
+            win_org: (0.0, 0.0),
+            win_ext: (1.0, 1.0),
+            vp_org: (0.0, 0.0),
+            vp_ext: (1.0, 1.0),
+            map_mode: 1,
+            objects: std::collections::HashMap::new(),
+            pen: Some((0, 0, 0)),
+            pen_w: 0.0,
+            brush: Some((255, 255, 255)),
+            evenodd: true,
+            in_path: false,
+            d: String::new(),
+            cur: (0.0, 0.0),
+        body: String::new(),
+        }
+    }
+
+    /// The window→viewport scale (logical → device). Honored for the explicit
+    /// map modes MM_ISOTROPIC (7) / MM_ANISOTROPIC (8); every other mode
+    /// (MM_TEXT and the fixed metric modes) maps 1 logical unit → 1 device unit.
+    fn scale(&self) -> (f64, f64) {
+        match self.map_mode {
+            7 | 8 => (
+                if self.win_ext.0 != 0.0 { self.vp_ext.0 / self.win_ext.0 } else { 1.0 },
+                if self.win_ext.1 != 0.0 { self.vp_ext.1 / self.win_ext.1 } else { 1.0 },
+            ),
+            _ => (1.0, 1.0),
+        }
+    }
+
+    fn dev(&self, x: f64, y: f64) -> (f64, f64) {
+        let (sx, sy) = self.scale();
+        ((x - self.win_org.0) * sx + self.vp_org.0, (y - self.win_org.1) * sy + self.vp_org.1)
+    }
+
+    /// Emit `<path>` for the accumulated `frag`, honoring the current fill/stroke.
+    fn draw_frag(&mut self, frag: &str, fill: bool, stroke: bool) {
+        let d = frag.trim();
+        if d.is_empty() {
+            return;
+        }
+        let fill_attr = match (fill, self.brush) {
+            (true, Some((r, g, b))) => format!(r##"fill="#{r:02x}{g:02x}{b:02x}""##),
+            _ => "fill=\"none\"".to_string(),
+        };
+        let rule = if fill && self.evenodd { " fill-rule=\"evenodd\"" } else { "" };
+        let stroke_attr = match (stroke, self.pen) {
+            (true, Some((r, g, b))) => {
+                let (sx, sy) = self.scale();
+                let avg = ((sx.abs() + sy.abs()) / 2.0).max(1e-6);
+                let w = if self.pen_w <= 0.0 { 0.75 } else { (self.pen_w * avg).max(0.3) };
+                format!(r##"stroke="#{r:02x}{g:02x}{b:02x}" stroke-width="{}""##, fnum(w))
+            }
+            _ => "stroke=\"none\"".to_string(),
+        };
+        if fill_attr.ends_with("none\"") && stroke_attr.ends_with("none\"") {
+            return; // fully invisible
+        }
+        self.body.push_str(&format!(r#"<path d="{d}" {fill_attr}{rule} {stroke_attr}/>"#));
+    }
+
+    /// Read a `count`-prefixed point array (`POINTL`/`POINTS`) and route it into
+    /// the current path or a direct draw, per `kind`.
+    fn poly(&mut self, r: &[u8], kind: PolyKind, sixteen: bool) -> bool {
+        let count = match ru32(r, 24) {
+            Some(c) => c as usize,
+            None => return false,
+        };
+        if count > 200_000 {
+            return false;
+        }
+        let stride = if sixteen { 4 } else { 8 };
+        let mut pts = Vec::with_capacity(count);
+        for i in 0..count {
+            let o = 28 + i * stride;
+            let p = if sixteen {
+                match (ri16(r, o), ri16(r, o + 2)) {
+                    (Some(x), Some(y)) => (x as i32, y as i32),
+                    _ => return false,
+                }
+            } else {
+                match (ri32(r, o), ri32(r, o + 4)) {
+                    (Some(x), Some(y)) => (x, y),
+                    _ => return false,
+                }
+            };
+            pts.push(p);
+        }
+        self.emit_poly(&pts, kind);
+        true
+    }
+
+    fn emit_poly(&mut self, pts: &[(i32, i32)], kind: PolyKind) {
+        if pts.is_empty() {
+            return;
+        }
+        let dev: Vec<(f64, f64)> = pts.iter().map(|p| self.dev(p.0 as f64, p.1 as f64)).collect();
+        let starts_new =
+            matches!(kind, PolyKind::Line | PolyKind::Polygon | PolyKind::Bezier);
+        let mut frag = String::new();
+        if starts_new {
+            frag.push_str(&format!("M{} {} ", fnum(dev[0].0), fnum(dev[0].1)));
+        } else if !self.in_path {
+            // A "…To" variant drawn directly starts from the current point.
+            frag.push_str(&format!("M{} {} ", fnum(self.cur.0), fnum(self.cur.1)));
+        }
+        let rest = if starts_new { &dev[1..] } else { &dev[..] };
+        match kind {
+            PolyKind::Line | PolyKind::LineTo | PolyKind::Polygon => {
+                for &(x, y) in rest {
+                    frag.push_str(&format!("L{} {} ", fnum(x), fnum(y)));
+                }
+            }
+            PolyKind::Bezier | PolyKind::BezierTo => {
+                for g in rest.chunks_exact(3) {
+                    frag.push_str(&format!(
+                        "C{} {} {} {} {} {} ",
+                        fnum(g[0].0),
+                        fnum(g[0].1),
+                        fnum(g[1].0),
+                        fnum(g[1].1),
+                        fnum(g[2].0),
+                        fnum(g[2].1),
+                    ));
+                }
+            }
+        }
+        if kind == PolyKind::Polygon {
+            frag.push_str("Z ");
+        }
+        if let Some(&last) = dev.last() {
+            self.cur = last;
+        }
+        if self.in_path {
+            self.d.push_str(&frag);
+        } else if kind == PolyKind::Polygon {
+            self.draw_frag(&frag, true, true);
+        } else {
+            self.draw_frag(&frag, false, true);
+        }
+    }
+
+    /// `EMR_POLYPOLYLINE[16]` / `EMR_POLYPOLYGON[16]`: several sub-paths.
+    fn polypoly(&mut self, r: &[u8], sixteen: bool, polygon: bool) -> bool {
+        let npolys = match ru32(r, 24) {
+            Some(n) => n as usize,
+            None => return false,
+        };
+        if npolys == 0 || npolys > 100_000 {
+            return false;
+        }
+        let mut counts = Vec::with_capacity(npolys);
+        for i in 0..npolys {
+            match ru32(r, 32 + i * 4) {
+                Some(c) => counts.push(c as usize),
+                None => return false,
+            }
+        }
+        let stride = if sixteen { 4 } else { 8 };
+        let mut pts_off = 32 + npolys * 4;
+        let mut frag = String::new();
+        for c in counts {
+            if c == 0 || c > 100_000 {
+                return false;
+            }
+            for i in 0..c {
+                let o = pts_off + i * stride;
+                let (x, y) = if sixteen {
+                    match (ri16(r, o), ri16(r, o + 2)) {
+                        (Some(x), Some(y)) => (x as i32, y as i32),
+                        _ => return false,
+                    }
+                } else {
+                    match (ri32(r, o), ri32(r, o + 4)) {
+                        (Some(x), Some(y)) => (x, y),
+                        _ => return false,
+                    }
+                };
+                let (dx, dy) = self.dev(x as f64, y as f64);
+                frag.push_str(&format!("{}{} {} ", if i == 0 { 'M' } else { 'L' }, fnum(dx), fnum(dy)));
+                self.cur = (dx, dy);
+            }
+            if polygon {
+                frag.push_str("Z ");
+            }
+            pts_off += c * stride;
+        }
+        if self.in_path {
+            self.d.push_str(&frag);
+        } else {
+            self.draw_frag(&frag, polygon, true);
+        }
+        true
+    }
+
+    fn select_object(&mut self, r: &[u8]) -> bool {
+        let Some(h) = ru32(r, 8) else { return false };
+        if h & 0x8000_0000 != 0 {
+            // Stock object.
+            match h {
+                0x8000_0000 => self.brush = Some((255, 255, 255)), // WHITE_BRUSH
+                0x8000_0001 => self.brush = Some((192, 192, 192)), // LTGRAY_BRUSH
+                0x8000_0002 => self.brush = Some((128, 128, 128)), // GRAY_BRUSH
+                0x8000_0003 => self.brush = Some((64, 64, 64)),    // DKGRAY_BRUSH
+                0x8000_0004 => self.brush = Some((0, 0, 0)),       // BLACK_BRUSH
+                0x8000_0005 => self.brush = None,                  // NULL_BRUSH
+                0x8000_0006 => self.pen = Some((255, 255, 255)),   // WHITE_PEN
+                0x8000_0007 => self.pen = Some((0, 0, 0)),         // BLACK_PEN
+                0x8000_0008 => self.pen = None,                    // NULL_PEN
+                _ => {}                                            // fonts/palette: no effect
+            }
+            return true;
+        }
+        match self.objects.get(&h) {
+            Some(EmfObj::Brush(c)) => self.brush = *c,
+            Some(EmfObj::Pen(c, w)) => {
+                self.pen = *c;
+                self.pen_w = *w;
+            }
+            None => {} // selecting an undefined handle: ignore
+        }
+        true
+    }
+
+    fn handle(&mut self, typ: u32, r: &[u8]) -> bool {
+        match typ {
+            1 | 14 => true, // HEADER (already validated) / EOF
+            // window / viewport mapping
+            9 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    self.win_ext = (x as f64, y as f64);
+                    true
+                }
+                _ => false,
+            },
+            10 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    self.win_org = (x as f64, y as f64);
+                    true
+                }
+                _ => false,
+            },
+            11 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    self.vp_ext = (x as f64, y as f64);
+                    true
+                }
+                _ => false,
+            },
+            12 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    self.vp_org = (x as f64, y as f64);
+                    true
+                }
+                _ => false,
+            },
+            17 => match ru32(r, 8) {
+                Some(m) => {
+                    self.map_mode = m;
+                    true
+                }
+                None => false,
+            },
+            19 => match ru32(r, 8) {
+                // SETPOLYFILLMODE: 1 = ALTERNATE (evenodd), 2 = WINDING (nonzero)
+                Some(m) => {
+                    self.evenodd = m == 1;
+                    true
+                }
+                None => false,
+            },
+            // path construction
+            59 => {
+                self.d.clear();
+                self.in_path = true;
+                true
+            }
+            60 => {
+                self.in_path = false;
+                true
+            }
+            61 => {
+                self.d.push_str("Z ");
+                true
+            }
+            27 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    let d = self.dev(x as f64, y as f64);
+                    self.cur = d;
+                    if self.in_path {
+                        self.d.push_str(&format!("M{} {} ", fnum(d.0), fnum(d.1)));
+                    }
+                    true
+                }
+                _ => false,
+            },
+            54 => match (ri32(r, 8), ri32(r, 12)) {
+                (Some(x), Some(y)) => {
+                    let d = self.dev(x as f64, y as f64);
+                    if self.in_path {
+                        self.d.push_str(&format!("L{} {} ", fnum(d.0), fnum(d.1)));
+                    } else {
+                        let frag = format!(
+                            "M{} {} L{} {} ",
+                            fnum(self.cur.0),
+                            fnum(self.cur.1),
+                            fnum(d.0),
+                            fnum(d.1)
+                        );
+                        self.draw_frag(&frag, false, true);
+                    }
+                    self.cur = d;
+                    true
+                }
+                _ => false,
+            },
+            2 => self.poly(r, PolyKind::Bezier, false),
+            3 => self.poly(r, PolyKind::Polygon, false),
+            4 => self.poly(r, PolyKind::Line, false),
+            5 => self.poly(r, PolyKind::BezierTo, false),
+            6 => self.poly(r, PolyKind::LineTo, false),
+            85 => self.poly(r, PolyKind::Bezier, true),
+            86 => self.poly(r, PolyKind::Polygon, true),
+            87 => self.poly(r, PolyKind::Line, true),
+            88 => self.poly(r, PolyKind::BezierTo, true),
+            89 => self.poly(r, PolyKind::LineTo, true),
+            7 => self.polypoly(r, false, false),
+            8 => self.polypoly(r, false, true),
+            90 => self.polypoly(r, true, false),
+            91 => self.polypoly(r, true, true),
+            // painting
+            62 => {
+                let d = std::mem::take(&mut self.d);
+                self.draw_frag(&d, true, false);
+                true
+            }
+            63 => {
+                let d = std::mem::take(&mut self.d);
+                self.draw_frag(&d, true, true);
+                true
+            }
+            64 => {
+                let d = std::mem::take(&mut self.d);
+                self.draw_frag(&d, false, true);
+                true
+            }
+            67 | 68 => {
+                // SELECTCLIPPATH (clip ignored) / ABORTPATH: consume the path.
+                self.d.clear();
+                self.in_path = false;
+                true
+            }
+            // object table
+            37 => self.select_object(r),
+            38 => match (ru32(r, 8), ru32(r, 12), ri32(r, 16), ru32(r, 24)) {
+                // CREATEPEN: PS_NULL (5) → no stroke; else solid.
+                (Some(h), Some(style), Some(wx), Some(color)) => {
+                    let c = if style & 0xf == 5 { None } else { Some(colorref(color)) };
+                    self.objects.insert(h, EmfObj::Pen(c, (wx as f64).max(0.0)));
+                    true
+                }
+                _ => false,
+            },
+            94 => match (ru32(r, 8), ru32(r, 28), ru32(r, 32), ru32(r, 36), ru32(r, 40)) {
+                // EXTCREATEPEN: PS_NULL or a NULL brush → no stroke; else solid.
+                (Some(h), Some(style), Some(wx), Some(bstyle), Some(color)) => {
+                    let c = if style & 0xf == 5 || bstyle == 1 {
+                        None
+                    } else {
+                        Some(colorref(color))
+                    };
+                    self.objects.insert(h, EmfObj::Pen(c, wx as f64));
+                    true
+                }
+                _ => false,
+            },
+            39 => match (ru32(r, 8), ru32(r, 12), ru32(r, 16)) {
+                // CREATEBRUSHINDIRECT: BS_NULL (1) → no fill; else solid.
+                (Some(h), Some(style), Some(color)) => {
+                    let c = if style == 1 { None } else { Some(colorref(color)) };
+                    self.objects.insert(h, EmfObj::Brush(c));
+                    true
+                }
+                _ => false,
+            },
+            40 => match ru32(r, 8) {
+                Some(h) => {
+                    if h & 0x8000_0000 == 0 {
+                        self.objects.remove(&h);
+                    }
+                    true
+                }
+                None => false,
+            },
+            // Harmless state records — safe to ignore for a vector rendering:
+            // SETBRUSHORGEX, SETMAPPERFLAGS, SETBKMODE, SETROP2,
+            // SETSTRETCHBLTMODE, SETTEXTALIGN, SETTEXTCOLOR, SETBKCOLOR,
+            // SAVEDC, RESTOREDC, SETMITERLIMIT, FLATTENPATH, WIDENPATH,
+            // COMMENT, EXTSELECTCLIPRGN (clip ignored), EXTCREATEFONTINDIRECTW.
+            13 | 16 | 18 | 20 | 21 | 22 | 24 | 25 | 33 | 34 | 58 | 65 | 66 | 70 | 75 | 82 => true,
+            // Anything else may be drawing output we do not model → drop honestly.
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        emf_embedded_bitmap, mime_from_ext, parse_src_rect, raster_to_png, svg_blip_embed,
-        svg_is_safe, wmf_embedded_bitmap,
+        colorref, decode_uncompressed_tiff, emf_embedded_bitmap, emf_vector_svg, mime_from_ext,
+        parse_src_rect, raster_to_png, svg_blip_embed, svg_is_safe, wmf_embedded_bitmap,
     };
     use roxmltree::Document;
 
@@ -909,5 +1637,410 @@ mod tests {
         ));
         assert!(!svg_is_safe(br#"<svg><foreignObject/></svg>"#));
         assert!(!svg_is_safe(b"not svg at all"));
+    }
+
+    // --- TIFF decoder -------------------------------------------------------
+
+    /// Assemble a baseline TIFF from strips and IFD tags. Width/length (256/257)
+    /// and StripOffsets/StripByteCounts (273/279) are injected automatically;
+    /// `le` picks the byte order. Out-of-line arrays are appended after the IFD.
+    fn build_tiff(
+        le: bool,
+        width: u32,
+        height: u32,
+        strips: &[Vec<u8>],
+        mut tags: Vec<(u16, u16, Vec<u32>)>,
+    ) -> Vec<u8> {
+        let u16b = move |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        let u32b = move |v: u32| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        let tsize = |t: u16| -> usize {
+            match t {
+                1 | 2 => 1,
+                3 => 2,
+                4 => 4,
+                _ => panic!("unsupported field type"),
+            }
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(if le { b"II" } else { b"MM" });
+        out.extend_from_slice(&u16b(42));
+        out.extend_from_slice(&[0u8; 4]); // IFD offset — patched below.
+        let mut soff = Vec::new();
+        let mut scnt = Vec::new();
+        for s in strips {
+            soff.push(out.len() as u32);
+            scnt.push(s.len() as u32);
+            out.extend_from_slice(s);
+        }
+        tags.push((256, 3, vec![width]));
+        tags.push((257, 3, vec![height]));
+        tags.push((273, 4, soff));
+        tags.push((279, 4, scnt));
+        tags.sort_by_key(|t| t.0);
+        let ifd_off = out.len() as u32;
+        out[4..8].copy_from_slice(&u32b(ifd_off));
+        let ifd_size = 2 + 12 * tags.len() + 4;
+        let extras_start = ifd_off as usize + ifd_size;
+        let mut ifd = Vec::new();
+        let mut extras = Vec::new();
+        ifd.extend_from_slice(&u16b(tags.len() as u16));
+        for (tag, typ, vals) in &tags {
+            ifd.extend_from_slice(&u16b(*tag));
+            ifd.extend_from_slice(&u16b(*typ));
+            ifd.extend_from_slice(&u32b(vals.len() as u32));
+            let total = tsize(*typ) * vals.len();
+            let encode = |dst: &mut Vec<u8>, v: u32| match tsize(*typ) {
+                1 => dst.push(v as u8),
+                2 => dst.extend_from_slice(&u16b(v as u16)),
+                _ => dst.extend_from_slice(&u32b(v)),
+            };
+            if total <= 4 {
+                let mut field = Vec::new();
+                for v in vals {
+                    encode(&mut field, *v);
+                }
+                field.resize(4, 0);
+                ifd.extend_from_slice(&field);
+            } else {
+                ifd.extend_from_slice(&u32b((extras_start + extras.len()) as u32));
+                for v in vals {
+                    encode(&mut extras, *v);
+                }
+            }
+        }
+        ifd.extend_from_slice(&u32b(0)); // next IFD
+        out.extend_from_slice(&ifd);
+        out.extend_from_slice(&extras);
+        out
+    }
+
+    /// A 3-entry (red, green, blue) colormap laid out TIFF-style
+    /// (all reds, then all greens, then all blues), 16-bit per channel.
+    fn rgb_colormap() -> Vec<u32> {
+        vec![65535, 0, 0, /* R */ 0, 65535, 0, /* G */ 0, 0, 65535 /* B */]
+    }
+
+    fn decode_png(png: &[u8]) -> image::RgbaImage {
+        image::load_from_memory(png).expect("png decodes").to_rgba8()
+    }
+
+    #[test]
+    fn palette_tiff_round_trips_both_endian() {
+        // 2×2 palette image, indices [0,1 / 2,0] → red, green / blue, red.
+        for le in [true, false] {
+            let tiff = build_tiff(
+                le,
+                2,
+                2,
+                &[vec![0, 1, 2, 0]],
+                vec![
+                    (258, 3, vec![8]),          // BitsPerSample
+                    (259, 3, vec![1]),          // Compression = none
+                    (262, 3, vec![3]),          // Photometric = palette
+                    (277, 3, vec![1]),          // SamplesPerPixel
+                    (278, 3, vec![2]),          // RowsPerStrip
+                    (320, 3, rgb_colormap()),   // ColorMap
+                ],
+            );
+            let png = decode_uncompressed_tiff(&tiff).expect("palette decodes");
+            let img = decode_png(&png);
+            assert_eq!(img.dimensions(), (2, 2), "le={le}");
+            assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255], "le={le}");
+            assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255], "le={le}");
+            assert_eq!(img.get_pixel(0, 1).0, [0, 0, 255, 255], "le={le}");
+            assert_eq!(img.get_pixel(1, 1).0, [255, 0, 0, 255], "le={le}");
+        }
+    }
+
+    #[test]
+    fn palette_tiff_4bit() {
+        // 3×1 4-bit palette: two indices per byte, row padded to a whole byte.
+        // Pixels 0,1,2 → 0x01, 0x2_ → red, green, blue.
+        let tiff = build_tiff(
+            true,
+            3,
+            1,
+            &[vec![0x01, 0x20]],
+            vec![
+                (258, 3, vec![4]),
+                (259, 3, vec![1]),
+                (262, 3, vec![3]),
+                (277, 3, vec![1]),
+                (320, 3, rgb_colormap()),
+            ],
+        );
+        let img = decode_png(&decode_uncompressed_tiff(&tiff).expect("4-bit palette decodes"));
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
+        assert_eq!(img.get_pixel(2, 0).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn rgba_tiff_preserves_alpha() {
+        // 2×1 RGBA, second sample-set half transparent.
+        let strip = vec![10, 20, 30, 255, 40, 50, 60, 128];
+        let tiff = build_tiff(
+            false,
+            2,
+            1,
+            &[strip],
+            vec![
+                (258, 3, vec![8, 8, 8, 8]),
+                (259, 3, vec![1]),
+                (262, 3, vec![2]),   // RGB
+                (277, 3, vec![4]),   // 4 samples
+                (338, 3, vec![2]),   // ExtraSamples = unassociated alpha
+            ],
+        );
+        let img = decode_png(&decode_uncompressed_tiff(&tiff).expect("rgba decodes"));
+        assert_eq!(img.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [40, 50, 60, 128]);
+    }
+
+    #[test]
+    fn multi_strip_rgb_tiff() {
+        // 1×2 RGB split across two single-row strips.
+        let tiff = build_tiff(
+            true,
+            1,
+            2,
+            &[vec![1, 2, 3], vec![4, 5, 6]],
+            vec![
+                (258, 3, vec![8, 8, 8]),
+                (259, 3, vec![1]),
+                (262, 3, vec![2]),
+                (277, 3, vec![3]),
+                (278, 3, vec![1]), // RowsPerStrip = 1 → two strips
+            ],
+        );
+        let img = decode_png(&decode_uncompressed_tiff(&tiff).expect("multi-strip decodes"));
+        assert_eq!(img.get_pixel(0, 0).0, [1, 2, 3, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn palette_index_out_of_range_is_clamped() {
+        // 8-bit index 5 against a 2-entry colormap (black, red): clamps to the
+        // last entry (red) rather than reading out of bounds.
+        let tiff = build_tiff(
+            true,
+            1,
+            1,
+            &[vec![5]],
+            vec![
+                (258, 3, vec![8]),
+                (259, 3, vec![1]),
+                (262, 3, vec![3]),
+                (277, 3, vec![1]),
+                (320, 3, vec![0, 65535, 0, 0, 0, 0]), // R=[0,65535] G=[0,0] B=[0,0]
+            ],
+        );
+        let img = decode_png(&decode_uncompressed_tiff(&tiff).expect("clamped decode"));
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn compressed_tiff_is_rejected() {
+        // The FALLBACK decoder only handles Compression = 1; anything else
+        // (here: a claimed LZW, 5) must yield None. Compressed TIFFs that are
+        // actually well-formed are the primary decoder's (`raster_to_png`) job —
+        // this guards the fallback against decoding data it can't interpret.
+        let tiff = build_tiff(
+            true,
+            1,
+            1,
+            &[vec![0]],
+            vec![
+                (258, 3, vec![8]),
+                (259, 3, vec![5]), // LZW
+                (262, 3, vec![3]),
+                (277, 3, vec![1]),
+                (320, 3, rgb_colormap()),
+            ],
+        );
+        assert!(decode_uncompressed_tiff(&tiff).is_none());
+    }
+
+    #[test]
+    fn truncated_tiff_never_panics() {
+        let tiff = build_tiff(
+            true,
+            2,
+            2,
+            &[vec![0, 1, 2, 0]],
+            vec![
+                (258, 3, vec![8]),
+                (259, 3, vec![1]),
+                (262, 3, vec![3]),
+                (277, 3, vec![1]),
+                (320, 3, rgb_colormap()),
+            ],
+        );
+        for n in 0..tiff.len() {
+            let _ = decode_uncompressed_tiff(&tiff[..n]);
+            let _ = raster_to_png(&tiff[..n]); // primary decoder must not panic either
+        }
+        // Hostile inputs.
+        assert!(decode_uncompressed_tiff(b"II*\0\xff\xff\xff\xff").is_none());
+        assert!(decode_uncompressed_tiff(b"").is_none());
+    }
+
+    // --- EMF vector interpreter --------------------------------------------
+
+    fn emf_header(w: i32, h: i32) -> Vec<u8> {
+        let mut hdr = vec![0u8; 88];
+        hdr[0..4].copy_from_slice(&1u32.to_le_bytes()); // EMR_HEADER
+        hdr[4..8].copy_from_slice(&88u32.to_le_bytes());
+        hdr[16..20].copy_from_slice(&w.to_le_bytes()); // rclBounds.right
+        hdr[20..24].copy_from_slice(&h.to_le_bytes()); // rclBounds.bottom
+        hdr[40..44].copy_from_slice(b" EMF");
+        hdr
+    }
+
+    fn emf_eof() -> Vec<u8> {
+        let mut e = vec![0u8; 20];
+        e[0..4].copy_from_slice(&14u32.to_le_bytes());
+        e[4..8].copy_from_slice(&20u32.to_le_bytes());
+        e
+    }
+
+    /// A single EMR record: iType + size + payload (size padded to 4 bytes).
+    fn emr(typ: u32, payload: &[u8]) -> Vec<u8> {
+        let size = 8 + payload.len();
+        assert_eq!(size % 4, 0, "record size must be 4-aligned");
+        let mut r = Vec::with_capacity(size);
+        r.extend_from_slice(&typ.to_le_bytes());
+        r.extend_from_slice(&(size as u32).to_le_bytes());
+        r.extend_from_slice(payload);
+        r
+    }
+
+    fn u32s(vals: &[u32]) -> Vec<u8> {
+        vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// A poly16 payload: 16-byte rclBounds, u32 point count, then i16 pairs.
+    fn poly16(points: &[(i16, i16)]) -> Vec<u8> {
+        let mut p = vec![0u8; 16];
+        p.extend_from_slice(&(points.len() as u32).to_le_bytes());
+        for (x, y) in points {
+            p.extend_from_slice(&x.to_le_bytes());
+            p.extend_from_slice(&y.to_le_bytes());
+        }
+        while !p.len().is_multiple_of(4) {
+            p.push(0);
+        }
+        p
+    }
+
+    fn brush(ih: u32, color: u32) -> Vec<u8> {
+        emr(39, &u32s(&[ih, 0 /* BS_SOLID */, color, 0]))
+    }
+
+    #[test]
+    fn emf_filled_polygon16_direct() {
+        // Green triangle drawn directly (outside a path) via POLYGON16.
+        let mut emf = emf_header(100, 100);
+        emf.extend(brush(1, 0x0000_ff00)); // COLORREF 0x00bbggrr → (0,255,0)
+        emf.extend(emr(37, &u32s(&[1]))); // SELECTOBJECT ih=1
+        emf.extend(emr(86, &poly16(&[(10, 10), (90, 10), (50, 90)])));
+        emf.extend(emf_eof());
+        let svg = emf_vector_svg(&emf).expect("vector svg");
+        assert!(svg.contains(r#"viewBox="0 0 100 100""#), "{svg}");
+        assert!(svg.contains("M10 10 L90 10 L50 90 Z"), "{svg}");
+        assert!(svg.contains(r##"fill="#00ff00""##), "{svg}");
+    }
+
+    #[test]
+    fn emf_fillpath_with_winding_rule() {
+        // Path + FILLPATH, WINDING fill mode → no evenodd fill-rule.
+        let mut emf = emf_header(100, 100);
+        emf.extend(brush(1, 0x0000_00ff)); // (255,0,0)
+        emf.extend(emr(37, &u32s(&[1])));
+        emf.extend(emr(19, &u32s(&[2]))); // SETPOLYFILLMODE WINDING
+        emf.extend(emr(59, &[])); // BEGINPATH
+        emf.extend(emr(27, &u32s(&[10, 10]))); // MOVETOEX
+        emf.extend(emr(89, &poly16(&[(90, 10), (50, 90)]))); // POLYLINETO16
+        emf.extend(emr(61, &[])); // CLOSEFIGURE
+        emf.extend(emr(60, &[])); // ENDPATH
+        emf.extend(emr(62, &[0u8; 16])); // FILLPATH (rclBounds)
+        emf.extend(emf_eof());
+        let svg = emf_vector_svg(&emf).expect("vector svg");
+        assert!(svg.contains("M10 10 L90 10 L50 90 Z"), "{svg}");
+        assert!(svg.contains(r##"fill="#ff0000""##), "{svg}");
+        assert!(!svg.contains("evenodd"), "winding must not emit evenodd: {svg}");
+    }
+
+    #[test]
+    fn emf_polybezier_path() {
+        let mut emf = emf_header(100, 100);
+        emf.extend(brush(1, 0x0000_0000));
+        emf.extend(emr(37, &u32s(&[1])));
+        emf.extend(emr(59, &[]));
+        emf.extend(emr(27, &u32s(&[0, 0]))); // MOVETOEX 0,0
+        emf.extend(emr(88, &poly16(&[(10, 0), (20, 10), (30, 30)]))); // POLYBEZIERTO16
+        emf.extend(emr(60, &[]));
+        emf.extend(emr(62, &[0u8; 16]));
+        emf.extend(emf_eof());
+        let svg = emf_vector_svg(&emf).expect("vector svg");
+        assert!(svg.contains("C10 0 20 10 30 30"), "{svg}");
+    }
+
+    #[test]
+    fn emf_null_brush_strokes_only() {
+        // Solid blue pen + stock NULL_BRUSH → stroke only, no fill.
+        let mut emf = emf_header(100, 100);
+        // CREATEPEN ih=1, PS_SOLID, width 2, color (0,0,255).
+        emf.extend(emr(38, &u32s(&[1, 0, 2, 0, 0x00ff_0000])));
+        emf.extend(emr(37, &u32s(&[1]))); // select pen
+        emf.extend(emr(37, &u32s(&[0x8000_0005]))); // select NULL_BRUSH
+        emf.extend(emr(86, &poly16(&[(10, 10), (90, 10), (50, 90)])));
+        emf.extend(emf_eof());
+        let svg = emf_vector_svg(&emf).expect("vector svg");
+        assert!(svg.contains(r#"fill="none""#), "{svg}");
+        assert!(svg.contains(r##"stroke="#0000ff""##), "{svg}");
+        assert!(svg.contains(r#"stroke-width="2""#), "{svg}");
+    }
+
+    #[test]
+    fn emf_unknown_drawing_record_drops() {
+        // A fill followed by an EXTTEXTOUTW (text output we do not model): the
+        // whole conversion must return None so the slide keeps its placeholder,
+        // rather than silently omitting the text.
+        let mut emf = emf_header(100, 100);
+        emf.extend(brush(1, 0x0000_ff00));
+        emf.extend(emr(37, &u32s(&[1])));
+        emf.extend(emr(86, &poly16(&[(0, 0), (10, 0), (5, 10)])));
+        emf.extend(emr(84, &[0u8; 32])); // EMR_EXTTEXTOUTW
+        emf.extend(emf_eof());
+        assert!(emf_vector_svg(&emf).is_none());
+    }
+
+    #[test]
+    fn emf_vector_svg_truncation_never_panics() {
+        let mut emf = emf_header(100, 100);
+        emf.extend(brush(1, 0x0000_ff00));
+        emf.extend(emr(37, &u32s(&[1])));
+        emf.extend(emr(86, &poly16(&[(10, 10), (90, 10), (50, 90)])));
+        emf.extend(emf_eof());
+        for n in 0..emf.len() {
+            let _ = emf_vector_svg(&emf[..n]);
+        }
+        assert!(emf_vector_svg(b"not an emf").is_none());
+    }
+
+    #[test]
+    fn emf_without_drawing_yields_none() {
+        // Header + a harmless comment + EOF: nothing drawable → None.
+        let mut emf = emf_header(50, 50);
+        emf.extend(emr(70, &[0u8; 8])); // EMR_COMMENT
+        emf.extend(emf_eof());
+        assert!(emf_vector_svg(&emf).is_none());
+    }
+
+    #[test]
+    fn colorref_channel_order() {
+        // 0x00bbggrr → (r, g, b).
+        assert_eq!(colorref(0x0011_2233), (0x33, 0x22, 0x11));
     }
 }
