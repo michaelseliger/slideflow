@@ -534,15 +534,15 @@ fn sanitize_component(s: &str) -> String {
     cleaned.trim().to_string()
 }
 
-/// The shared file stem (no extension) for one slide's drag-out `.pptx` + `.png`.
-/// A readable head (`<deck stem> — slide N`) plus the content-addressed
-/// [`cache_key`] tail, so a matching pair on disk is always fresh and an edited
-/// source deck self-invalidates.
-fn dragout_file_stem(pptx_path: &str, slide_index: usize, mtime_secs: u64) -> String {
+/// The pristine, user-visible file name for one slide's drag-out `.pptx` —
+/// exactly what lands wherever the user drops it, so no cache tail here. The
+/// content-addressing lives in the [`cache_key`]-named *subdirectory* the file
+/// sits in, keeping the dropped name clean while staleness still
+/// self-invalidates (an edited deck yields a new subdir).
+fn dragout_pptx_name(pptx_path: &str, slide_index: usize) -> String {
     let head = sanitize_component(&deck_stem(pptx_path));
     let head: String = head.chars().take(DRAGOUT_MAX_STEM).collect();
-    let key = cache_key(pptx_path, slide_index, mtime_secs);
-    format!("{head} — slide {slide_index} — {key}")
+    format!("{head} — slide {slide_index}.pptx")
 }
 
 /// The source deck's mtime in whole seconds since the Unix epoch, or 0 if it
@@ -564,24 +564,28 @@ fn is_nonempty(p: &Path) -> bool {
 
 /// Prepare the scratch files for dragging one slide out of the app as a native
 /// file: a single-slide `.pptx` (full formatting, via the composer) and a small
-/// PNG drag icon, both under `app_cache/dragout`. Returns their paths for the
-/// frontend to hand to the native drag plugin.
+/// PNG drag icon. They live in a [`cache_key`]-named subdirectory of
+/// `app_cache/dragout` — the subdir carries the content-addressing, so the
+/// `.pptx` itself keeps the pristine `<deck stem> — slide N.pptx` name the user
+/// sees wherever they drop it. Returns both paths for the frontend to hand to
+/// the native drag plugin.
 ///
-/// Cheap to call repeatedly: the files are cache-addressed on
+/// Cheap to call repeatedly: the subdir is keyed on
 /// `(deck path, slide, deck mtime)`, so a matching pair already on disk is
 /// reused untouched (a second drag of the same slide is instant) and an edited
-/// deck self-invalidates. The whole `dragout` dir is wiped on app startup.
+/// deck self-invalidates into a fresh subdir. The whole `dragout` dir is wiped
+/// on app startup.
 #[tauri::command]
 pub async fn prepare_slide_drag(
     app: AppHandle,
     pick: SlidePick,
 ) -> Result<SlideDragPaths, String> {
     let SlidePick { pptx_path, slide_index } = pick;
-    let dir = app.state::<AppState>().dragout_dir.clone();
+    let key = cache_key(&pptx_path, slide_index, deck_mtime_secs(&pptx_path));
+    let dir = app.state::<AppState>().dragout_dir.join(key);
 
-    let stem = dragout_file_stem(&pptx_path, slide_index, deck_mtime_secs(&pptx_path));
-    let pptx_out = dir.join(format!("{stem}.pptx"));
-    let png_out = dir.join(format!("{stem}.png"));
+    let pptx_out = dir.join(dragout_pptx_name(&pptx_path, slide_index));
+    let png_out = dir.join("icon.png");
 
     let paths = SlideDragPaths {
         pptx: pptx_out.to_string_lossy().into_owned(),

@@ -1,10 +1,12 @@
 //! Content-addressed cache keys for the desktop "drag a slide out" scratch
 //! files (WS-G).
 //!
-//! When a slide is dragged out of the app (or saved via the context menu) the
-//! host writes two ephemeral files under `app_cache/dragout`: a single-slide
-//! `.pptx` (composed with full formatting) and a small PNG drag preview. Those
-//! are regenerated only on a cache miss.
+//! When a slide is dragged out of the app the host writes two ephemeral files
+//! into a [`cache_key`]-named subdirectory of `app_cache/dragout`: a
+//! single-slide `.pptx` (composed with full formatting, carrying the pristine
+//! user-visible name — the subdir holds the cache addressing so the file name
+//! stays clean) and a small PNG drag preview. Both are regenerated only on a
+//! cache miss.
 //!
 //! The key bakes in the source deck's modification time, so staleness
 //! self-invalidates: edit the deck and the key changes, so the previous files
@@ -30,8 +32,9 @@ fn hash16(s: &str) -> String {
 /// `deck_mtime_secs` is the source deck's modification time in whole seconds
 /// since the Unix epoch. The key varies on every input, so a changed deck (new
 /// mtime) yields a new key and the stale files simply stop matching. The host
-/// uses this as the tail of the on-disk file stem; the deck path is hashed (not
-/// embedded raw) so it stays a single safe path component.
+/// uses this as the name of the subdirectory holding the scratch files; the
+/// deck path is hashed (not embedded raw) so it stays a single safe path
+/// component.
 pub fn cache_key(deck_path: &str, slide_index: usize, deck_mtime_secs: u64) -> String {
     let ph = hash16(deck_path);
     format!("{ph}-{slide_index}-m{deck_mtime_secs}")
