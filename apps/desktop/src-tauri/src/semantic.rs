@@ -264,6 +264,13 @@ pub async fn delete_embedding_model(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Detach the embedder from both library connections WITHOUT blocking the
+/// caller. The interactive connection is detached inline (never held long, so
+/// semantic/hybrid queries degrade to lexical immediately). The scan connection
+/// may be held for a whole run by a backfill — the caller has already set
+/// `backfill_cancel`, so rather than block the Settings toggle on that run, we
+/// grab the scan connection if it's free, else hand off to a short-lived thread
+/// that waits for the (now-canceling) backfill to release it and detaches then.
 fn detach_embedder(app: &AppHandle) {
     let state = app.state::<AppState>();
     let semantic = app.state::<SemanticState>();
@@ -271,9 +278,24 @@ fn detach_embedder(app: &AppHandle) {
     if let Ok(mut lib) = state.library.lock() {
         lib.set_embedder(None);
     }
-    if let Ok(mut lib) = state.scan_library.lock() {
+    // Grab the scan connection if it's free; the temporary lock result is scoped
+    // to this `let` so it never outlives `state`.
+    let detached_inline = if let Ok(mut lib) = state.scan_library.try_lock() {
         lib.set_embedder(None);
+        true
+    } else {
+        // Busy (a backfill/scan holds it) or poisoned — don't wait here.
+        false
     };
+    if !detached_inline {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let state = app.state::<AppState>();
+            if let Ok(mut lib) = state.scan_library.lock() {
+                lib.set_embedder(None);
+            };
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +438,32 @@ fn final_file_ok(dir: &Path, file: &ModelFile) -> bool {
         .unwrap_or(false)
 }
 
+/// What to do with a finished `.part` after a download attempt ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartVerdict {
+    /// Full pinned size and hash matches → rename into place.
+    Complete,
+    /// Shorter than the pin — a valid prefix from an interrupted transfer. KEEP it
+    /// (a Range resume continues from here); never delete.
+    Resumable,
+    /// Full size but the sha256 disagrees → genuine corruption/tampering; delete
+    /// and restart from zero.
+    Corrupt,
+}
+
+/// Decide a `.part`'s fate purely from its on-disk size vs. the pinned size and
+/// whether its hash matched. Split out from [`download_one`] so the "short read
+/// keeps, size-match-bad-hash deletes" rule is unit-testable without the network.
+fn classify_part(on_disk: u64, expected_size: u64, hash_matches: bool) -> PartVerdict {
+    if on_disk < expected_size {
+        PartVerdict::Resumable
+    } else if hash_matches {
+        PartVerdict::Complete
+    } else {
+        PartVerdict::Corrupt
+    }
+}
+
 /// Stream one file to `<name>.part` (resuming via HTTP Range when a partial
 /// exists), verify its sha256 against the pin, then atomically rename it into
 /// place. Returns `Ok(false)` on cancel.
@@ -497,15 +545,37 @@ fn download_one(
         out.flush().map_err(|e| e.to_string())?;
     }
 
-    // Verify against the pinned hash; a mismatch (corrupt/truncated/tampered)
-    // deletes the partial so the next attempt starts clean.
-    let actual = sha256_of_file(&part_path).map_err(|e| format!("{}: {e}", file.name))?;
-    if actual != file.sha256 {
-        let _ = fs::remove_file(&part_path);
-        return Err(format!(
-            "{}: checksum mismatch (expected {}, got {actual})",
-            file.name, file.sha256
-        ));
+    // Classify the finished `.part` before touching it. A stream can end cleanly
+    // (server closed the connection mid-transfer) with FEWER bytes than the pin —
+    // that's a valid prefix, not corruption. Deleting it would throw away up to
+    // ~470 MB of resume progress; instead keep it and return a retryable error so
+    // the next attempt continues via HTTP Range. Only a full-size file whose
+    // sha256 disagrees is genuine corruption worth deleting.
+    let on_disk = part_path.metadata().map(|m| m.len()).unwrap_or(0);
+    // Hashing a short prefix is pointless (it can never match the pin), so only
+    // compute the digest once the file has reached the pinned size.
+    let actual = if on_disk >= file.size {
+        Some(sha256_of_file(&part_path).map_err(|e| format!("{}: {e}", file.name))?)
+    } else {
+        None
+    };
+    match classify_part(on_disk, file.size, actual.as_deref() == Some(file.sha256)) {
+        PartVerdict::Resumable => {
+            return Err(format!(
+                "{}: download interrupted at {on_disk}/{} bytes — resume by retrying",
+                file.name, file.size
+            ));
+        }
+        PartVerdict::Corrupt => {
+            let _ = fs::remove_file(&part_path);
+            return Err(format!(
+                "{}: checksum mismatch (expected {}, got {})",
+                file.name,
+                file.sha256,
+                actual.as_deref().unwrap_or("(short read)")
+            ));
+        }
+        PartVerdict::Complete => {}
     }
     let final_path = semantic.model_dir.join(file.name);
     fs::rename(&part_path, &final_path).map_err(|e| format!("{}: {e}", file.name))?;
@@ -628,15 +698,26 @@ fn run_backfill(app: &AppHandle, semantic: &SemanticState) -> Result<(), String>
     let total = pending.len();
     emit_embed(app, &EmbedEvent::Started { total });
     let mut done = 0usize;
+    // Hold onto a chunk error instead of `?`-returning it: the cleanup + cache
+    // invalidation tail below MUST still run so the chunks that DID embed become
+    // visible (an early return left earlier successful work invisible).
+    let mut embed_error: Option<String> = None;
     for chunk in pending.chunks(32) {
         if semantic.backfill_cancel.load(Ordering::SeqCst) {
             break;
         }
-        lib.embed_and_store(chunk).map_err(|e| e.to_string())?;
+        // Cancelable at batch granularity so the scan connection is released
+        // promptly when the user disables the model mid-run.
+        if let Err(err) = lib.embed_and_store_canceled(chunk, &semantic.backfill_cancel) {
+            embed_error = Some(err.to_string());
+            break;
+        }
         done += chunk.len();
         emit_embed(app, &EmbedEvent::Progress { done, total });
     }
 
+    // ALWAYS run the tail — on success, cancel, OR error — so orphan cleanup and
+    // both connections' cache invalidations happen and the embedded chunks show up.
     let _ = lib.cleanup_orphan_embeddings();
     lib.invalidate_vector_cache();
     drop(lib);
@@ -644,12 +725,39 @@ fn run_backfill(app: &AppHandle, semantic: &SemanticState) -> Result<(), String>
     if let Ok(interactive) = state.library.lock() {
         interactive.invalidate_vector_cache();
     }
-    Ok(())
+
+    match embed_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::pref_enabled_from_str;
+    use super::{classify_part, pref_enabled_from_str, PartVerdict};
+
+    #[test]
+    fn short_part_is_resumable_and_kept() {
+        // A clean-EOF truncation (fewer bytes than the pin) must be preserved for
+        // a Range resume — never deleted, whatever a hash of the prefix says.
+        assert_eq!(classify_part(100, 470, false), PartVerdict::Resumable);
+        assert_eq!(classify_part(0, 470, false), PartVerdict::Resumable);
+        // Hash is irrelevant while short (we don't even compute it).
+        assert_eq!(classify_part(469, 470, true), PartVerdict::Resumable);
+    }
+
+    #[test]
+    fn full_size_bad_hash_is_corrupt() {
+        // Right size but wrong bytes → genuine corruption; caller deletes.
+        assert_eq!(classify_part(470, 470, false), PartVerdict::Corrupt);
+        // Over-long (can never match the pin) is corrupt too.
+        assert_eq!(classify_part(600, 470, false), PartVerdict::Corrupt);
+    }
+
+    #[test]
+    fn full_size_good_hash_is_complete() {
+        assert_eq!(classify_part(470, 470, true), PartVerdict::Complete);
+    }
 
     #[test]
     fn missing_pref_defaults_disabled() {

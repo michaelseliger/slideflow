@@ -32,6 +32,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
@@ -663,7 +664,7 @@ impl Library {
                     _ => None,
                 })
                 .collect();
-            self.embed_and_store_missing(&pairs)?;
+            self.embed_and_store_missing(&pairs, None)?;
         }
         Ok(())
     }
@@ -1324,7 +1325,11 @@ impl Library {
     /// Embed and store any `(text_hash, embed_text)` not already vectorized for
     /// the active model. Dedupes within the batch, filters against existing rows,
     /// embeds in batches of [`EMBED_BATCH`]. Returns the number of new vectors.
-    fn embed_and_store_missing(&mut self, pairs: &[(String, String)]) -> Result<usize> {
+    fn embed_and_store_missing(
+        &mut self,
+        pairs: &[(String, String)],
+        cancel: Option<&AtomicBool>,
+    ) -> Result<usize> {
         let Some(embedder) = self.embedder.clone() else {
             return Ok(0);
         };
@@ -1352,6 +1357,11 @@ impl Library {
 
         let mut written = 0usize;
         for chunk in todo.chunks(EMBED_BATCH) {
+            // Poll cancellation between model batches so a disable/delete toggle
+            // stops a long backfill within one batch instead of one whole run.
+            if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                break;
+            }
             let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
             let vectors = embedder.embed_passages(&texts)?;
             let tx = self.conn.transaction()?;
@@ -1439,7 +1449,19 @@ impl Library {
     /// skips already-stored texts). Used by the desktop backfill loop. Returns the
     /// number of new vectors written.
     pub fn embed_and_store(&mut self, pairs: &[(String, String)]) -> Result<usize> {
-        self.embed_and_store_missing(pairs)
+        self.embed_and_store_missing(pairs, None)
+    }
+
+    /// Like [`embed_and_store`] but polls `cancel` between internal model batches
+    /// so the desktop backfill stops promptly (within one batch) when the user
+    /// disables/deletes the model — instead of holding the scan connection for a
+    /// whole run. A cancel mid-way still commits the batches that completed.
+    pub fn embed_and_store_canceled(
+        &mut self,
+        pairs: &[(String, String)],
+        cancel: &AtomicBool,
+    ) -> Result<usize> {
+        self.embed_and_store_missing(pairs, Some(cancel))
     }
 
     /// Remove embeddings whose text no longer appears in any slide.
