@@ -315,12 +315,43 @@ pub async fn get_similar_slides(
 
 /// Duplicate slide clusters: exact (identical content hash) always; near
 /// (embedding-similar) additionally when the model is loaded (roadmap #9).
+///
+/// The expensive phase — the first vector-store load and the O(n²) near-dup
+/// clustering — must NOT run while the interactive library mutex is held, or it
+/// freezes every other command. So: snapshot the store + exact groups under a
+/// short lock, release, cluster in `spawn_blocking`, then re-lock briefly only to
+/// hydrate rows. Memoization is preserved (a warm cache skips the blocking phase).
 #[tauri::command]
-pub async fn list_duplicate_groups(
-    state: State<'_, AppState>,
-) -> Result<Vec<DuplicateGroup>, String> {
+pub async fn list_duplicate_groups(app: AppHandle) -> Result<Vec<DuplicateGroup>, String> {
+    let state = app.state::<AppState>();
+
+    // Phase 1 — short lock: load the vectors (a DB read) and take a cheap `Arc`
+    // snapshot alongside the exact groups and any memoized near clusters.
+    let (store, exact, cached_near) = {
+        let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
+        let store = lib.ensure_vectors_loaded().map_err(e)?;
+        let exact = lib.exact_dup_groups().map_err(e)?;
+        let cached_near = lib.cached_near_clusters();
+        (store, exact, cached_near)
+    };
+
+    // Phase 2 — no lock held: the O(n²) clustering, off the mutex AND off the
+    // async runtime. Skipped entirely when already memoized or no model is loaded.
+    let near_raw = match cached_near {
+        Some(clusters) => clusters,
+        None => match store.clone() {
+            Some(store) => tauri::async_runtime::spawn_blocking(move || {
+                slideflow_core::index::near_dup_clusters_for(&store)
+            })
+            .await
+            .map_err(e)?,
+            None => Vec::new(),
+        },
+    };
+
+    // Phase 3 — short re-lock: memoize the fresh clusters + hydrate rows.
     let lib = state.library.lock().map_err(|_| "library lock poisoned")?;
-    lib.list_duplicate_groups().map_err(e)
+    lib.finish_duplicate_groups(exact, near_raw, store.as_ref()).map_err(e)
 }
 
 // ---------------------------------------------------------------------------

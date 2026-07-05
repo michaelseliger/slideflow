@@ -60,6 +60,15 @@ use query::{max_opt, min_opt, parse_query, ParsedQuery};
 /// Near-duplicate cosine threshold and per-slide neighbor fan-out (roadmap #9).
 const NEAR_DUP_THRESHOLD: f32 = 0.92;
 const NEAR_DUP_TOP_N: usize = 10;
+
+/// Raw near-duplicate clusters (O(n²)) for a vector-store snapshot, using the
+/// library's tuned threshold + fan-out. Pure compute on the snapshot — no DB, no
+/// `Library` — so the desktop host runs it in `spawn_blocking` off the
+/// interactive mutex. The result is the *raw* clustering (before redundant-with-
+/// exact filtering); feed it to [`Library::finish_duplicate_groups`].
+pub fn near_dup_clusters_for(store: &VectorStore) -> Vec<Vec<i64>> {
+    store.near_dup_clusters(NEAR_DUP_THRESHOLD, NEAR_DUP_TOP_N)
+}
 /// Pool size taken from each retrieval arm before reciprocal-rank fusion.
 const HYBRID_POOL: usize = 200;
 /// Embedding batch size fed to the model at once.
@@ -171,8 +180,11 @@ pub struct Library {
     embedder: Option<Arc<dyn Embedder>>,
     /// Lazily-loaded in-memory vectors for the active model. `None` = not yet
     /// loaded (or invalidated by a scan/backfill); interior-mutable so read-only
-    /// (`&self`) search paths can populate it on first use.
-    vectors: RefCell<Option<VectorStore>>,
+    /// (`&self`) search paths can populate it on first use. Held behind an `Arc`
+    /// so the (expensive, O(n²)) duplicate-clustering can snapshot the store under
+    /// a short lock and run off the interactive mutex (see `ensure_vectors_loaded`
+    /// / `finish_duplicate_groups`).
+    vectors: RefCell<Option<Arc<VectorStore>>>,
     /// Memoized near-duplicate clusters (slide-id groups), invalidated whenever
     /// the library changes. Recomputing is O(n²), so the Duplicates view reuses it.
     near_clusters: RefCell<Option<Vec<Vec<i64>>>>,
@@ -1034,8 +1046,24 @@ impl Library {
                 Ok((id, th, blob_to_vec(&blob)))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        *self.vectors.borrow_mut() = Some(VectorStore::new(model_id, dims, rows));
+        *self.vectors.borrow_mut() = Some(Arc::new(VectorStore::new(model_id, dims, rows)));
         Ok(())
+    }
+
+    /// Ensure the vector store is loaded and hand back a cheap `Arc` snapshot of
+    /// it (`None` when no model is attached). Callers that must run heavy vector
+    /// work off the interactive mutex take this snapshot under a short lock,
+    /// release, and compute on the clone.
+    pub fn ensure_vectors_loaded(&self) -> Result<Option<Arc<VectorStore>>> {
+        self.ensure_vectors()?;
+        Ok(self.vectors.borrow().clone())
+    }
+
+    /// The memoized raw near-duplicate clusters, if they've been computed since
+    /// the last cache invalidation. `None` means "not computed yet" — the caller
+    /// must (re)cluster (see [`near_dup_clusters_for`]).
+    pub fn cached_near_clusters(&self) -> Option<Vec<Vec<i64>>> {
+        self.near_clusters.borrow().clone()
     }
 
     /// Cosine-top-`cap` slide ids (+scores) for `query`, post-filtered to the
@@ -1160,8 +1188,54 @@ impl Library {
     /// (embedding-similar, when a model is attached). Near groups redundant with
     /// an exact group (all members share one content hash) are omitted.
     pub fn list_duplicate_groups(&self) -> Result<Vec<DuplicateGroup>> {
+        // Single-threaded convenience path (tests / CLI): load, cluster, hydrate
+        // inline. The desktop host instead drives these pieces itself so the
+        // O(n²) clustering runs off the interactive mutex (see commands.rs).
+        let store = self.ensure_vectors_loaded()?;
         let exact = self.exact_dup_groups()?;
-        let near = self.near_dup_groups()?;
+        let near_raw = match self.cached_near_clusters() {
+            Some(clusters) => clusters,
+            None => match &store {
+                Some(store) => near_dup_clusters_for(store),
+                None => Vec::new(),
+            },
+        };
+        self.finish_duplicate_groups(exact, near_raw, store.as_ref())
+    }
+
+    /// Turn raw exact + near cluster id-lists into the hydrated [`DuplicateGroup`]
+    /// payload: memoize the freshly-computed near clusters (only while the vector
+    /// snapshot they came from is still live), drop near groups already covered by
+    /// an exact group, fetch rows, and score near-group cohesion from `store`.
+    ///
+    /// `near_raw` is the *raw* clustering output (pre content-hash filtering), as
+    /// produced by [`near_dup_clusters_for`]; `store` is the snapshot those
+    /// clusters were computed from (used for cohesion and the memo-freshness check).
+    pub fn finish_duplicate_groups(
+        &self,
+        exact: Vec<Vec<i64>>,
+        near_raw: Vec<Vec<i64>>,
+        store: Option<&Arc<VectorStore>>,
+    ) -> Result<Vec<DuplicateGroup>> {
+        // Memoize the raw clusters for the next call — but only if the store they
+        // were built from is still the live one. A concurrent scan/backfill may
+        // have invalidated (or reloaded) the vectors while we clustered off-lock;
+        // caching stale clusters would then outlive their slides.
+        if let Some(store) = store {
+            let live = self.vectors.borrow();
+            if live.as_ref().is_some_and(|v| Arc::ptr_eq(v, store)) {
+                *self.near_clusters.borrow_mut() = Some(near_raw.clone());
+            }
+        }
+
+        // Drop near clusters whose members all share one content hash — those are
+        // already surfaced as an exact group.
+        let mut near: Vec<Vec<i64>> = Vec::new();
+        for g in near_raw {
+            if !self.all_same_content_hash(&g)? {
+                near.push(g);
+            }
+        }
 
         let mut all_ids: Vec<i64> = Vec::new();
         for g in exact.iter().chain(near.iter()) {
@@ -1189,23 +1263,20 @@ impl Library {
                 out.push(DuplicateGroup { kind: "exact".into(), score: None, slides });
             }
         }
-        if !near.is_empty() {
-            let guard = self.vectors.borrow();
-            for g in &near {
-                let slides = build(g);
-                if slides.len() < 2 {
-                    continue;
-                }
-                let score = guard.as_ref().and_then(|s| s.group_cohesion(g));
-                out.push(DuplicateGroup { kind: "near".into(), score, slides });
+        for g in &near {
+            let slides = build(g);
+            if slides.len() < 2 {
+                continue;
             }
+            let score = store.and_then(|s| s.group_cohesion(g));
+            out.push(DuplicateGroup { kind: "near".into(), score, slides });
         }
         Ok(out)
     }
 
     /// Exact-duplicate slide-id groups (identical `content_hash`, count > 1),
     /// largest first.
-    fn exact_dup_groups(&self) -> Result<Vec<Vec<i64>>> {
+    pub fn exact_dup_groups(&self) -> Result<Vec<Vec<i64>>> {
         let mut stmt = self.conn.prepare(
             "SELECT content_hash, s.id FROM slides s \
              WHERE content_hash IN \
@@ -1227,35 +1298,6 @@ impl Library {
         }
         groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
         Ok(groups)
-    }
-
-    /// Near-duplicate slide-id groups (memoized until the library changes). Empty
-    /// without a model. Groups whose members all share one content hash are
-    /// dropped as redundant with the exact groups.
-    fn near_dup_groups(&self) -> Result<Vec<Vec<i64>>> {
-        if self.embedder.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_vectors()?;
-        let need = self.near_clusters.borrow().is_none();
-        if need {
-            let clusters = {
-                let guard = self.vectors.borrow();
-                match guard.as_ref() {
-                    Some(store) => store.near_dup_clusters(NEAR_DUP_THRESHOLD, NEAR_DUP_TOP_N),
-                    None => Vec::new(),
-                }
-            };
-            *self.near_clusters.borrow_mut() = Some(clusters);
-        }
-        let clusters = self.near_clusters.borrow().clone().unwrap_or_default();
-        let mut out = Vec::new();
-        for g in clusters {
-            if !self.all_same_content_hash(&g)? {
-                out.push(g);
-            }
-        }
-        Ok(out)
     }
 
     /// Whether every slide id in `ids` shares one non-null content hash (→ already
