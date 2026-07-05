@@ -47,6 +47,14 @@
 //! - `p:ph sz` (placeholder size enum) — the reason `sz` matching is element-scoped.
 //! - line-end `a:headEnd`/`a:tailEnd` w/len — enum sizes, not measurements.
 //! - chart/diagram/embedded-part internals — separate parts, copied verbatim.
+//! - the presentation-level `p:defaultTextStyle` — it is shared output-wide and
+//!   sourced from the FIRST deck, so it cannot be scaled per-deck. Text that
+//!   resolves its size *only* from defaultTextStyle (no sz on the run,
+//!   paragraph, shape lstStyle, or a placeholder chain) may render at its
+//!   original point size in scaled slides. Master `txStyles` ARE scaled (via
+//!   the `lvlXpPr`/`defRPr` rules above), which covers PowerPoint's normal
+//!   non-placeholder (otherStyle) resolution; LibreOffice has been observed
+//!   resolving such text via defaultTextStyle instead and rendering it unscaled.
 //! - any value that fails to parse as an `i64` is left exactly as found.
 //!
 //! Documented v1 exclusions (measurements we could scale but currently do not):
