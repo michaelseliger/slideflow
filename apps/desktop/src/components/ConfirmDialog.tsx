@@ -9,7 +9,13 @@ export default function ConfirmDialog() {
   const confirm = useApp((s) => s.confirm);
   const reduce = prefersReducedMotion();
 
-  const cancel = () => useApp.getState().dismissConfirm();
+  // Declining (cancel button, backdrop, Escape) also fires the config's
+  // onCancel hook, so consent flows can actively revert state on "no".
+  const cancel = () => {
+    const cfg = useApp.getState().confirm;
+    useApp.getState().dismissConfirm();
+    void cfg?.onCancel?.();
+  };
   const run = async () => {
     const cfg = useApp.getState().confirm;
     useApp.getState().dismissConfirm();

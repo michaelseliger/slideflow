@@ -600,6 +600,12 @@ fn spawn_backfill(app: &AppHandle) -> bool {
 /// (2) embed every distinct text still missing a vector, in chunks, honoring
 /// the cancel flag, (3) clean up orphans and invalidate BOTH connections'
 /// in-memory vector caches.
+///
+/// NB: this holds the `scan_library` mutex for the WHOLE run, so a concurrent
+/// scan (`start_scan`) queues behind a long backfill (a first-time index of a
+/// large library on CPU can take minutes). That is the intended two-connection
+/// trade-off — searches on the interactive connection stay responsive — but it
+/// is why the backfill is cancelable and chunked.
 fn run_backfill(app: &AppHandle, semantic: &SemanticState) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut lib = state

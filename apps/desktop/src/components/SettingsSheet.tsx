@@ -288,6 +288,10 @@ function SemanticSection() {
         "Slideflow will download the multilingual-e5-small model (a one-time download of about 490 MB) from huggingface.co. After that, semantic search and indexing run entirely on this Mac — your slides never leave it.",
       confirmLabel: "Download model",
       onConfirm: () => void useSemantic.getState().download(),
+      // Consent semantics: "no" means OFF. Declining (cancel/backdrop/Escape)
+      // reverts the just-flipped toggle instead of leaving the feature enabled
+      // but undownloaded.
+      onCancel: () => void useSemantic.getState().setEnabled(false),
     });
 
   const onToggle = async () => {
@@ -297,9 +301,9 @@ function SemanticSection() {
       return;
     }
     await sem.setEnabled(true);
-    // Enabling without the model on disk → ask before pulling ~490 MB. If the
-    // user declines, the feature stays enabled-but-inactive (searches remain
-    // exact) and the Download button below stays available.
+    // Enabling without the model on disk → ask before pulling ~490 MB. The
+    // consent dialog's onCancel reverts the toggle, so a declined consent
+    // leaves the feature exactly as it was: off.
     if (useSemantic.getState().status?.state === "not_downloaded") {
       confirmDownload();
     }

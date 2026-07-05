@@ -49,6 +49,10 @@ export interface ConfirmConfig {
   cancelLabel?: string;
   destructive?: boolean;
   onConfirm: () => void | Promise<void>;
+  /** Invoked when the user DECLINES (cancel button, backdrop, or Escape) —
+   *  for consent flows where "no" must actively revert state (e.g. turning the
+   *  semantic-search toggle back off). Never called on confirm. */
+  onCancel?: () => void | Promise<void>;
 }
 
 const THEME_KEY = "slideflow.theme";
