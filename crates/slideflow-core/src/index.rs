@@ -584,10 +584,13 @@ impl Library {
                 Ok(hits) => Ok(hits),
                 Err(_) => self.search_plain(query, &eff, limit),
             },
-            // No positive text term (empty, date-only, or purely negative):
-            // browse when there is truly nothing to match, otherwise degrade to
-            // the old plain-token behavior over whatever alphanumeric words remain.
-            None => self.search_plain(query, &eff, limit),
+            // No positive text term (empty, date-only, or purely negative): fall
+            // back on the RESIDUAL — only the tokens the parser could not
+            // classify — never the raw input. Tokenizing the raw input here would
+            // text-search consumed tokens (e.g. a date-only query's digits) and
+            // wrongly return zero hits; with the residual, date-only and
+            // purely-negative queries browse with the merged filters applied.
+            None => self.search_plain(&parsed.residual, &eff, limit),
         }
     }
 
@@ -2102,6 +2105,74 @@ mod tests {
         let filters = SearchFilters { modified_from: Some(2_000_000_000), ..Default::default() };
         let hits = lib.search("scopeword before:2020-01-01", &filters).unwrap();
         assert!(hits.is_empty(), "query before: must not loosen the popover's from-bound");
+    }
+
+    #[test]
+    fn advanced_date_only_query_browses_with_date_filter() {
+        let (_dir, lib) = field_scoped_library();
+        // 2020-01-01T00:00:00Z = 1_577_836_800. Deck A predates it; deck B follows.
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1500000000 WHERE file_name='financedeck.pptx'",
+                [],
+            )
+            .unwrap();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1900000000 WHERE file_name='roadmapdeck.pptx'",
+                [],
+            )
+            .unwrap();
+
+        // A date-only query has no text term: it must BROWSE with the date
+        // filter applied — not text-search the date's digits and return nothing.
+        let after = lib.search("after:2020-01-01", &SearchFilters::default()).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].deck.file_name, "roadmapdeck.pptx");
+
+        let before = lib.search("before:2020-01-01", &SearchFilters::default()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].deck.file_name, "financedeck.pptx");
+    }
+
+    #[test]
+    fn advanced_date_only_query_combines_with_favorites_filter() {
+        let (_dir, mut lib) = field_scoped_library();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1500000000 WHERE file_name='financedeck.pptx'",
+                [],
+            )
+            .unwrap();
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix=1900000000 WHERE file_name='roadmapdeck.pptx'",
+                [],
+            )
+            .unwrap();
+        // Star only deck A's slide (deck A predates the bound).
+        let s1 = lib.search("onlyone", &SearchFilters::default()).unwrap();
+        assert_eq!(s1.len(), 1);
+        assert!(lib.toggle_slide_favorite(s1[0].slide.id).unwrap());
+
+        let favs = SearchFilters { favorites_only: Some(true), ..Default::default() };
+        // Date bound keeps deck A, favorites keeps the starred slide → 1 hit.
+        let hits = lib.search("before:2020-01-01", &favs).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].deck.file_name, "financedeck.pptx");
+        // The other side of the bound excludes the starred slide → empty.
+        assert!(lib.search("after:2020-01-01", &favs).unwrap().is_empty());
+    }
+
+    #[test]
+    fn advanced_purely_negative_query_browses() {
+        let (_dir, lib) = field_scoped_library();
+        // A standalone negation is inexpressible in FTS5; v1 browses instead of
+        // text-searching the excluded word (which would wrongly return its hit).
+        for q in ["-onlytwo", "NOT onlytwo"] {
+            let hits = lib.search(q, &SearchFilters::default()).unwrap();
+            assert_eq!(hits.len(), 2, "purely-negative {q:?} should browse all slides");
+        }
     }
 
     #[test]

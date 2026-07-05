@@ -27,7 +27,16 @@
 //! (`%`, `;`, lone operators, unbalanced quotes, emoji, huge strings) can never
 //! produce an FTS5 syntax error. A query the parser can't turn into any positive
 //! term yields `match_expr == None`, and the caller falls back to plain
-//! whitespace tokenization (see `sanitize_query`).
+//! tokenization (see `sanitize_query`) of [`ParsedQuery::residual`] — only the
+//! tokens the parser could NOT classify, never ones it already consumed (dates,
+//! negatives, operators). Consequences, all deliberate v1 behavior:
+//!
+//! - a **date-only** query (`after:2020-01-01`) browses with the date filter
+//!   applied instead of text-searching the date's digits;
+//! - a **purely-negative** query (`-churn`, `NOT churn`) browses — a standalone
+//!   negation is inexpressible in FTS5, and v1 does not text-search the word the
+//!   user asked to exclude;
+//! - pure junk still degrades to browse, exactly as before.
 
 /// Known field prefixes → FTS column name. `deck` is the odd one out: the column
 /// is `deck_title`.
@@ -53,6 +62,11 @@ pub(crate) struct ParsedQuery {
     pub after: Option<i64>,
     /// Upper bound on `modified_unix` (from `before:`), unix seconds.
     pub before: Option<i64>,
+    /// Space-joined raw tokens the parser could NOT classify (`Token::Nothing`
+    /// junk only). When `match_expr` is `None`, the caller falls back to plain
+    /// tokenization of THIS — not the raw input — so consumed tokens (dates,
+    /// negatives) are never accidentally text-searched.
+    pub residual: String,
 }
 
 /// Combine two optional bounds keeping the larger (more restrictive lower bound).
@@ -272,6 +286,7 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
     let mut pending_not = false;
     let mut after: Option<i64> = None;
     let mut before: Option<i64> = None;
+    let mut residual: Vec<String> = Vec::new();
 
     for tok in lex(input) {
         if tok == "OR" {
@@ -304,6 +319,7 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
                 pending_not = false;
             }
             Token::Nothing => {
+                residual.push(tok);
                 pending_not = false;
             }
         }
@@ -312,7 +328,7 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
         groups.push((pos, neg));
     }
 
-    ParsedQuery { match_expr: render_query(&groups), after, before }
+    ParsedQuery { match_expr: render_query(&groups), after, before, residual: residual.join(" ") }
 }
 
 #[cfg(test)]
@@ -376,6 +392,10 @@ mod tests {
     fn purely_negative_has_no_match() {
         assert_eq!(m("-churn"), None);
         assert_eq!(m("NOT churn"), None);
+        // The consumed negative must NOT leak into the fallback residual —
+        // otherwise the excluded word would get text-searched.
+        assert_eq!(parse_query("-churn").residual, "");
+        assert_eq!(parse_query("NOT churn").residual, "");
     }
 
     #[test]
@@ -391,6 +411,20 @@ mod tests {
         let p = parse_query("after:2020-01-01");
         assert_eq!(p.match_expr, None);
         assert_eq!(p.after, Some(1_577_836_800));
+        // The consumed date must NOT leak into the fallback residual — otherwise
+        // its digits would get text-searched and return zero hits.
+        assert_eq!(p.residual, "");
+    }
+
+    #[test]
+    fn residual_keeps_only_unclassified_junk() {
+        // Junk tokens survive into the residual verbatim; classified tokens
+        // (dates, terms, operators) never do.
+        let p = parse_query("%%% after:2020-01-01 ;;;");
+        assert_eq!(p.match_expr, None);
+        assert_eq!(p.residual, "%%% ;;;");
+        assert_eq!(parse_query("revenue %%%").residual, "%%%");
+        assert_eq!(parse_query("OR NOT").residual, "");
     }
 
     #[test]
