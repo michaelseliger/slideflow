@@ -80,6 +80,11 @@ struct FontsInner {
     /// system + bundled substitutes + app faces, for the export path. Rebuilt
     /// lazily (the system-font scan is slow) and invalidated on any change.
     db: Option<Arc<fontdb::Database>>,
+    /// Monotonic font-set version, bumped on every [`FontsState::rebuild`]. Lets
+    /// [`FontsState::db`] detect a rebuild that raced its (lock-free) build and
+    /// refuse to cache a now-stale db, and lets a slow render skip caching an SVG
+    /// whose fonts changed underneath it (see `get_slide_preview`).
+    generation: u64,
 }
 
 /// Tauri-managed app-font state. Owns the fonts dir, the rebuildable render/
@@ -107,6 +112,7 @@ impl FontsState {
                 app_set: Arc::new(app_set),
                 installed,
                 db: None,
+                generation: 0,
             }),
             downloading: AtomicBool::new(false),
             download_cancel: AtomicBool::new(false),
@@ -114,40 +120,72 @@ impl FontsState {
         }
     }
 
-    /// The app fonts to inject into a render (`RenderOptions::app_fonts`).
-    pub fn app_set(&self) -> Arc<AppFontSet> {
-        self.inner.read().unwrap_or_else(|p| p.into_inner()).app_set.clone()
+    /// The app fonts to inject into a render (`RenderOptions::app_fonts`),
+    /// together with the generation they belong to — snapshotted under ONE lock so
+    /// the two can't diverge. A caller renders with these faces, then compares
+    /// [`Self::generation`] afterwards to tell whether the font set changed
+    /// underneath it (and skip caching a stale result).
+    pub fn app_set_with_generation(&self) -> (Arc<AppFontSet>, u64) {
+        let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        (inner.app_set.clone(), inner.generation)
     }
 
     /// The export font database: system fonts + bundled substitutes + app fonts.
     /// Built lazily on first use (the system scan is slow — call from a blocking
     /// thread), cached until the next font-set change invalidates it.
+    ///
+    /// The build runs lock-free (the first call includes the 100–300 ms system
+    /// scan), so a [`Self::rebuild`] can land while it runs. To avoid caching a db
+    /// that's already stale — which would serve old fonts until the *next* font
+    /// change — we snapshot the app faces AND their generation together, then cache
+    /// only if the generation still matches under the write lock. On a race, the
+    /// freshly built db (correct for the snapshot we took) is returned uncached, so
+    /// the next caller rebuilds against the new generation.
     pub fn db(&self) -> Arc<fontdb::Database> {
-        {
+        // Snapshot the app faces and the generation they belong to together, or
+        // return an already-cached db.
+        let (app_set, generation) = {
             let inner = self.inner.read().unwrap_or_else(|p| p.into_inner());
             if let Some(db) = &inner.db {
                 return db.clone();
             }
-        }
+            (inner.app_set.clone(), inner.generation)
+        };
         // Deep-clone the shared system+bundled database (its OnceLock is already
-        // warm after the first export) and add the app faces.
-        let app_set = self.app_set();
+        // warm after the first export) and add the app faces — lock-free.
         let mut db = (*system_fonts()).clone();
         app_set.register(&mut db);
         let arc = Arc::new(db);
+
         let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
-        inner.db = Some(arc.clone());
-        arc
+        if inner.generation != generation {
+            // A rebuild raced our build; `arc` is valid for the fonts we snapshotted
+            // but not the current set. Hand it to this caller uncached so the cache
+            // isn't poisoned; the next db() call rebuilds against the new generation.
+            return arc;
+        }
+        // Another thread may have cached an identical-generation db while we built —
+        // prefer the existing one so all callers share a single Arc.
+        inner.db.get_or_insert(arc).clone()
+    }
+
+    /// The current font-set generation (bumped on every [`Self::rebuild`]). A
+    /// caller that snapshots it before a slow render can tell whether the fonts
+    /// changed underneath it and skip caching a now-stale result.
+    pub fn generation(&self) -> u64 {
+        self.inner.read().unwrap_or_else(|p| p.into_inner()).generation
     }
 
     /// Re-scan the fonts dir and rebuild the render set; the export db is
-    /// invalidated so the next [`Self::db`] rebuilds it with the new faces.
+    /// invalidated and the generation bumped so the next [`Self::db`] rebuilds it
+    /// with the new faces and any racing in-flight build refuses to cache.
     fn rebuild(&self) {
         let (app_set, installed) = scan_dir(&self.dir);
         let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
         inner.app_set = Arc::new(app_set);
         inner.installed = installed;
         inner.db = None;
+        inner.generation = inner.generation.wrapping_add(1);
     }
 
     fn installed_family(&self, family: &str) -> Option<Installed> {
@@ -493,15 +531,29 @@ fn classify(
     }
 }
 
+/// Result of an add-fonts request: how many faces actually installed, the
+/// per-file errors (KEPT even when some installed, so the frontend can surface a
+/// partial failure honestly), and the refreshed family list. Mirrored
+/// field-for-field (snake_case) in `lib/types.ts`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddFontsResult {
+    pub added: u32,
+    pub errors: Vec<String>,
+    pub fonts: Vec<FontFamily>,
+}
+
 /// Copy validated `.ttf`/`.otf` files into `user/`, then rebuild + invalidate.
-/// Returns the refreshed list.
+/// Returns the real installed count, any per-file errors, and the refreshed list
+/// — never collapses a partial success into either a bare count or a hard error.
 #[tauri::command]
-pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<Vec<FontFamily>, String> {
-    let user_dir = app.state::<FontsState>().dir.join("user");
+pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<AddFontsResult, String> {
+    let fonts_dir = app.state::<FontsState>().dir.clone();
+    let user_dir = fonts_dir.join("user");
     std::fs::create_dir_all(&user_dir).map_err(|e| e.to_string())?;
 
-    let mut added = 0usize;
+    let mut added = 0u32;
     let mut errors: Vec<String> = Vec::new();
+    let mut added_families: Vec<String> = Vec::new();
     for p in paths {
         let src = PathBuf::from(&p);
         if !is_font_file(&src) {
@@ -519,6 +571,9 @@ pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<Vec<Fo
                     errors.push(format!("{p}: {e}"));
                 } else {
                     added += 1;
+                    if let Some((fam, _, _)) = face_identity(&bytes) {
+                        added_families.push(fam);
+                    }
                 }
             }
             Ok(_) => errors.push(format!("{p}: not a valid TrueType/OpenType font")),
@@ -527,13 +582,16 @@ pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<Vec<Fo
     }
 
     if added > 0 {
+        // Explicitly (re)acquiring a family clears any tombstone from an earlier
+        // removal, so a later scan may harvest it again.
+        for fam in &added_families {
+            clear_harvest_tombstone(&fonts_dir, fam);
+        }
         app.state::<FontsState>().rebuild();
         invalidate_and_notify(&app);
     }
-    if added == 0 && !errors.is_empty() {
-        return Err(errors.join("; "));
-    }
-    list_library_fonts(app).await
+    let fonts = list_library_fonts(app).await?;
+    Ok(AddFontsResult { added, errors, fonts })
 }
 
 /// Remove an app-installed family (all its files across harvested/user/
@@ -541,11 +599,23 @@ pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<Vec<Fo
 /// app-provided (a system/bundled font can't be removed here).
 #[tauri::command]
 pub async fn remove_app_font(app: AppHandle, family: String) -> Result<Vec<FontFamily>, String> {
+    let fonts_dir = app.state::<FontsState>().dir.clone();
     let Some(inst) = app.state::<FontsState>().installed_family(&family) else {
         return Err(format!("{family} is not an app-added font"));
     };
+    let harvested_dir = fonts_dir.join("harvested");
+    let mut was_harvested = false;
     for f in &inst.files {
+        if f.starts_with(&harvested_dir) {
+            was_harvested = true;
+        }
         let _ = std::fs::remove_file(f);
+    }
+    // Tombstone a removed harvested family so the next scan doesn't re-harvest it
+    // from the same deck (and re-wipe the preview cache). User/downloaded families
+    // aren't auto-re-added, so they need no tombstone.
+    if was_harvested {
+        tombstone_harvested_family(&fonts_dir, &inst.family);
     }
     app.state::<FontsState>().rebuild();
     invalidate_and_notify(&app);
@@ -597,6 +667,9 @@ pub async fn download_font(app: AppHandle, family: String) -> Result<bool, Strin
         fonts.downloading.store(false, Ordering::SeqCst);
         match result {
             Ok(true) => {
+                // Explicitly (re)acquiring a family clears any tombstone from an
+                // earlier removal, so a later scan may harvest it again.
+                clear_harvest_tombstone(&fonts.dir, &family);
                 fonts.rebuild();
                 invalidate_and_notify(&app_for_thread);
                 emit_download(&app_for_thread, &FontDownloadEvent::Done { family });
@@ -755,6 +828,58 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Harvest tombstone (families the user removed, so a rescan doesn't re-add them)
+// ---------------------------------------------------------------------------
+
+/// The tombstone file: `<fonts_dir>/harvested/.removed`, a JSON array of
+/// lowercased family names the user removed. Without it, deleting a harvested
+/// face doesn't stick — the next scan re-harvests it from the same deck (the
+/// content-addressed file is gone, so `dest.exists()` is false) and wipes the
+/// whole preview cache every time. It has no font extension, so `scan_dir` never
+/// mistakes it for a face.
+fn harvest_tombstone_path(dir: &Path) -> PathBuf {
+    dir.join("harvested").join(".removed")
+}
+
+fn read_harvest_tombstone(dir: &Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(harvest_tombstone_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.into_iter().map(|f| f.to_ascii_lowercase()).collect())
+        .unwrap_or_default()
+}
+
+fn write_harvest_tombstone(dir: &Path, families: &std::collections::HashSet<String>) {
+    let path = harvest_tombstone_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut list: Vec<&String> = families.iter().collect();
+    list.sort(); // deterministic on disk
+    if let Ok(json) = serde_json::to_string(&list) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Tombstone `family` (called when a harvested face is removed) so the next scan
+/// skips re-harvesting it.
+fn tombstone_harvested_family(dir: &Path, family: &str) {
+    let mut set = read_harvest_tombstone(dir);
+    if set.insert(family.to_ascii_lowercase()) {
+        write_harvest_tombstone(dir, &set);
+    }
+}
+
+/// Drop `family` from the tombstone (called when it's explicitly added or
+/// downloaded), so it becomes harvestable again.
+fn clear_harvest_tombstone(dir: &Path, family: &str) {
+    let mut set = read_harvest_tombstone(dir);
+    if set.remove(&family.to_ascii_lowercase()) {
+        write_harvest_tombstone(dir, &set);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harvest embedded fonts after a scan
 // ---------------------------------------------------------------------------
 
@@ -776,10 +901,17 @@ pub fn spawn_harvest_after_scan(app: &AppHandle) {
         }
         let fonts = app.state::<FontsState>();
         let harvested_dir = fonts.dir.join("harvested");
+        let tombstoned = read_harvest_tombstone(&fonts.dir);
         let mut changed = false;
         for path in paths {
             let Ok(pf) = PresentationFile::open(Path::new(&path)) else { continue };
             for f in &pf.embedded_font_set().fonts {
+                if tombstoned.contains(&f.family.to_ascii_lowercase()) {
+                    // The user removed this harvested family — don't silently
+                    // re-add it (leaving `changed` false so no cache wipe). Adding
+                    // or downloading the family clears the tombstone.
+                    continue;
+                }
                 if !is_harvestable(&f.bytes) {
                     // Preview/print-only or restricted embedding — must not be
                     // reused app-wide. Left in its own deck only.
@@ -837,5 +969,10 @@ pub fn invalidate_and_notify(app: &AppHandle) {
     let state = app.state::<AppState>();
     let _ = std::fs::remove_dir_all(&state.thumbs_dir);
     let _ = std::fs::create_dir_all(&state.thumbs_dir);
+    // Drag-out icons are keyed by deck mtime (not the font set), so a font change
+    // leaves them stale too — wipe + recreate the dir the same way (mirrors the
+    // startup wipe in lib.rs) so the next drag re-renders with the new fonts.
+    let _ = std::fs::remove_dir_all(&state.dragout_dir);
+    let _ = std::fs::create_dir_all(&state.dragout_dir);
     let _ = app.emit("fonts:changed", ());
 }

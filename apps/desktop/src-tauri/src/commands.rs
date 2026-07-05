@@ -487,7 +487,13 @@ pub async fn get_slide_preview(
         ThumbTier::Thumb => RenderOptions::thumb(),
         ThumbTier::Full => RenderOptions::preview(),
     };
-    options.app_fonts = Some(fonts.app_set());
+    // Snapshot the app faces AND the font generation together. If a font change
+    // lands while the (blocking) render runs, the SVG is already stale: we still
+    // return it for immediate display, but must NOT write it into the
+    // just-recreated thumbs dir, where it would persist as a valid
+    // content-addressed hit served with the old fonts.
+    let (app_fonts, font_generation) = fonts.app_set_with_generation();
+    options.app_fonts = Some(app_fonts);
     let idx = slide_index as usize;
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         render_slide(&pf, idx, &options).map_err(e)
@@ -501,7 +507,12 @@ pub async fn get_slide_preview(
         let _ = lib.record_render_issues(&deck_path, slide_index, &content_hash, &outcome.dropped);
     }
 
-    write_cache_atomic(&state.thumbs_dir, &cache_path, outcome.svg.as_bytes());
+    // Skip the cache write if the fonts changed under us (invalidate_and_notify
+    // wiped and recreated thumbs_dir meanwhile) — otherwise this stale SVG becomes
+    // a persistent hit. The next request re-renders with the new fonts.
+    if fonts.generation() == font_generation {
+        write_cache_atomic(&state.thumbs_dir, &cache_path, outcome.svg.as_bytes());
+    }
 
     Ok(SlidePreview {
         path: cache_path.to_string_lossy().into_owned(),
