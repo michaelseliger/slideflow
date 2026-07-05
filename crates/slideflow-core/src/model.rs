@@ -70,6 +70,8 @@ pub struct SearchFilters {
     pub modified_to: Option<i64>,
     /// Only slides the user starred.
     pub favorites_only: Option<bool>,
+    /// Only slides assigned this tag (by tag id).
+    pub tag_id: Option<i64>,
     pub limit: Option<usize>,
     /// Browse-mode sort key ("name" | "added" | "modified" | "exported").
     /// Ignored by full-text search (always bm25-ranked); drives the browse
@@ -89,6 +91,16 @@ pub struct SavedSearch {
     pub filters: SearchFilters,
     /// When it was saved (unix seconds).
     pub created_unix: i64,
+}
+
+/// A user-defined slide tag, with a live count of currently-indexed slides that
+/// carry it. Assignments are keyed by (deck path, slide index) so they survive
+/// reindexing; `slide_count` only counts slides present in the index right now.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagRecord {
+    pub id: i64,
+    pub name: String,
+    pub slide_count: i64,
 }
 
 /// A watched root folder.

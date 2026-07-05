@@ -45,7 +45,8 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result};
 use crate::model::{
     DeckRecord, ExportRecord, RenderDropStat, RootRecord, SavedSearch, ScanEvent, ScanIssue,
-    ScanRecord, SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord, StatsOverview,
+    ScanRecord, SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord,
+    StatsOverview, TagRecord,
 };
 use crate::pptx::PresentationFile;
 
@@ -141,6 +142,15 @@ const SLIDE_COLS: &str = "s.id, s.deck_id, s.slide_index, s.title, s.body_text, 
 /// bm25 weights: title > deck_title > body > notes.
 const BM25: &str = "bm25(slides_fts, 4.0, 1.0, 0.6, 2.0)";
 
+/// Correlated subquery counting the currently-indexed slides that carry tag
+/// `t.id`. The join to `decks`+`slides` drops orphaned assignments (deck removed)
+/// and rows whose slide is no longer indexed, so the count is always "live".
+/// Requires the outer query to alias the tags table as `t`.
+const TAG_SLIDE_COUNT: &str = "COALESCE((SELECT COUNT(*) FROM slide_tags stc \
+     JOIN decks dc ON dc.path = stc.deck_path \
+     JOIN slides sc ON sc.deck_id = dc.id AND sc.slide_index = stc.slide_index \
+     WHERE stc.tag_id = t.id), 0)";
+
 pub struct Library {
     conn: Connection,
 }
@@ -227,15 +237,19 @@ impl Library {
     /// Wipe all indexed content (decks, slides, FTS, and activity history) in a
     /// single transaction, keeping the configured roots — with their
     /// `exclude_globs` — and both favorites tables so stars survive and relink
-    /// on the next rescan. `last_scan_unix` is reset to NULL so the library reads
-    /// as unscanned until the follow-up scan runs. `foreign_keys` is ON (set in
-    /// `init`), so deleting `scan_history` / `export_history` cascades to their
-    /// `scan_issues` / `export_picks` children; `render_issues` has no FK and is
-    /// deleted explicitly.
+    /// on the next rescan. Tags (`tags` + `slide_tags`) are likewise untouched, so
+    /// tag assignments relink by (deck_path, slide_index) after the rescan.
+    /// `last_scan_unix` is reset to NULL so the library reads as unscanned until
+    /// the follow-up scan runs. `foreign_keys` is ON (set in `init`), so deleting
+    /// `scan_history` / `export_history` cascades to their `scan_issues` /
+    /// `export_picks` children; `render_issues` has no FK and is deleted
+    /// explicitly.
     pub fn clear(&mut self) -> Result<()> {
         let tx = self.conn.transaction()?;
         // Whole-table wipes (no params). A content-owning FTS5 table supports a
-        // plain DELETE, same as the per-row DELETEs used elsewhere.
+        // plain DELETE, same as the per-row DELETEs used elsewhere. `tags` and
+        // `slide_tags` are deliberately NOT wiped — like favorites, they relink
+        // by (deck_path, slide_index) on the next scan.
         tx.execute_batch(
             "DELETE FROM slides_fts;
              DELETE FROM slides;
@@ -983,6 +997,168 @@ impl Library {
         Ok(true)
     }
 
+    // --- tags ----------------------------------------------------------------
+    //
+    // Tags are assigned to slides by (deck_path, slide_index) — the favorites
+    // convention — so they survive rescans (which delete + reinsert slide rows)
+    // and Clear & Rebuild (which never touches `tags`/`slide_tags`). A tag's
+    // `slide_count` only counts assignments whose slide is currently in the
+    // index; the join below drops orphans (deck removed) and stale rows.
+
+    /// All tags, alphabetical, each with a live count of currently-indexed
+    /// slides that carry it.
+    pub fn list_tags(&self) -> Result<Vec<TagRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.id, t.name, {TAG_SLIDE_COUNT} FROM tags t \
+             ORDER BY t.name COLLATE NOCASE ASC"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TagRecord { id: r.get(0)?, name: r.get(1)?, slide_count: r.get(2)? })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Tags assigned to one slide (resolved by its current deck_path + index),
+    /// alphabetical. `slide_count` is each tag's global live count.
+    pub fn slide_tags(&self, slide_id: i64) -> Result<Vec<TagRecord>> {
+        let (deck_path, slide_index): (String, i64) = self.conn.query_row(
+            "SELECT d.path, s.slide_index FROM slides s JOIN decks d ON d.id = s.deck_id \
+             WHERE s.id=?1",
+            params![slide_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.id, t.name, {TAG_SLIDE_COUNT} FROM tags t \
+             JOIN slide_tags st ON st.tag_id = t.id \
+             WHERE st.deck_path = ?1 AND st.slide_index = ?2 \
+             ORDER BY t.name COLLATE NOCASE ASC"
+        ))?;
+        let rows = stmt
+            .query_map(params![deck_path, slide_index], |r| {
+                Ok(TagRecord { id: r.get(0)?, name: r.get(1)?, slide_count: r.get(2)? })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Replace the full set of tags on a slide. Names are trimmed; blanks are
+    /// ignored; matching is case-insensitive (an existing tag is reused, else a
+    /// new one is created). De-assigned tags are removed from this slide, and any
+    /// tag left with zero assignments anywhere is pruned.
+    pub fn set_slide_tags(&mut self, slide_id: i64, names: &[String]) -> Result<()> {
+        let (deck_path, slide_index): (String, i64) = self.conn.query_row(
+            "SELECT d.path, s.slide_index FROM slides s JOIN decks d ON d.id = s.deck_id \
+             WHERE s.id=?1",
+            params![slide_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        let tx = self.conn.transaction()?;
+
+        // Resolve desired tag ids, creating missing tags (case-insensitive).
+        let mut desired: Vec<i64> = Vec::new();
+        for raw in names {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let id = match existing {
+                Some(id) => id,
+                None => {
+                    tx.execute(
+                        "INSERT INTO tags(name, created_unix) VALUES(?1, ?2)",
+                        params![name, now_unix()],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+            };
+            if !desired.contains(&id) {
+                desired.push(id);
+            }
+        }
+
+        // Current assignments for this slide.
+        let current: Vec<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT tag_id FROM slide_tags WHERE deck_path=?1 AND slide_index=?2")?;
+            let ids = stmt
+                .query_map(params![deck_path, slide_index], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            ids
+        };
+
+        for id in &desired {
+            if !current.contains(id) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO slide_tags(tag_id, deck_path, slide_index) \
+                     VALUES(?1,?2,?3)",
+                    params![id, deck_path, slide_index],
+                )?;
+            }
+        }
+        for id in &current {
+            if !desired.contains(id) {
+                tx.execute(
+                    "DELETE FROM slide_tags WHERE tag_id=?1 AND deck_path=?2 AND slide_index=?3",
+                    params![id, deck_path, slide_index],
+                )?;
+            }
+        }
+
+        // Prune tags with no remaining assignments anywhere.
+        tx.execute(
+            "DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM slide_tags st WHERE st.tag_id = tags.id)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rename a tag. Errors on a case-insensitive collision with another tag —
+    /// v1 never silently merges — and on an empty name or unknown id.
+    pub fn rename_tag(&mut self, id: i64, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::InvalidInput("Tag name cannot be empty".into()));
+        }
+        let clash: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE AND id <> ?2",
+                params![name, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if clash.is_some() {
+            return Err(Error::InvalidInput(format!(
+                "A tag named “{name}” already exists"
+            )));
+        }
+        let updated = self
+            .conn
+            .execute("UPDATE tags SET name=?1 WHERE id=?2", params![name, id])?;
+        if updated == 0 {
+            return Err(Error::InvalidInput("Tag not found".into()));
+        }
+        Ok(())
+    }
+
+    /// Delete a tag and all its slide assignments (`slide_tags` cascades).
+    pub fn delete_tag(&mut self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM tags WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
     // --- activity history / stats view --------------------------------------
 
     /// Remember a search for the stats view. Refinements of the previous entry
@@ -1264,6 +1440,15 @@ fn push_filters(filters: &SearchFilters, clauses: &mut Vec<String>, params: &mut
                 .into(),
         );
     }
+    if let Some(tag_id) = filters.tag_id {
+        // Clause + param pushed together so positional binding stays correct.
+        clauses.push(
+            "EXISTS(SELECT 1 FROM slide_tags st \
+             WHERE st.tag_id = ? AND st.deck_path = d.path AND st.slide_index = s.slide_index)"
+                .into(),
+        );
+        params.push(Value::Integer(tag_id));
+    }
 }
 
 /// Extract alphanumeric/unicode word tokens, discarding FTS operators, quotes,
@@ -1349,6 +1534,22 @@ CREATE TABLE IF NOT EXISTS saved_searches(
     position     INTEGER NOT NULL DEFAULT 0,
     created_unix INTEGER NOT NULL
 );
+-- WS-E: tags. Slide tags are keyed by (deck_path, slide_index) — the favorites
+-- convention — so they survive rescans (which delete + reinsert slide rows) and
+-- Clear & Rebuild (which never touches this table). `tags.name` is UNIQUE and
+-- case-insensitive; slide_tags cascades when a tag is deleted.
+CREATE TABLE IF NOT EXISTS tags(
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS slide_tags(
+    tag_id      INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    deck_path   TEXT NOT NULL,
+    slide_index INTEGER NOT NULL,
+    PRIMARY KEY(tag_id, deck_path, slide_index)
+);
+CREATE INDEX IF NOT EXISTS idx_slide_tags_slide ON slide_tags(deck_path, slide_index);
 "#;
 
 fn content_hash(mtime: i64, size: i64) -> String {
@@ -2954,5 +3155,241 @@ mod tests {
         let o = lib.stats_overview().unwrap();
         assert_eq!(o.last_scan.as_ref().unwrap().skipped, 0);
         assert!(o.last_scan_issues.is_empty());
+    }
+
+    // --- tags ----------------------------------------------------------------
+
+    fn finance_slides(lib: &Library) -> Vec<SlideRecord> {
+        let deck = lib
+            .decks()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.file_name == "finance.pptx")
+            .unwrap();
+        lib.slides_for_deck(deck.id).unwrap()
+    }
+
+    #[test]
+    fn tags_crud_set_remove_prune() {
+        let (_dir, mut lib) = two_deck_library();
+        assert!(lib.list_tags().unwrap().is_empty());
+
+        let slides = finance_slides(&lib);
+        let s1 = slides[0].id;
+        let s2 = slides[1].id;
+
+        // Assign two tags to slide 1 (creates them). Blank names are ignored.
+        lib.set_slide_tags(s1, &["Finance".into(), "  ".into(), "KPI".into()])
+            .unwrap();
+        let tags = lib.list_tags().unwrap();
+        assert_eq!(tags.len(), 2, "blank skipped, two tags created");
+        // Alphabetical (COLLATE NOCASE): Finance, KPI.
+        assert_eq!(tags[0].name, "Finance");
+        assert_eq!(tags[0].slide_count, 1);
+        assert_eq!(lib.slide_tags(s1).unwrap().len(), 2);
+
+        // Case-insensitive reuse: "finance" on slide 2 reuses the existing tag,
+        // preserving the original casing.
+        lib.set_slide_tags(s2, &["finance".into()]).unwrap();
+        let finance = lib
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name.eq_ignore_ascii_case("finance"))
+            .unwrap();
+        assert_eq!(finance.slide_count, 2, "same tag now on two slides");
+        assert_eq!(finance.name, "Finance", "original casing kept");
+
+        // Replace slide 1's set with only Finance: KPI loses its last assignment
+        // and is pruned.
+        lib.set_slide_tags(s1, &["Finance".into()]).unwrap();
+        let names: Vec<String> = lib.list_tags().unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["Finance".to_string()], "KPI pruned");
+
+        // delete_tag removes it and cascades slide_tags.
+        let fid = lib.list_tags().unwrap()[0].id;
+        lib.delete_tag(fid).unwrap();
+        assert!(lib.list_tags().unwrap().is_empty());
+        assert!(lib.slide_tags(s1).unwrap().is_empty());
+        let st_rows: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM slide_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(st_rows, 0, "cascade removed slide_tags rows");
+    }
+
+    #[test]
+    fn rename_tag_collision_and_empty_error() {
+        let (_dir, mut lib) = two_deck_library();
+        let s1 = finance_slides(&lib)[0].id;
+        lib.set_slide_tags(s1, &["Alpha".into(), "Beta".into()]).unwrap();
+        let alpha = lib
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "Alpha")
+            .unwrap()
+            .id;
+
+        // Case-insensitive collision with "Beta" is rejected (no silent merge).
+        let err = lib.rename_tag(alpha, "beta").unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert_eq!(lib.list_tags().unwrap().len(), 2, "no merge happened");
+        assert!(lib.list_tags().unwrap().iter().any(|t| t.name == "Alpha"));
+
+        // Empty / whitespace rejected.
+        assert!(lib.rename_tag(alpha, "   ").is_err());
+
+        // A non-colliding rename works.
+        lib.rename_tag(alpha, "Alpha Prime").unwrap();
+        assert!(lib.list_tags().unwrap().iter().any(|t| t.name == "Alpha Prime"));
+    }
+
+    #[test]
+    fn tags_survive_rescan_that_modifies_deck() {
+        let (dir, mut lib) = two_deck_library();
+        let sid = finance_slides(&lib)[0].id;
+        lib.set_slide_tags(sid, &["Keeper".into()]).unwrap();
+        assert_eq!(lib.list_tags().unwrap()[0].slide_count, 1);
+
+        // Touch mtime -> content_hash changes -> deck reindexed (slides deleted +
+        // reinserted with new rowids).
+        let deck_path = dir.path().join("finance.pptx");
+        let future = UNIX_EPOCH + Duration::from_secs(now_unix() as u64 + 500);
+        OpenOptions::new().write(true).open(&deck_path).unwrap().set_modified(future).unwrap();
+        scan_silent(&mut lib);
+
+        let tags = lib.list_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "Keeper");
+        assert_eq!(tags[0].slide_count, 1, "tag lost across rescan");
+
+        // The new (different-id) slide row resolves the tag by (path, index).
+        let new_sid = finance_slides(&lib)[0].id;
+        let st = lib.slide_tags(new_sid).unwrap();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].name, "Keeper");
+    }
+
+    #[test]
+    fn tags_survive_clear_and_rescan() {
+        let (_dir, mut lib) = two_deck_library();
+        let sid = finance_slides(&lib)[0].id;
+        lib.set_slide_tags(sid, &["Persistent".into()]).unwrap();
+
+        lib.clear().unwrap();
+        // The assignment row survives clear; the live count is 0 (no slides
+        // indexed) but the tag itself is retained.
+        let tags = lib.list_tags().unwrap();
+        assert_eq!(tags.len(), 1, "tag rows survive clear");
+        assert_eq!(tags[0].slide_count, 0, "no live slides after clear");
+        let st_rows: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM slide_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(st_rows, 1, "slide_tags row survives clear");
+
+        // Rescan relinks the assignment by (deck_path, slide_index).
+        scan_silent(&mut lib);
+        let tags = lib.list_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].slide_count, 1, "tag relinked after rescan");
+    }
+
+    #[test]
+    fn tag_filter_in_search_and_browse() {
+        let (_dir, mut lib) = two_deck_library();
+        // finance slide 1 ("Q3 Results", body "Revenue up 12%") gets tagged;
+        // finance slide 2 ("Outlook", body "... office opens") does not.
+        let tagged = finance_slides(&lib)[0].id;
+        lib.set_slide_tags(tagged, &["Highlight".into()]).unwrap();
+        let tag_id = lib.list_tags().unwrap()[0].id;
+        let filters = SearchFilters { tag_id: Some(tag_id), ..Default::default() };
+
+        // Browse (empty query) with tag_id -> exactly the tagged slide.
+        let browse = lib.search("", &filters).unwrap();
+        assert_eq!(browse.len(), 1);
+        assert_eq!(browse[0].slide.id, tagged);
+
+        // Full-text search + tag_id: a query matching the tagged slide keeps it.
+        let s = lib.search("revenue", &filters).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].slide.id, tagged);
+
+        // A query whose only text match is on a NON-tagged slide is filtered out
+        // (proves the clause joins into the FTS path too).
+        assert!(
+            lib.search("office", &filters).unwrap().is_empty(),
+            "tag filter removes untagged text matches"
+        );
+        // ...but matches without the tag filter.
+        assert_eq!(lib.search("office", &SearchFilters::default()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_creates_tags_and_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+
+        // Build a genuine v1 database: baseline schema + v1 migration, user_version
+        // pinned to 1, with a deck/slide/favorite already present.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(MIGRATIONS_V1).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+
+            conn.execute("INSERT INTO roots(path) VALUES(?1)", params!["/decks/root"]).unwrap();
+            let root_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO decks(root_id, path, file_name, title, author, slide_count, \
+                 modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash, \
+                 first_seen_unix) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    root_id,
+                    "/decks/root/a.pptx",
+                    "a.pptx",
+                    "A",
+                    Option::<String>::None,
+                    1i64,
+                    1_700_000_000i64,
+                    1000i64,
+                    12_192_000i64,
+                    6_858_000i64,
+                    "hash",
+                    1_700_000_000i64,
+                ],
+            )
+            .unwrap();
+            let deck_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO slides(deck_id, slide_index, title, body_text, notes, thumb_path) \
+                 VALUES(?1,?2,?3,?4,NULL,NULL)",
+                params![deck_id, 1i64, "One", "body"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO slide_favorites(deck_path, slide_index, added_unix) VALUES(?1,?2,?3)",
+                params!["/decks/root/a.pptx", 1i64, 111i64],
+            )
+            .unwrap();
+
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, 1);
+        }
+
+        // Opening through Library runs the v1 -> v2 migration.
+        let lib = Library::open(&db_path).unwrap();
+        let version: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+
+        // Tags tables now exist and are empty.
+        for table in ["tags", "slide_tags"] {
+            let n: i64 =
+                lib.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0);
+        }
+
+        // Pre-existing data survived the migration untouched.
+        assert_eq!(lib.decks().unwrap().len(), 1);
+        let sf: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM slide_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(sf, 1);
     }
 }

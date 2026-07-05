@@ -32,6 +32,9 @@ pub enum Error {
     #[error("invalid exclude pattern: {0}")]
     InvalidGlob(String),
 
+    #[error("{0}")]
+    InvalidInput(String),
+
     #[error("compose error: {0}")]
     Compose(String),
 
