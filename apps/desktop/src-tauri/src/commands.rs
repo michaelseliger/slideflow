@@ -199,6 +199,14 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
         }
         match result {
             Err(err) => {
+                // A failed scan still deletes+reinserts deck/slide rows on the
+                // scan connection (rowids recycled), so the interactive
+                // connection's caches are just as stale as on success. Library::scan
+                // already invalidated the scan connection's own cache; refresh the
+                // interactive one too so semantic search never serves stale ids.
+                if let Ok(lib) = state.library.lock() {
+                    lib.invalidate_vector_cache();
+                }
                 let _ = app_for_thread.emit("scan:error", err.to_string());
             }
             Ok(()) => {

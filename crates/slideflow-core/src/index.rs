@@ -280,6 +280,10 @@ impl Library {
         tx.execute("DELETE FROM decks WHERE root_id=?1", params![root_id])?;
         tx.execute("DELETE FROM roots WHERE id=?1", params![root_id])?;
         tx.commit()?;
+        // Slide rows (and their rowids) are gone — the in-memory vector/near-dup
+        // caches would otherwise serve removed slides, or the wrong slide once a
+        // rowid is recycled. Drop them.
+        self.invalidate_vector_cache();
         Ok(())
     }
 
@@ -310,6 +314,11 @@ impl Library {
              UPDATE roots SET last_scan_unix = NULL;",
         )?;
         tx.commit()?;
+        // Every slide row is gone and rowids restart on the follow-up rebuild, so
+        // any lazily-loaded vector store now points at slides that no longer
+        // exist. Drop it (and the memoized near-dup clusters) so semantic search
+        // reloads from the empty/rebuilt index instead of serving stale ids.
+        self.invalidate_vector_cache();
         Ok(())
     }
 
@@ -352,7 +361,19 @@ impl Library {
 
     /// Incrementally (re)scan all roots. `progress` is called from the
     /// scanning thread; it must be cheap.
+    ///
+    /// The in-memory vector/near-dup caches are dropped on EVERY exit (success or
+    /// error): a scan deletes+reinserts deck/slide rows (recycling rowids), so a
+    /// mid-scan failure can leave a cache pointing at slides that were already
+    /// rewritten. Invalidating unconditionally keeps semantic search from serving
+    /// stale ids after a partial scan.
     pub fn scan(&mut self, progress: &mut dyn FnMut(ScanEvent)) -> Result<()> {
+        let result = self.scan_inner(progress);
+        self.invalidate_vector_cache();
+        result
+    }
+
+    fn scan_inner(&mut self, progress: &mut dyn FnMut(ScanEvent)) -> Result<()> {
         let scan_started = Instant::now();
         let started_unix = now_unix();
         // Snapshot roots up front, compiling each root's exclude globs into a
@@ -509,10 +530,10 @@ impl Library {
             [],
         );
 
-        // Drop embeddings orphaned by removed/changed slides, and force the
-        // in-memory vector + near-dup caches to reload on next use.
+        // Drop embeddings orphaned by removed/changed slides. The vector/near-dup
+        // caches are invalidated by the `scan` wrapper on every exit, so this
+        // success tail only handles the orphan cleanup.
         self.cleanup_orphan_embeddings()?;
-        self.invalidate_vector_cache();
 
         progress(ScanEvent::Finished { indexed, removed, unchanged, skipped: skipped.len() });
         Ok(())
@@ -649,6 +670,9 @@ impl Library {
         tx.execute("DELETE FROM slides WHERE deck_id=?1", params![deck_id])?;
         tx.execute("DELETE FROM decks WHERE id=?1", params![deck_id])?;
         tx.commit()?;
+        // This deck's slide rowids are freed and may be recycled by a later
+        // insert; invalidate so the vector/near-dup caches can't outlive them.
+        self.invalidate_vector_cache();
         Ok(())
     }
 
@@ -2782,6 +2806,45 @@ mod tests {
         let any = lib.decks().unwrap()[0].id;
         let s = lib.slides_for_deck(any).unwrap()[0].id;
         assert!(lib.get_similar_slides(s, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_invalidates_vector_cache() {
+        // Regression: Clear & Rebuild recycles slide rowids, so a vector store
+        // primed before the clear would resolve stale ids afterwards. clear()
+        // must drop the in-memory caches so the next semantic lookup reloads from
+        // the (now empty) index.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Shared").bullets(&["same text"]))
+            .slide(SlideSpec::new("Other").bullets(&["different alpha content"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Shared").bullets(&["same text"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.set_embedder(Some(Arc::new(FakeEmbedder::new(32))));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let a = lib.decks().unwrap().into_iter().find(|d| d.file_name == "a.pptx").unwrap();
+        let anchor = lib.slides_for_deck(a.id).unwrap()[0].id;
+        // Prime the lazily-loaded vector store.
+        assert!(
+            !lib.get_similar_slides(anchor, 10).unwrap().is_empty(),
+            "precondition: the primed store resolves the anchor's neighbors"
+        );
+
+        lib.clear().unwrap();
+
+        // A stale (non-invalidated) store would still hold the anchor's row and
+        // return neighbors; a correctly invalidated one reloads to an empty store.
+        assert!(
+            lib.get_similar_slides(anchor, 10).unwrap().is_empty(),
+            "cleared library must not serve vectors for recycled/removed slide ids"
+        );
     }
 
     #[test]
