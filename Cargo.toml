@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/slideflow-core"]
+members = ["crates/slideflow-core", "crates/slideflow-cli"]
 # apps/desktop/src-tauri is a separate workspace member added on macOS builds;
 # it is excluded here so `cargo test` in CI/Linux never needs GTK/WebKit.
 exclude = ["apps/desktop/src-tauri"]
@@ -22,6 +22,9 @@ walkdir = "2"
 globset = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# CLI argument parsing for the `slideflow` companion binary (crates/slideflow-cli).
+# Pure Rust, no system libs — keeps the CLI buildable on the same runners as core.
+clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.10"
 base64 = "0.22"

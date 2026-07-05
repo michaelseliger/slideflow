@@ -1,0 +1,20 @@
+[package]
+name = "slideflow-cli"
+description = "Command-line companion for the Slideflow engine: index, search, compose, render, stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Binary is `slideflow`; the package is `slideflow-cli` so it never collides with
+# the `slideflow-core` library crate.
+[[bin]]
+name = "slideflow"
+path = "src/main.rs"
+
+[dependencies]
+slideflow-core = { path = "../slideflow-core" }
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
