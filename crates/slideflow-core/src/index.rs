@@ -124,10 +124,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS slides_fts USING fts5(
 );
 "#;
 
-/// Columns selected for a `DeckRecord`, in field order (11 columns; requires
+/// Columns selected for a `DeckRecord`, in field order (12 columns; requires
 /// table alias `d`).
 const DECK_COLS: &str = "d.id, d.path, d.file_name, d.title, d.author, d.slide_count, \
-    d.modified_unix, d.size_bytes, d.slide_width_emu, d.slide_height_emu, \
+    d.modified_unix, d.size_bytes, d.slide_width_emu, d.slide_height_emu, d.first_seen_unix, \
     EXISTS(SELECT 1 FROM deck_favorites df WHERE df.deck_path = d.path)";
 /// Columns selected for a `SlideRecord`, in field order (8 columns; requires
 /// table aliases `s` AND `d` — the favorite flag is keyed by deck path).
@@ -158,8 +158,31 @@ impl Library {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Library { conn })
+        conn.execute_batch(SCHEMA)?; // frozen v0 baseline (IF NOT EXISTS, idempotent)
+        let mut lib = Library { conn };
+        lib.migrate()?;
+        Ok(lib)
+    }
+
+    /// Apply additive migrations up to SCHEMA_VERSION. Each migration + its
+    /// user_version bump commit in ONE tx, so a crash mid-migration rolls back
+    /// cleanly (never leaves added columns at version 0, which would re-run the
+    /// ALTER and hit duplicate-column on the next open).
+    fn migrate(&mut self) -> Result<()> {
+        let mut version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        while version < SCHEMA_VERSION {
+            let next = version + 1;
+            let tx = self.conn.transaction()?;
+            match next {
+                1 => tx.execute_batch(MIGRATIONS_V1)?,
+                _ => unreachable!("no migration for schema v{next}"),
+            }
+            // PRAGMA cannot bind params — format the (internal, trusted) integer.
+            tx.execute_batch(&format!("PRAGMA user_version = {next};"))?;
+            tx.commit()?;
+            version = next;
+        }
+        Ok(())
     }
 
     pub fn add_root(&mut self, path: &Path) -> Result<RootRecord> {
@@ -245,6 +268,7 @@ impl Library {
         let mut indexed = 0usize;
         let mut unchanged = 0usize;
         let mut removed = 0usize;
+        let mut skipped = 0usize;
 
         for (i, (root_id, path)) in candidates.into_iter().enumerate() {
             let done = i + 1;
@@ -254,6 +278,7 @@ impl Library {
             let meta = match std::fs::metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
+                    skipped += 1;
                     progress(ScanEvent::Skipped { path: path_str, reason: e.to_string() });
                     continue;
                 }
@@ -283,6 +308,7 @@ impl Library {
                     progress(ScanEvent::Deck { path: path_str, done, total });
                 }
                 Err(e) => {
+                    skipped += 1;
                     progress(ScanEvent::Skipped { path: path_str, reason: e.to_string() });
                 }
             }
@@ -308,14 +334,15 @@ impl Library {
 
         // Record the run for the stats view (best-effort).
         let _ = self.conn.execute(
-            "INSERT INTO scan_history(started_unix, duration_ms, indexed, removed, unchanged) \
-             VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO scan_history(started_unix, duration_ms, indexed, removed, unchanged, skipped) \
+             VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 started_unix,
                 scan_started.elapsed().as_millis() as i64,
                 indexed as i64,
                 removed as i64,
                 unchanged as i64,
+                skipped as i64,
             ],
         );
         let _ = self.conn.execute(
@@ -324,7 +351,7 @@ impl Library {
             [],
         );
 
-        progress(ScanEvent::Finished { indexed, removed, unchanged });
+        progress(ScanEvent::Finished { indexed, removed, unchanged, skipped });
         Ok(())
     }
 
@@ -379,8 +406,9 @@ impl Library {
             None => {
                 tx.execute(
                     "INSERT INTO decks(root_id, path, file_name, title, author, slide_count, \
-                     modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash) \
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                     modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash, \
+                     first_seen_unix) \
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                     params![
                         root_id,
                         path,
@@ -393,6 +421,7 @@ impl Library {
                         deck.width_emu,
                         deck.height_emu,
                         hash,
+                        now_unix(),
                     ],
                 )?;
                 tx.last_insert_rowid()
@@ -729,7 +758,7 @@ impl Library {
         let last_scan = self
             .conn
             .query_row(
-                "SELECT started_unix, duration_ms, indexed, removed, unchanged \
+                "SELECT started_unix, duration_ms, indexed, removed, unchanged, skipped \
                  FROM scan_history ORDER BY id DESC LIMIT 1",
                 [],
                 |r| {
@@ -739,6 +768,7 @@ impl Library {
                         indexed: r.get(2)?,
                         removed: r.get(3)?,
                         unchanged: r.get(4)?,
+                        skipped: r.get(5)?,
                     })
                 },
             )
@@ -800,6 +830,11 @@ impl Library {
             recent_searches,
             recent_exports,
             largest_decks,
+            // Empty in step0: step3 replaces last_scan_issues with a scan_issues
+            // query keyed on the newest scan_history.id; step6 replaces
+            // render_drops with a render_issues aggregation.
+            last_scan_issues: Vec::new(),
+            render_drops: Vec::new(),
         })
     }
 }
@@ -807,21 +842,23 @@ impl Library {
 const ROOT_SELECT: &str = "SELECT r.id, r.path, \
     (SELECT COUNT(*) FROM decks d WHERE d.root_id = r.id), \
     (SELECT COUNT(*) FROM slides s JOIN decks d ON d.id = s.deck_id WHERE d.root_id = r.id), \
-    r.last_scan_unix FROM roots r";
+    r.last_scan_unix, r.exclude_globs FROM roots r";
 
 fn row_to_root(r: &Row) -> rusqlite::Result<RootRecord> {
+    let raw_globs: String = r.get(5)?;
     Ok(RootRecord {
         id: r.get(0)?,
         path: r.get(1)?,
         deck_count: r.get(2)?,
         slide_count: r.get(3)?,
         last_scan_unix: r.get(4)?,
+        exclude_globs: serde_json::from_str(&raw_globs).unwrap_or_default(),
     })
 }
 
 /// Number of columns in [`SLIDE_COLS`] / [`DECK_COLS`] — keep in sync.
 const SLIDE_COL_COUNT: usize = 8;
-const DECK_COL_COUNT: usize = 11;
+const DECK_COL_COUNT: usize = 12;
 
 fn row_to_deck(r: &Row, base: usize) -> rusqlite::Result<DeckRecord> {
     Ok(DeckRecord {
@@ -835,7 +872,8 @@ fn row_to_deck(r: &Row, base: usize) -> rusqlite::Result<DeckRecord> {
         size_bytes: r.get(base + 7)?,
         slide_width_emu: r.get(base + 8)?,
         slide_height_emu: r.get(base + 9)?,
-        favorite: r.get(base + 10)?,
+        first_seen_unix: r.get(base + 10)?,
+        favorite: r.get(base + 11)?,
     })
 }
 
@@ -913,6 +951,46 @@ fn html_escape(s: &str) -> String {
 /// Bump to force a one-time reindex of every deck (e.g. when the extraction
 /// logic or FTS content changes) — a new version makes every stored hash stale.
 const INDEX_VERSION: u32 = 2;
+
+/// Highest schema version this build knows how to migrate to. `PRAGMA
+/// user_version` tracks the DB's current level; [`Library::migrate`] applies
+/// each `MIGRATIONS_V*` step in order until the DB reaches this. Distinct from
+/// INDEX_VERSION: a schema migration is not a re-parse trigger.
+const SCHEMA_VERSION: i64 = 1;
+
+/// v1 additive migration: new deck/scan/root columns and the diagnostics tables
+/// (scan_issues/render_issues/export_picks). ADD COLUMN NOT NULL all carry a
+/// DEFAULT; exclude_globs/dropped are JSON stored as TEXT. Applied exactly once
+/// per DB, so these must NEVER also appear in the frozen v0 SCHEMA const (that
+/// would make the ALTER fail with 'duplicate column name' on a fresh DB).
+const MIGRATIONS_V1: &str = r#"
+ALTER TABLE decks ADD COLUMN first_seen_unix INTEGER NOT NULL DEFAULT 0;
+UPDATE decks SET first_seen_unix = modified_unix;   -- backfill existing rows
+ALTER TABLE scan_history ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE roots ADD COLUMN exclude_globs TEXT NOT NULL DEFAULT '[]';   -- JSON array
+CREATE TABLE IF NOT EXISTS scan_issues(
+    id      INTEGER PRIMARY KEY,
+    scan_id INTEGER NOT NULL REFERENCES scan_history(id) ON DELETE CASCADE,
+    path    TEXT NOT NULL,
+    reason  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scan_issues_scan ON scan_issues(scan_id);
+CREATE TABLE IF NOT EXISTS render_issues(
+    deck_path    TEXT NOT NULL,
+    slide_index  INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    dropped      TEXT NOT NULL,   -- JSON array of dropped-construct kinds
+    updated_unix INTEGER NOT NULL,
+    PRIMARY KEY(deck_path, slide_index)
+);
+CREATE TABLE IF NOT EXISTS export_picks(
+    id          INTEGER PRIMARY KEY,
+    export_id   INTEGER NOT NULL REFERENCES export_history(id) ON DELETE CASCADE,
+    deck_path   TEXT NOT NULL,
+    slide_index INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_export_picks_deck ON export_picks(deck_path);
+"#;
 
 fn content_hash(mtime: i64, size: i64) -> String {
     let mut hasher = Sha256::new();
@@ -1097,7 +1175,7 @@ mod tests {
     use std::fs::OpenOptions;
 
     fn scan_silent(lib: &mut Library) -> ScanEvent {
-        let mut finished = ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 0 };
+        let mut finished = ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 0, skipped: 0 };
         lib.scan(&mut |e| {
             if let ScanEvent::Finished { .. } = e {
                 finished = e;
@@ -1286,11 +1364,11 @@ mod tests {
         lib.add_root(dir.path()).unwrap();
 
         let first = scan_silent(&mut lib);
-        assert!(matches!(first, ScanEvent::Finished { indexed: 2, removed: 0, unchanged: 0 }));
+        assert!(matches!(first, ScanEvent::Finished { indexed: 2, removed: 0, unchanged: 0, skipped: 0 }));
 
         // No changes: nothing reindexed.
         let second = scan_silent(&mut lib);
-        assert!(matches!(second, ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 2 }));
+        assert!(matches!(second, ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 2, skipped: 0 }));
 
         // Rewrite one file with different content (and a newer mtime).
         DeckSpec::new("A2")
@@ -1301,14 +1379,14 @@ mod tests {
         OpenOptions::new().write(true).open(&a).unwrap().set_modified(future).unwrap();
 
         let third = scan_silent(&mut lib);
-        assert!(matches!(third, ScanEvent::Finished { indexed: 1, removed: 0, unchanged: 1 }));
+        assert!(matches!(third, ScanEvent::Finished { indexed: 1, removed: 0, unchanged: 1, skipped: 0 }));
         assert!(lib.search("gamma", &SearchFilters::default()).unwrap().len() == 1);
         assert!(lib.search("alpha", &SearchFilters::default()).unwrap().is_empty());
 
         // Delete a file: its deck + slides + FTS rows vanish.
         std::fs::remove_file(&b).unwrap();
         let fourth = scan_silent(&mut lib);
-        assert!(matches!(fourth, ScanEvent::Finished { indexed: 0, removed: 1, unchanged: 1 }));
+        assert!(matches!(fourth, ScanEvent::Finished { indexed: 0, removed: 1, unchanged: 1, skipped: 0 }));
         assert_eq!(lib.stats().unwrap().0, 1);
         assert!(lib.search("beta", &SearchFilters::default()).unwrap().is_empty());
         assert!(lib.decks().unwrap().iter().all(|d| d.title != "B"));
@@ -1501,5 +1579,108 @@ mod tests {
             .expect("on_change should fire for the new .pptx");
         assert!(received.iter().any(|p| p.ends_with("watched.pptx")));
         drop(watcher);
+    }
+
+    #[test]
+    fn migration_v0_to_v1_preserves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+
+        // Build a genuine v0 database: apply only the frozen baseline schema, so
+        // PRAGMA user_version stays 0 and none of the v1 columns/tables exist.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            let v0: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v0, 0);
+
+            conn.execute("INSERT INTO roots(path) VALUES(?1)", params!["/decks/root"])
+                .unwrap();
+            let root_id = conn.last_insert_rowid();
+            let modified: i64 = 1_700_000_000;
+            conn.execute(
+                "INSERT INTO decks(root_id, path, file_name, title, author, slide_count, \
+                 modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    root_id,
+                    "/decks/root/a.pptx",
+                    "a.pptx",
+                    "A",
+                    Option::<String>::None,
+                    1i64,
+                    modified,
+                    1000i64,
+                    12_192_000i64,
+                    6_858_000i64,
+                    "hash",
+                ],
+            )
+            .unwrap();
+            let deck_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO slides(deck_id, slide_index, title, body_text, notes, thumb_path) \
+                 VALUES(?1,?2,?3,?4,NULL,NULL)",
+                params![deck_id, 1i64, "One", "body"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO slide_favorites(deck_path, slide_index, added_unix) VALUES(?1,?2,?3)",
+                params!["/decks/root/a.pptx", 1i64, 111i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO deck_favorites(deck_path, added_unix) VALUES(?1,?2)",
+                params!["/decks/root/a.pptx", 111i64],
+            )
+            .unwrap();
+        }
+
+        // Opening through Library runs the migration.
+        let lib = Library::open(&db_path).unwrap();
+
+        let version: i64 = lib.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // New columns exist (prepare succeeds even against empty tables).
+        assert!(lib.conn.prepare("SELECT first_seen_unix FROM decks").is_ok());
+        assert!(lib.conn.prepare("SELECT skipped FROM scan_history").is_ok());
+        assert!(lib.conn.prepare("SELECT exclude_globs FROM roots").is_ok());
+
+        // New tables exist.
+        for table in ["scan_issues", "render_issues", "export_picks"] {
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            let n: i64 = lib.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0);
+        }
+
+        // Favorites survived the migration.
+        let sf: i64 = lib.conn.query_row("SELECT COUNT(*) FROM slide_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(sf, 1);
+        let df: i64 = lib.conn.query_row("SELECT COUNT(*) FROM deck_favorites", [], |r| r.get(0)).unwrap();
+        assert_eq!(df, 1);
+
+        // first_seen_unix backfilled from modified_unix; exclude_globs parsed from '[]'.
+        let decks = lib.decks().unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].first_seen_unix, 1_700_000_000);
+        let roots = lib.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].exclude_globs.is_empty());
+    }
+
+    #[test]
+    fn double_open_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lib.db");
+
+        // Mirrors the desktop opening the library twice at startup: the second
+        // open must see user_version==1 and skip the ALTERs (no duplicate-column).
+        let a = Library::open(&db_path).unwrap();
+        let mut b = Library::open(&db_path).unwrap();
+
+        b.add_root(dir.path()).unwrap();
+        // The first handle sees the second's committed write over the shared file.
+        assert!(!a.roots().unwrap().is_empty());
     }
 }

@@ -20,6 +20,9 @@ export interface DeckRecord {
   /** EMU dimensions of the slide canvas. */
   slide_width_emu: number;
   slide_height_emu: number;
+  /** First time this deck was indexed (unix seconds; backfilled from
+   *  modified_unix on migration). */
+  first_seen_unix: number;
   /** User-starred deck (persisted by path, survives reindexing). */
   favorite: boolean;
 }
@@ -71,6 +74,8 @@ export interface RootRecord {
   deck_count: number;
   slide_count: number;
   last_scan_unix: number | null;
+  /** Per-root ignore globs, applied to the scan walk in step4. */
+  exclude_globs: string[];
 }
 
 /** Progress reported during a scan. Mirrors the `ScanEvent` enum
@@ -79,7 +84,7 @@ export type ScanEvent =
   | { kind: "started"; total_files: number }
   | { kind: "deck"; path: string; done: number; total: number }
   | { kind: "skipped"; path: string; reason: string }
-  | { kind: "finished"; indexed: number; removed: number; unchanged: number };
+  | { kind: "finished"; indexed: number; removed: number; unchanged: number; skipped: number };
 
 /** Auto-update lifecycle events streamed on `update:event`. Mirrors the
  *  `UpdateEvent` enum in `src-tauri/src/updates.rs`
@@ -139,6 +144,19 @@ export interface ScanRecord {
   indexed: number;
   removed: number;
   unchanged: number;
+  skipped: number;
+}
+
+/** One per-file problem recorded during a scan. Mirrors `ScanIssue`. */
+export interface ScanIssue {
+  path: string;
+  reason: string;
+}
+
+/** Slides where the renderer dropped a construct kind. Mirrors `RenderDropStat`. */
+export interface RenderDropStat {
+  kind: string;
+  slides: number;
 }
 
 /** Full stats-view payload. Mirrors `StatsOverview`. */
@@ -152,4 +170,6 @@ export interface StatsOverview {
   recent_searches: SearchHistoryEntry[];
   recent_exports: ExportRecord[];
   largest_decks: DeckRecord[];
+  last_scan_issues: ScanIssue[];
+  render_drops: RenderDropStat[];
 }

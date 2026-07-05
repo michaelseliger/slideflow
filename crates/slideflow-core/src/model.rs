@@ -20,6 +20,9 @@ pub struct DeckRecord {
     /// EMU dimensions of the slide canvas.
     pub slide_width_emu: i64,
     pub slide_height_emu: i64,
+    /// First time this deck was indexed (unix seconds; backfilled from
+    /// modified_unix on migration). Powers recently-added sort in step8.
+    pub first_seen_unix: i64,
     /// User-starred deck. Keyed by path, so it survives reindexing.
     pub favorite: bool,
 }
@@ -76,6 +79,9 @@ pub struct RootRecord {
     pub deck_count: i64,
     pub slide_count: i64,
     pub last_scan_unix: Option<i64>,
+    /// Per-root ignore globs, JSON-encoded in roots.exclude_globs; applied to
+    /// the scan walk in step4.
+    pub exclude_globs: Vec<String>,
 }
 
 /// Progress reported during a scan (sent to the UI as events).
@@ -85,7 +91,7 @@ pub enum ScanEvent {
     Started { total_files: usize },
     Deck { path: String, done: usize, total: usize },
     Skipped { path: String, reason: String },
-    Finished { indexed: usize, removed: usize, unchanged: usize },
+    Finished { indexed: usize, removed: usize, unchanged: usize, skipped: usize },
 }
 
 /// Reference to a slide inside a source deck, as used by the composer.
@@ -134,6 +140,23 @@ pub struct ScanRecord {
     pub indexed: i64,
     pub removed: i64,
     pub unchanged: i64,
+    pub skipped: i64,
+}
+
+/// One per-file problem recorded during a scan (persisted to scan_issues in step3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanIssue {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Aggregate: slides where the renderer dropped a given construct kind
+/// (populated from render_issues in step6). `kind` is one of chart/smartart/
+/// ole/unsupported-image/unknown-shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderDropStat {
+    pub kind: String,
+    pub slides: i64,
 }
 
 /// Everything the stats view shows, gathered in one call.
@@ -151,4 +174,8 @@ pub struct StatsOverview {
     pub recent_exports: Vec<ExportRecord>,
     /// Biggest decks by file size (descending).
     pub largest_decks: Vec<DeckRecord>,
+    /// Per-file problems from the newest scan (populated in step3).
+    pub last_scan_issues: Vec<ScanIssue>,
+    /// Renderer drop telemetry aggregated by construct kind (populated in step6).
+    pub render_drops: Vec<RenderDropStat>,
 }

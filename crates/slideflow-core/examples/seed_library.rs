@@ -14,8 +14,10 @@ fn main() {
     let mut lib = Library::open(std::path::Path::new(&db)).expect("open");
     lib.add_root(std::path::Path::new(&root)).expect("add_root");
     lib.scan(&mut |e| {
-        if let ScanEvent::Finished { indexed, removed, unchanged } = e {
-            println!("scan finished: indexed={indexed} removed={removed} unchanged={unchanged}");
+        if let ScanEvent::Finished { indexed, removed, unchanged, skipped } = e {
+            println!(
+                "scan finished: indexed={indexed} removed={removed} unchanged={unchanged} skipped={skipped}"
+            );
         }
     })
     .expect("scan");

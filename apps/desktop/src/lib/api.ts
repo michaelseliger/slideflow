@@ -103,6 +103,7 @@ async function mockStartScan(): Promise<boolean> {
     indexed: total,
     removed: 0,
     unchanged: 0,
+    skipped: 0,
   });
   void stats;
   return true;

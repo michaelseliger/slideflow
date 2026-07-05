@@ -170,6 +170,7 @@ const svgById = new Map<number, string>();
       size_bytes: 1_200_000 + deckId * 40_000,
       slide_width_emu: EMU_W,
       slide_height_emu: EMU_H,
+      first_seen_unix: now - deckId * 86400 * 30,
       favorite: false,
     };
     mockDecks.push(deck);
@@ -217,6 +218,7 @@ const mockRoots: RootRecord[] = (() => {
       deck_count: decks,
       slide_count: slides,
       last_scan_unix: Math.floor(Date.now() / 1000) - 3600,
+      exclude_globs: [],
     };
   });
 })();
@@ -247,6 +249,7 @@ export const mock = {
       deck_count: 0,
       slide_count: 0,
       last_scan_unix: null,
+      exclude_globs: [],
     };
     mockRoots.push(rec);
     return rec;
@@ -383,12 +386,15 @@ export const mock = {
       indexed: mockDecks.length,
       removed: 0,
       unchanged: 0,
+      skipped: 0,
     },
     recent_searches: structuredClone(mockSearches.slice(0, 10)),
     recent_exports: structuredClone(mockExports.slice(0, 10)),
     largest_decks: structuredClone(
       [...mockDecks].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, 5),
     ),
+    last_scan_issues: [],
+    render_drops: [],
   }),
 };
 
