@@ -8,6 +8,7 @@
 //! - [`export`]   — picked slides → PNG images / a PDF, via the SVG renderer.
 //! - [`index`]    — SQLite + FTS5 library: scanning, incremental indexing, full-text search with filters, and filesystem watching.
 //! - [`embed`]    — local semantic search: embedder trait, in-memory vector store, hybrid fusion, duplicate clustering (real model behind the `embeddings` feature).
+//! - [`fonts`]    — bundled metric-compatible substitutes (Carlito↔Calibri, Caladea↔Cambria) and named CSS fallback chains for unembedded Office fonts.
 //! - [`hash`]     — content/text hashing for duplicate detection and embedding keys.
 //! - [`thumbs`]   — content-addressed cache keys for the on-disk slide-preview cache.
 //! - [`dragout`]  — content-addressed cache keys for the desktop "drag a slide out" scratch files.
@@ -19,6 +20,7 @@ pub mod embed;
 pub mod error;
 pub mod export;
 pub mod fixtures;
+pub mod fonts;
 pub mod hash;
 pub mod index;
 pub mod model;
