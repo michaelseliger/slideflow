@@ -13,6 +13,7 @@ import type {
   SearchFilters,
   SearchHistoryEntry,
   SearchHit,
+  SlideDragPaths,
   SlidePick,
   SlideRecord,
   Stats,
@@ -411,6 +412,18 @@ export const mock = {
     for (const p of picks)
       mockExportCounts[p.pptx_path] = (mockExportCounts[p.pptx_path] ?? 0) + 1;
     return { files_written, warnings: [] };
+  },
+
+  // --- native drag-out (WS-G) ----------------------------------------------
+  // Native-only feature: the browser UI hides it (gated on isTauri), so these
+  // just log and no-op. Kept for lib/mock.ts parity with lib/api.ts.
+  prepareSlideDrag: async (pick: SlidePick): Promise<SlideDragPaths> => {
+    console.info("[mock] prepare slide drag:", pick.pptx_path, pick.slide_index);
+    return { pptx: "", icon: "" };
+  },
+
+  startNativeDrag: async (paths: string[], icon: string): Promise<void> => {
+    console.info("[mock] start native drag:", paths, icon);
   },
 
   // --- favorites / stats ---------------------------------------------------

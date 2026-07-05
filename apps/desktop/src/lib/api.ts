@@ -15,6 +15,7 @@ import type {
   ScanEvent,
   SearchFilters,
   SearchHit,
+  SlideDragPaths,
   SlidePick,
   SlidePreview,
   SlideRecord,
@@ -345,6 +346,31 @@ async function mockExport(
     emitMockExport({ done: i, total });
   }
   return mock.exportTray(picks, target, kind);
+}
+
+// ---------------------------------------------------------------------------
+// Native drag-out (macOS-first): drag a slide out of the app as a real file.
+//
+// Two steps: prepare the scratch files (compose the single-slide .pptx +
+// render a drag-preview PNG), then start a native OS drag session carrying the
+// .pptx via the drag plugin. Native-only — the browser UI hides the feature, so
+// both wrappers are inert stubs in mock mode.
+// ---------------------------------------------------------------------------
+
+/** Compose the single-slide .pptx + drag-preview PNG for `pick` and return
+ *  their paths. Cheap to call repeatedly — the host caches on (deck, slide,
+ *  mtime), so the UI can pre-warm it on mousedown. Stub in browser mode. */
+export function prepareSlideDrag(pick: SlidePick): Promise<SlideDragPaths> {
+  return isTauri() ? tauriInvoke("prepare_slide_drag", { pick }) : mock.prepareSlideDrag(pick);
+}
+
+/** Start a native OS drag session carrying `paths` (absolute file paths) with
+ *  `icon` (a PNG path) as the drag image. Wraps the CrabNebula drag plugin.
+ *  Must run during the drag gesture; no-op in browser mode. */
+export async function startNativeDrag(paths: string[], icon: string): Promise<void> {
+  if (!isTauri()) return mock.startNativeDrag(paths, icon);
+  const { startDrag } = await import("@crabnebula/tauri-plugin-drag");
+  await startDrag({ item: paths, icon });
 }
 
 // ---------------------------------------------------------------------------

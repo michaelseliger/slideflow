@@ -1,6 +1,6 @@
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { Eye, Plus, FolderOpen, Check, Star } from "lucide-react";
-import type { SearchHit } from "../lib/types";
+import type { SearchHit, SlideDragPaths, SlidePick } from "../lib/types";
 import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
@@ -16,6 +16,12 @@ interface SlideCardProps {
   hit: SearchHit;
   index: number;
 }
+
+// Native drag-out is macOS-first. If the drag plugin ever throws (e.g. an
+// unsupported platform), we flip this once, warn the user, and stop attempting
+// it — so a broken platform doesn't nag on every drag. Module-scoped so the
+// decision is shared across all cards.
+let nativeDragOff = false;
 
 function SlideCardImpl({ hit, index }: SlideCardProps) {
   const { slide, deck, snippet } = hit;
@@ -44,7 +50,52 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
     }
   };
 
+  // This card's slide as a SlidePick — the unit dragged out / saved.
+  const pick: SlidePick = { pptx_path: deck.path, slide_index: slide.slide_index };
+  // Holds an in-flight prepareSlideDrag so a ⌥-drag can reuse the pre-warmed
+  // result and start the native drag promptly during the gesture.
+  const prewarm = useRef<Promise<SlideDragPaths> | null>(null);
+
+  // Kick off scratch-file prep so the .pptx is usually ready by `dragstart`.
+  // Fired on ⌥-mousedown; cache-addressed on the backend, so priming a slide
+  // whose files already exist is cheap.
+  const primeDrag = () => {
+    if (!api.isTauri() || nativeDragOff || prewarm.current) return;
+    prewarm.current = api.prepareSlideDrag(pick).catch((err) => {
+      prewarm.current = null; // let the next attempt retry from scratch
+      throw err;
+    });
+  };
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 0 && e.altKey) primeDrag();
+  };
+
+  // Drag this single slide out of the app as a real .pptx file.
+  const startSlideDragOut = async () => {
+    try {
+      const ready = prewarm.current ?? api.prepareSlideDrag(pick);
+      prewarm.current = null;
+      const { pptx, icon } = await ready;
+      await api.startNativeDrag([pptx], icon);
+    } catch (err) {
+      console.error("slide drag-out failed", err);
+      if (!nativeDragOff) {
+        nativeDragOff = true;
+        toast.error("Drag out isn't available on this system");
+      }
+    }
+  };
+
   const onDragStart = (e: React.DragEvent) => {
+    // ⌥-drag → drag the slide out of the app as a real file (native shell only).
+    // preventDefault suppresses the internal HTML5 drag so the two never race;
+    // without ⌥, the existing grid → tray drag below is untouched.
+    if (e.altKey && api.isTauri() && !nativeDragOff) {
+      e.preventDefault();
+      void startSlideDragOut();
+      return;
+    }
     const app = useApp.getState();
     // If this card isn't in the current multiselection, drag just this one.
     const entries = app.selectedIds.has(slide.id)
@@ -58,6 +109,27 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
     window.setTimeout(() => ghost.remove(), 0);
   };
 
+  // Context-menu "Save slide as .pptx…": compose this one slide to a
+  // user-chosen path (all platforms; degrades to the mock in browser mode).
+  const saveSlideAsPptx = async () => {
+    const stem = deck.file_name.replace(/\.pptx$/i, "");
+    const name = `${stem} — slide ${slide.slide_index}.pptx`;
+    const cut = Math.max(deck.path.lastIndexOf("/"), deck.path.lastIndexOf("\\"));
+    const dir = cut > 0 ? deck.path.slice(0, cut) : undefined;
+    const dest = await api.pickSavePath(name, dir);
+    if (!dest) return;
+    try {
+      await api.composeDeck([pick], dest, stem, false);
+      toast.success("Saved the slide", {
+        label: "Reveal",
+        run: () => void api.revealInFinder(dest),
+      });
+    } catch (err) {
+      console.error("save slide failed", err);
+      toast.error("Couldn't save the slide");
+    }
+  };
+
   const menuItems: MenuItem[] = [
     { label: "Add to Tray", onClick: addThis },
     {
@@ -65,6 +137,11 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
       onClick: () => void useApp.getState().toggleFavoriteSlide(slide.id),
     },
     { label: "Peek", onClick: () => useApp.getState().openPeek(index) },
+    {
+      label: "Save slide as .pptx…",
+      onClick: () => void saveSlideAsPptx(),
+      separatorBefore: true,
+    },
     {
       label: "Open source deck",
       onClick: () => void api.openFile(deck.path),
@@ -87,6 +164,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
       <div
         className="group relative select-none"
         draggable
+        onMouseDown={onMouseDown}
         onDragStart={onDragStart}
         onClick={onClick}
         onDoubleClick={addThis}

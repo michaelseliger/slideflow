@@ -124,6 +124,15 @@ export interface SlidePick {
  *  snake_case). */
 export type FitMode = "ensure_fit" | "maximize";
 
+/** Scratch file paths backing a native drag-out of one slide. Mirrors the
+ *  desktop `SlideDragPaths` command struct. */
+export interface SlideDragPaths {
+  /** Absolute path to the composed single-slide .pptx (the drag payload). */
+  pptx: string;
+  /** Absolute path to the PNG drag-preview icon, next to the .pptx. */
+  icon: string;
+}
+
 /** Result of composing a new deck. Mirrors `ComposeReport`. */
 export interface ComposeReport {
   output_path: string;
