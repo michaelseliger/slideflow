@@ -46,11 +46,21 @@ pub struct SlideSpec {
     pub bullets: Vec<String>,
     pub notes: Option<String>,
     pub with_image: bool,
+    /// Raw `<p:sp>`/`<p:grpSp>`/`<p:graphicFrame>` … XML appended verbatim inside
+    /// the slide's `<p:spTree>`. An escape hatch for tests that need exotic
+    /// shapes (tables, effects, groups) the structured builder doesn't emit.
+    pub raw_shapes: Vec<String>,
 }
 
 impl SlideSpec {
     pub fn new(title: impl Into<String>) -> Self {
-        SlideSpec { title: title.into(), bullets: Vec::new(), notes: None, with_image: false }
+        SlideSpec {
+            title: title.into(),
+            bullets: Vec::new(),
+            notes: None,
+            with_image: false,
+            raw_shapes: Vec::new(),
+        }
     }
     pub fn bullets(mut self, bullets: &[&str]) -> Self {
         self.bullets = bullets.iter().map(|s| s.to_string()).collect();
@@ -64,6 +74,11 @@ impl SlideSpec {
         self.with_image = true;
         self
     }
+    /// Append raw shape XML into the slide's `<p:spTree>`.
+    pub fn raw_shape(mut self, xml: impl Into<String>) -> Self {
+        self.raw_shapes.push(xml.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +89,9 @@ pub struct DeckSpec {
     pub accent: String,
     /// Major/minor latin font in the theme.
     pub font: String,
+    /// Slide canvas size in EMU (default 12192000×6858000, 16:9 widescreen).
+    pub slide_cx: i64,
+    pub slide_cy: i64,
     pub slides: Vec<SlideSpec>,
 }
 
@@ -84,11 +102,19 @@ impl DeckSpec {
             author: None,
             accent: "4472C4".into(),
             font: "Calibri".into(),
+            slide_cx: 12192000,
+            slide_cy: 6858000,
             slides: Vec::new(),
         }
     }
     pub fn author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
+        self
+    }
+    /// Set the slide canvas size in EMU (drives `<p:sldSz>`).
+    pub fn slide_size(mut self, cx: i64, cy: i64) -> Self {
+        self.slide_cx = cx;
+        self.slide_cy = cy;
         self
     }
     pub fn accent(mut self, hex6: impl Into<String>) -> Self {
@@ -206,11 +232,13 @@ impl DeckSpec {
             String::new()
         };
         pkg.set_rels("ppt/presentation.xml", &pres_rels);
+        let slide_cx = self.slide_cx;
+        let slide_cy = self.slide_cy;
         pkg.insert_part(
             "ppt/presentation.xml",
             format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation {NS_DECL}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{sld_id_lst}</p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
+<p:presentation {NS_DECL}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{sld_id_lst}</p:sldIdLst><p:sldSz cx="{slide_cx}" cy="{slide_cy}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#
             )
             .into_bytes(),
         );
@@ -353,6 +381,9 @@ fn slide_xml(slide: &SlideSpec) -> String {
         shapes.push_str(
             r#"<p:pic><p:nvPicPr><p:cNvPr id="4" name="Picture 3"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="9144000" y="4572000"/><a:ext cx="1828800" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#,
         );
+    }
+    for raw in &slide.raw_shapes {
+        shapes.push_str(raw);
     }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

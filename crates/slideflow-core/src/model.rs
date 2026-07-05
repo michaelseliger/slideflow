@@ -107,6 +107,18 @@ pub struct SlidePick {
     pub slide_index: usize,
 }
 
+/// How to fit slides from a deck whose aspect ratio differs from the output
+/// canvas (the first picked deck's size). Same-aspect size mismatches are always
+/// scaled and never consult this; only genuine aspect mismatches are ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FitMode {
+    /// Scale down to fit inside the canvas, letterboxing the extra axis.
+    EnsureFit,
+    /// Scale up to fill the canvas, letting the overflowing axis bleed off-canvas.
+    Maximize,
+}
+
 /// Result of composing a new deck.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeReport {
@@ -116,6 +128,9 @@ pub struct ComposeReport {
     pub source_decks: usize,
     /// Non-fatal notes (e.g. skipped notes pages, deduplicated masters).
     pub warnings: Vec<String>,
+    /// Neutral, informational notes (e.g. a deck scaled to match the output
+    /// canvas). Not problems — kept distinct from `warnings`.
+    pub notes: Vec<String>,
 }
 
 /// One remembered search (for the stats view).

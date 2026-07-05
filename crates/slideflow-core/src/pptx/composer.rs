@@ -44,10 +44,11 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::fixtures::xml_escape;
-use crate::model::{ComposeReport, SlidePick};
+use crate::model::{ComposeReport, FitMode, SlidePick};
 use crate::opc::{
     local_name, rel_type, resolve_target, ContentTypes, Package, Relationship,
 };
+use crate::pptx::scale::{is_same_aspect, scale_part_xml, SlideScale};
 use crate::pptx::PresentationFile;
 
 const CT_PRESENTATION: &str =
@@ -70,11 +71,16 @@ pub struct ComposeOptions {
     pub title: String,
     /// Carry speaker notes into the output (default: false).
     pub include_notes: bool,
+    /// How to fit slides whose *aspect ratio* differs from the output canvas.
+    /// `None` (the back-compat default) leaves aspect-mismatched slides
+    /// unscaled and only warns; same-aspect size mismatches are always scaled
+    /// regardless of this setting.
+    pub fit_mode: Option<FitMode>,
 }
 
 impl Default for ComposeOptions {
     fn default() -> Self {
-        ComposeOptions { title: "Slideflow Deck".into(), include_notes: false }
+        ComposeOptions { title: "Slideflow Deck".into(), include_notes: false, fit_mode: None }
     }
 }
 
@@ -106,13 +112,14 @@ pub fn compose(
                 pf,
                 ct,
                 copied: HashMap::new(),
+                scale: None,
             });
         }
     }
 
     // Slide size / notes size / default text style come from the first source
-    // deck. Warn when other decks disagree — their slides keep their absolute
-    // shape positions but play on a differently-sized canvas.
+    // deck. Decks that disagree on size are rescaled onto the shared canvas
+    // (same-aspect: always; aspect mismatch: only when a fit mode is chosen).
     let first_idx = deck_index[&picks[0].pptx_path];
     let slide_w = composer.decks[first_idx].pf.slide_width_emu;
     let slide_h = composer.decks[first_idx].pf.slide_height_emu;
@@ -121,7 +128,7 @@ pub fn compose(
         presentation_xml(&composer.decks[first_idx].pf)
             .and_then(|xml| extract_element_raw(&xml, "p:defaultTextStyle"))
             .unwrap_or_default();
-    composer.warn_deck_mismatches(first_idx, slide_w, slide_h);
+    composer.resolve_deck_scaling(first_idx, slide_w, slide_h, options.fit_mode);
 
     // Copy each picked slide's full closure, in pick order.
     for pick in picks {
@@ -145,6 +152,7 @@ pub fn compose(
         slides_written: composer.slides_out.len(),
         source_decks: composer.decks.len(),
         warnings: composer.warnings,
+        notes: composer.notes,
     })
 }
 
@@ -155,6 +163,10 @@ struct DeckState {
     ct: ContentTypes,
     /// Original part name → output part name (within-deck dedup).
     copied: HashMap<String, String>,
+    /// Uniform scale applied to this deck's slide/layout/master parts so its
+    /// slides fit the output canvas. `None` for the reference deck and any deck
+    /// whose size already matches (or an aspect mismatch left unscaled).
+    scale: Option<SlideScale>,
 }
 
 /// A master pending finalization: its `sldLayoutIdLst` and `.rels` are rewritten
@@ -183,6 +195,7 @@ struct Composer {
     slides_out: Vec<String>,
     next_big_id: u64,
     warnings: Vec<String>,
+    notes: Vec<String>,
     notes_dropped_warned: bool,
 }
 
@@ -204,12 +217,23 @@ impl Composer {
             slides_out: Vec::new(),
             next_big_id: 2_147_483_648,
             warnings: Vec::new(),
+            notes: Vec::new(),
             notes_dropped_warned: false,
         }
     }
 
     fn part_bytes(&self, deck: usize, name: &str) -> Option<Vec<u8>> {
         self.decks[deck].pf.package.part(name).map(|b| b.to_vec())
+    }
+
+    /// Rescale a slide/layout/master part's geometry onto the output canvas when
+    /// this deck was assigned a scale; otherwise return the bytes untouched (so
+    /// same-size decks stay byte-for-byte identical to their source).
+    fn scale_bytes(&self, deck: usize, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        match self.decks[deck].scale {
+            Some(sc) => scale_part_xml(&bytes, &sc),
+            None => Ok(bytes),
+        }
     }
 
     fn deck_rels(&self, deck: usize, name: &str) -> Result<Vec<Relationship>> {
@@ -253,33 +277,77 @@ impl Composer {
         ));
     }
 
-    /// Warn about per-deck properties the output cannot fully honor: slide
-    /// sizes other than the first deck's, and embedded fonts (never carried).
-    fn warn_deck_mismatches(&mut self, first: usize, slide_w: i64, slide_h: i64) {
+    /// Decide, per source deck, how to reconcile its slide size with the output
+    /// canvas (the first deck's size), and record scales/notes/warnings:
+    ///
+    /// - equal size → nothing (scale stays `None`).
+    /// - same aspect ratio, different size → always scale + informational note.
+    /// - aspect mismatch → if `fit_mode` is set, scale (EnsureFit/Maximize) +
+    ///   note; otherwise leave unscaled and emit the legacy size-mismatch warning
+    ///   (back-compat for callers that don't opt into scaling).
+    ///
+    /// Also carries forward the embedded-font warning (fonts are never carried).
+    fn resolve_deck_scaling(
+        &mut self,
+        first: usize,
+        slide_w: i64,
+        slide_h: i64,
+        fit_mode: Option<FitMode>,
+    ) {
+        let dst = (slide_w, slide_h);
         let mut warnings = Vec::new();
+        let mut notes = Vec::new();
+        let mut assigns: Vec<(usize, SlideScale)> = Vec::new();
+
         for (i, deck) in self.decks.iter().enumerate() {
             let name = Path::new(&deck.path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| deck.path.clone());
-            if i != first
-                && (deck.pf.slide_width_emu != slide_w || deck.pf.slide_height_emu != slide_h)
-            {
-                warnings.push(format!(
-                    "{name} uses a different slide size ({}x{} vs {slide_w}x{slide_h} EMU); \
-                     its slides keep their absolute layout on the output canvas",
-                    deck.pf.slide_width_emu, deck.pf.slide_height_emu
-                ));
+            let src = (deck.pf.slide_width_emu, deck.pf.slide_height_emu);
+
+            if i != first && src != dst {
+                if is_same_aspect(src, dst) {
+                    // Same aspect: unambiguous, so scale regardless of fit_mode.
+                    if let Some(sc) = SlideScale::compute(src, dst, FitMode::EnsureFit) {
+                        notes.push(format!(
+                            "{name} scaled to {}% to match output size",
+                            sc.percent()
+                        ));
+                        assigns.push((i, sc));
+                    }
+                } else {
+                    match fit_mode {
+                        Some(mode) => {
+                            if let Some(sc) = SlideScale::compute(src, dst, mode) {
+                                notes.push(format!(
+                                    "{name} scaled to {}% to match output size",
+                                    sc.percent()
+                                ));
+                                assigns.push((i, sc));
+                            }
+                        }
+                        None => {
+                            warnings.push(format!(
+                                "{name} uses a different slide size ({}x{} vs {slide_w}x{slide_h} EMU); \
+                                 its slides keep their absolute layout on the output canvas",
+                                src.0, src.1
+                            ));
+                        }
+                    }
+                }
             }
-            if presentation_xml(&deck.pf)
-                .is_some_and(|xml| xml.contains("<p:embeddedFontLst"))
-            {
-                warnings.push(format!(
-                    "{name} embeds fonts; embedded fonts are not carried over"
-                ));
+
+            if presentation_xml(&deck.pf).is_some_and(|xml| xml.contains("<p:embeddedFontLst")) {
+                warnings.push(format!("{name} embeds fonts; embedded fonts are not carried over"));
             }
         }
+
+        for (i, sc) in assigns {
+            self.decks[i].scale = Some(sc);
+        }
         self.warnings.extend(warnings);
+        self.notes.extend(notes);
     }
 
     /// Copy presentation-level style parts into the output and return the
@@ -448,6 +516,7 @@ impl Composer {
             }
         }
 
+        let bytes = self.scale_bytes(deck, bytes)?;
         self.out_pkg.insert_part(name.clone(), bytes);
         self.out_pkg.set_rels(&name, &new_rels);
         self.carry_ct(deck, orig, &name);
@@ -562,6 +631,7 @@ impl Composer {
                 new_rels.push(rewritten_rel(rel, &name, &child));
             }
         }
+        let bytes = self.scale_bytes(deck, bytes)?;
         self.out_pkg.insert_part(name.clone(), bytes);
         self.out_pkg.set_rels(&name, &new_rels);
         self.carry_ct(deck, orig, &name);
@@ -601,6 +671,7 @@ impl Composer {
             base_rels.push(rewritten_rel(rel, &name, &child));
         }
 
+        let bytes = self.scale_bytes(deck, bytes)?;
         self.master_order.push(name.clone());
         self.masters
             .insert(name.clone(), MasterOut { body: bytes, base_rels, layouts: Vec::new() });
@@ -1252,7 +1323,8 @@ mod tests {
             .unwrap();
         let out = tmp("notes_out.pptx");
         let picks = vec![SlidePick { pptx_path: deck.to_string_lossy().into(), slide_index: 1 }];
-        let opts = ComposeOptions { title: "With Notes".into(), include_notes: true };
+        let opts =
+            ComposeOptions { title: "With Notes".into(), include_notes: true, fit_mode: None };
         compose(&picks, &out, &opts).unwrap();
         let pkg = Package::from_bytes(&std::fs::read(&out).unwrap()).unwrap();
         assert_integrity(&pkg);

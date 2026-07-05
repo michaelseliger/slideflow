@@ -71,7 +71,7 @@ fn index_search_compose_roundtrip() {
     let report = compose(
         &picks,
         &out,
-        &ComposeOptions { title: "Board Deck".into(), include_notes: false },
+        &ComposeOptions { title: "Board Deck".into(), include_notes: false, fit_mode: None },
     )
     .unwrap();
     assert_eq!(report.slides_written, 3);
