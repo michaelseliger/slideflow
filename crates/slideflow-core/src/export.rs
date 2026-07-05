@@ -81,6 +81,11 @@ pub fn system_fonts() -> Arc<fontdb::Database> {
         .get_or_init(|| {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
+            // Bundle the metric-compatible substitutes (Carlito↔Calibri,
+            // Caladea↔Cambria) so an unembedded-Calibri deck rasterizes with
+            // Carlito instead of falling through to Helvetica. A real installed
+            // Calibri, if present, still wins — it comes first in the chain.
+            crate::fonts::register_bundled_fonts(&mut db);
             set_generic_families(&mut db);
             Arc::new(db)
         })
@@ -151,7 +156,15 @@ pub fn set_generic_families(db: &mut fontdb::Database) {
 /// Render one slide of an already-opened deck to an SVG string, with images
 /// embedded and capped at `max_image_px` on the longer edge.
 fn slide_svg(pf: &PresentationFile, slide_index: usize, max_image_px: u32) -> Result<String> {
-    let opts = RenderOptions { embed_images: true, max_image_px: Some(max_image_px) };
+    // No `@font-face` substitutes baked into the export SVG: the exporter
+    // carries the bundled Carlito/Caladea bytes fontdb-side instead (see
+    // `system_fonts` / `deck_fonts`), which usvg *does* honor — unlike SVG
+    // `@font-face`, which it ignores.
+    let opts = RenderOptions {
+        embed_images: true,
+        max_image_px: Some(max_image_px),
+        embed_substitute_fonts: false,
+    };
     render_slide_svg(pf, slide_index, &opts)
 }
 

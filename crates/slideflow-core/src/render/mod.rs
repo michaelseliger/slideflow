@@ -87,11 +87,22 @@ pub struct RenderOptions {
     /// This is the main lever keeping grid-thumbnail SVGs small — a full-res
     /// photo embedded at ~200px display size is otherwise multiple MB.
     pub max_image_px: Option<u32>,
+    /// Embed the bundled metric-compatible substitute (Carlito for Calibri,
+    /// Caladea for Cambria — see [`crate::fonts`]) as an `@font-face` data-URI
+    /// when a slide uses that font *unembedded*. The preview is shown via
+    /// `<img src>` (an isolated document that app-level `@font-face` CSS can't
+    /// reach), so the SVG must carry the substitute itself. A bundled TTF is
+    /// ~600 KB → ~800 KB base64, so this is enabled ONLY for the large,
+    /// on-demand `full`/peek tier — never for grid thumbnails, where the size
+    /// is imperceptible and the per-tile cost would be unacceptable at scale.
+    /// The export path leaves this `false`: it registers the same bytes fontdb-
+    /// side instead ([`crate::fonts::register_bundled_fonts`]).
+    pub embed_substitute_fonts: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { embed_images: true, max_image_px: None }
+        RenderOptions { embed_images: true, max_image_px: None, embed_substitute_fonts: false }
     }
 }
 
@@ -107,16 +118,22 @@ pub struct RenderOutcome {
 }
 
 impl RenderOptions {
-    /// Small grid thumbnail: images downscaled hard.
+    /// Small grid thumbnail: images downscaled hard, and no bundled substitute
+    /// fonts embedded (Helvetica-vs-Carlito is imperceptible at tile size, and
+    /// baking ~800 KB of base64 font into every grid SVG would bloat the cache).
     pub fn thumb() -> Self {
-        RenderOptions { embed_images: true, max_image_px: Some(512) }
+        RenderOptions { embed_images: true, max_image_px: Some(512), embed_substitute_fonts: false }
     }
 
-    /// Larger preview for the peek modal / inspector: crisp but still bounded
-    /// (export fidelity is unaffected — the composer copies original parts,
-    /// never these renders).
+    /// Larger preview for the peek modal / inspector: crisp, and the bundled
+    /// metric-compatible substitute is embedded for unembedded Calibri/Cambria
+    /// so the scrutinized large preview shows the real shapes+metrics rather
+    /// than Helvetica. Rendered on demand, one slide at a time, so the per-SVG
+    /// font cost is paid only for slides the user actually peeks. (Export
+    /// fidelity is unaffected — the composer copies original parts, never these
+    /// renders.)
     pub fn preview() -> Self {
-        RenderOptions { embed_images: true, max_image_px: Some(1600) }
+        RenderOptions { embed_images: true, max_image_px: Some(1600), embed_substitute_fonts: true }
     }
 }
 
@@ -243,6 +260,7 @@ pub fn render_slide(
         shadow_cache: HashMap::new(),
         dropped: Vec::new(),
         used_fonts: BTreeSet::new(),
+        used_font_variants: BTreeSet::new(),
         font_notes: Vec::new(),
     };
 
@@ -418,6 +436,11 @@ struct Ctx<'a> {
     /// embedded fonts get an `@font-face` block — only families the slide uses
     /// are embedded, to keep preview SVGs small.
     used_fonts: BTreeSet<String>,
+    /// The (family, bold, italic) variants actually rendered — a superset-keyed
+    /// companion to [`Self::used_fonts`]. Lets the full-tier preview embed only
+    /// the exact bundled-substitute variant(s) a slide referenced, instead of
+    /// all four weights of a substituted family.
+    used_font_variants: BTreeSet<(String, bool, bool)>,
     /// Dynamic dropped-construct notes for embedded fonts that were skipped
     /// (unsupported format / too large); merged into [`RenderOutcome::dropped`].
     font_notes: Vec<String>,
@@ -431,22 +454,24 @@ impl Ctx<'_> {
         self.dropped.push(kind);
     }
 
-    /// Build a `<style>` block of `@font-face` rules for the deck's embedded
-    /// fonts whose family this slide actually used, and record a dropped note
-    /// for any *used* family whose embedded font had to be skipped. Returns an
-    /// empty string when nothing is embedded (the overwhelmingly common case) or
-    /// when no used family is embedded — so SVGs never carry unused fonts.
+    /// Build a `<style>` block of `@font-face` rules the slide needs: the deck's
+    /// embedded fonts whose family this slide actually used, plus — on the
+    /// full/peek tier only ([`RenderOptions::embed_substitute_fonts`]) — the
+    /// bundled metric-compatible substitute for any *unembedded* Calibri/Cambria
+    /// run ([`crate::fonts`]). Also records a dropped note for any *used* family
+    /// whose embedded font had to be skipped. Returns an empty string when the
+    /// slide has no text, or needs neither an embedded nor a substitute face —
+    /// so grid-thumbnail SVGs never carry a font.
     fn font_face_defs(&mut self) -> String {
         if self.used_fonts.is_empty() {
             return String::new();
         }
         let set = self.pf.embedded_font_set();
-        if set.fonts.is_empty() && set.skipped.is_empty() {
-            return String::new();
-        }
 
         let mut css = String::new();
         let mut seen: HashMap<(String, bool, bool), ()> = HashMap::new();
+
+        // 1. Real embedded fonts for used families — the highest-fidelity path.
         for f in &set.fonts {
             if !self.used_fonts.iter().any(|u| u.eq_ignore_ascii_case(&f.family)) {
                 continue;
@@ -463,6 +488,37 @@ impl Ctx<'_> {
                 style = if f.italic { "italic" } else { "normal" },
                 data = B64.encode(&f.bytes),
             ));
+        }
+
+        // 2. Bundled metric-compatible substitutes (full/peek tier only): for
+        //    each used variant of an UNembedded, substitutable family (Calibri →
+        //    Carlito, Cambria → Caladea), embed the exact matching variant so
+        //    the isolated `<img>` SVG shows the real shapes+metrics instead of
+        //    Helvetica. Skipped when the deck embeds that family — the real font
+        //    emitted above wins, and the font-family list names it first.
+        if self.options.embed_substitute_fonts {
+            for (family, bold, italic) in &self.used_font_variants {
+                if set.fonts.iter().any(|f| f.family.eq_ignore_ascii_case(family)) {
+                    continue;
+                }
+                let Some(sub) = crate::fonts::bundled_substitute(family) else {
+                    continue;
+                };
+                let Some(face) = crate::fonts::bundled_face(sub, *bold, *italic) else {
+                    continue;
+                };
+                if seen.insert((face.family.to_ascii_lowercase(), face.bold, face.italic), ()).is_some() {
+                    continue;
+                }
+                let (mime, format) = font_media_type(face.bytes);
+                css.push_str(&format!(
+                    r#"@font-face{{font-family:"{family}";font-weight:{weight};font-style:{style};src:url(data:{mime};base64,{data}) format("{format}");}}"#,
+                    family = css_font_family(face.family),
+                    weight = if face.bold { "bold" } else { "normal" },
+                    style = if face.italic { "italic" } else { "normal" },
+                    data = B64.encode(face.bytes),
+                ));
+            }
         }
 
         // Surface skip notes only for families this slide referenced.
@@ -2093,6 +2149,58 @@ mod tests {
         assert!(svg.contains("src:url(data:font/ttf;base64,"), "base64 payload embedded: {svg}");
         assert!(svg.contains("<style>@font-face"), "@font-face lives in a <style> in <defs>: {svg}");
         assert_no_external_refs(&svg);
+    }
+
+    /// A Calibri run always carries the bundled-clone-first fallback chain, on
+    /// both tiers. Only the full/peek tier bakes the Carlito bytes into the SVG
+    /// as an `@font-face` (the isolated `<img>` can't reach app-level CSS); grid
+    /// thumbnails keep the chain but stay lean — no embedded font bytes.
+    #[test]
+    fn full_tier_embeds_carlito_for_unembedded_calibri_thumb_does_not() {
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="Calibri"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes =
+            textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+
+        let full = render_slide_svg(&pf, 1, &RenderOptions::preview()).unwrap();
+        assert!(
+            full.contains(r#"font-family="Calibri, Carlito, Helvetica Neue, Arial, sans-serif""#),
+            "Calibri run carries the Carlito-first chain: {full}"
+        );
+        assert!(
+            full.contains("font-family:&quot;Carlito&quot;"),
+            "full tier embeds a Carlito @font-face: {full}"
+        );
+        assert!(full.contains("src:url(data:font/ttf;base64,"), "Carlito bytes embedded: {full}");
+        assert_no_external_refs(&full);
+
+        let thumb = render_slide_svg(&pf, 1, &RenderOptions::thumb()).unwrap();
+        assert!(
+            thumb.contains(r#"font-family="Calibri, Carlito, Helvetica Neue, Arial, sans-serif""#),
+            "thumb keeps the same chain: {thumb}"
+        );
+        assert!(!thumb.contains("@font-face"), "thumb embeds no substitute font: {thumb}");
+    }
+
+    /// When a deck actually embeds Calibri, the real embedded bytes win — the
+    /// bundled Carlito clone is suppressed even on the full tier.
+    #[test]
+    fn embedded_calibri_suppresses_the_carlito_substitute() {
+        let deck = DeckSpec::new("Deck")
+            .embed_font("Calibri", vec![(false, false, sample_ttf())])
+            .slide(SlideSpec::new("x"));
+        let paras = r#"<a:p><a:r><a:rPr lang="en-US"><a:latin typeface="Calibri"/></a:rPr><a:t>Hi</a:t></a:r></a:p>"#;
+        let shapes =
+            textbox(r#"<a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/>"#, "<a:bodyPr/>", paras);
+        let pf = deck_with_slide1(deck, &shapes);
+
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::preview()).unwrap();
+        assert_eq!(svg.matches("@font-face").count(), 1, "only the embedded Calibri face: {svg}");
+        assert!(svg.contains("font-family:&quot;Calibri&quot;"), "embedded Calibri emitted: {svg}");
+        assert!(
+            !svg.contains("font-family:&quot;Carlito&quot;"),
+            "no Carlito substitute when Calibri is embedded: {svg}"
+        );
     }
 
     #[test]

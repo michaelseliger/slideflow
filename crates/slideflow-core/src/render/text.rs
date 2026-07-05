@@ -88,11 +88,14 @@ impl Ctx<'_> {
             cursor += line.space_before;
             if !line.spans.is_empty() {
                 // Record the typefaces actually rendered, so the SVG assembler
-                // knows which embedded fonts to emit as @font-face.
+                // knows which embedded (or bundled-substitute) fonts to emit as
+                // @font-face — the family set for embedded matching, and the
+                // (family, weight, style) variants for substitute embedding.
                 for s in &line.spans {
                     if let Some(tf) = s.typeface.as_deref() {
                         if !tf.is_empty() {
                             self.used_fonts.insert(tf.to_string());
+                            self.used_font_variants.insert((tf.to_string(), s.bold, s.italic));
                         }
                     }
                 }
@@ -782,7 +785,11 @@ fn family_width_factor(family: &str) -> f64 {
     let f = family.to_ascii_lowercase();
     if is_condensed(&f) {
         0.82
-    } else if f.contains("calibri") || f.contains("candara") {
+    } else if f.contains("calibri") || f.contains("carlito") || f.contains("candara") {
+        // Carlito is the bundled Calibri clone (identical metrics), so a run
+        // that literally names Carlito must wrap like Calibri. Cambria/Caladea
+        // keep the neutral 1.0 tail below — no calibrated serif factor exists,
+        // and matching prior Cambria behavior avoids a wrap regression.
         0.91
     } else if f.contains("aptos") || f.contains("segoe") {
         0.95
@@ -818,16 +825,32 @@ fn glyph_em(c: char) -> f64 {
 }
 
 /// Emit an SVG `font-family` list: the run's typeface first, then fallbacks.
+///
 /// Narrow faces (Aptos Narrow ships only with Office 2024+) fall back through
 /// the widely available narrow families before any regular-width font — a
 /// regular fallback is ~20% wider and overflows author-fitted boxes.
+///
+/// For the common unembedded Office fonts (Calibri, Cambria, Segoe UI, …) we
+/// splice in a richer, named fallback chain from [`crate::fonts`] right after
+/// the authored name: Calibri leads to the bundled Carlito clone, Cambria to
+/// Caladea, and the rest to the closest macOS/cross-platform staple. This is
+/// the single place that string is built, so the webview SVG and the
+/// resvg/fontdb exporter resolve the same way (the exporter also carries the
+/// Carlito/Caladea bytes in its fontdb). Chains from `fonts` already end in a
+/// CSS generic, so they replace — not extend — the default tail.
 fn font_family(font: Option<&str>) -> String {
     match font.filter(|f| !f.is_empty()) {
         Some(f) if is_condensed(f) => format!(
             "{}, Arial Narrow, Liberation Sans Narrow, Helvetica Neue Condensed, Helvetica, Arial, sans-serif",
             esc(f)
         ),
-        Some(f) => format!("{}, Helvetica, Arial, sans-serif", esc(f)),
+        Some(f) => match crate::fonts::fallback_families(f) {
+            // Named chain (already terminated by a CSS generic): authored name
+            // first, then the chain. The chain families are our own ASCII
+            // literals, so only the authored name needs XML-escaping.
+            Some(chain) => format!("{}, {}", esc(f), chain.join(", ")),
+            None => format!("{}, Helvetica, Arial, sans-serif", esc(f)),
+        },
         None => "Helvetica, Arial, sans-serif".to_string(),
     }
 }
