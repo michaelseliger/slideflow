@@ -405,6 +405,10 @@ export const mock = {
     svgById.clear();
     mockSearches.length = 0;
     mockExports.length = 0;
+    // Native clear() deletes export_history, cascading export_picks, so
+    // get_export_counts() returns empty afterwards. Mirror that here so the
+    // "Most exported" sort doesn't keep ranking by pre-clear seeded counts.
+    for (const k of Object.keys(mockExportCounts)) delete mockExportCounts[k];
   },
 
   // Re-read the "folders" on rescan: deterministic ids make this idempotent.
@@ -457,8 +461,16 @@ export const mock = {
 
   getExportCounts: async (): Promise<Record<string, number>> => ({ ...mockExportCounts }),
 
-  setAutoUpdateEnabled: async (_enabled: boolean): Promise<void> => {},
+  setAutoUpdateEnabled: async (enabled: boolean): Promise<void> => {
+    mockAutoUpdate = enabled;
+  },
+
+  // Mirror the native get_auto_update_enabled read-back so the Settings toggle
+  // can reconcile against the backend's source of truth in browser mode too.
+  getAutoUpdateEnabled: async (): Promise<boolean> => mockAutoUpdate,
 };
+
+let mockAutoUpdate = true;
 
 const mockSearches: SearchHistoryEntry[] = [];
 const mockExports: ExportRecord[] = [];

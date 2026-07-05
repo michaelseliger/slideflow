@@ -163,6 +163,20 @@ export default function App() {
         }
       }
 
+      // --- Overlays own the keyboard while open: swallow grid + Escape keys so
+      // they can't leak to the hidden grid behind the sheet. These sheets have
+      // no focus trap, so with focus on <body> (WKWebView doesn't focus buttons
+      // on click) their keydowns reach this window listener directly, bypassing
+      // the sheet's own onKeyDown. Escape closes the overlay. ---
+      if (app.settingsOpen || app.aboutOpen) {
+        if (key === "Escape") {
+          e.preventDefault();
+          if (app.settingsOpen) app.setSettingsOpen(false);
+          else app.setAboutOpen(false);
+        }
+        return;
+      }
+
       // --- Escape priority: clear search → close inspector. ---
       if (key === "Escape") {
         if (app.query) {

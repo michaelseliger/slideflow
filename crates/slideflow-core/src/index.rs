@@ -619,10 +619,27 @@ impl Library {
             format!(" WHERE {}", clauses.join(" AND "))
         };
 
+        // Order by the requested browse key so the LIMIT window selects the
+        // correct top-N (the frontend then reorders that window for grouping,
+        // but the set it sees is already the right one). Decks stay contiguous
+        // (deck key → deck id → slide_index) so a group-by-deck view never
+        // interleaves and the window cuts on deck boundaries. "name" mirrors the
+        // frontend's file-name display order; unknown/`None` keeps the historical
+        // modified-DESC default.
+        let order_sql = match filters.sort.as_deref() {
+            Some("name") => "d.file_name COLLATE NOCASE ASC, d.id ASC, s.slide_index ASC",
+            Some("added") => "d.first_seen_unix DESC, d.id ASC, s.slide_index ASC",
+            Some("exported") => {
+                "(SELECT COUNT(*) FROM export_picks ep WHERE ep.deck_path = d.path) DESC, \
+                 d.modified_unix DESC, d.id ASC, s.slide_index ASC"
+            }
+            _ => "d.modified_unix DESC, d.id ASC, s.slide_index ASC",
+        };
+
         let sql = format!(
             "SELECT {SLIDE_COLS}, {DECK_COLS}, s.body_text \
              FROM slides s JOIN decks d ON d.id = s.deck_id{where_sql} \
-             ORDER BY d.modified_unix DESC, s.slide_index ASC LIMIT ?"
+             ORDER BY {order_sql} LIMIT ?"
         );
 
         let mut params: Vec<Value> = fparams;
@@ -2245,5 +2262,176 @@ mod tests {
         // Re-recording an empty set removes the row rather than storing "[]".
         lib.record_render_issues("/decks/a.pptx", 3, "hashA", &[]).unwrap();
         assert!(lib.render_issues_for("/decks/a.pptx", 3, "hashA").unwrap().is_empty());
+    }
+
+    /// Insert a single-slide deck with fully-controlled columns (bypassing the
+    /// parser) so browse-order and render-drop tests can pin exact values.
+    fn insert_deck(
+        lib: &Library,
+        root_id: i64,
+        path: &str,
+        file_name: &str,
+        modified: i64,
+        first_seen: i64,
+        hash: &str,
+    ) {
+        lib.conn
+            .execute(
+                "INSERT INTO decks(root_id, path, file_name, title, author, slide_count, \
+                 modified_unix, size_bytes, slide_width_emu, slide_height_emu, content_hash, \
+                 first_seen_unix) VALUES(?1,?2,?3,?3,'a',1,?4,10,960,540,?5,?6)",
+                params![root_id, path, file_name, modified, hash, first_seen],
+            )
+            .unwrap();
+        let deck_id = lib.conn.last_insert_rowid();
+        lib.conn
+            .execute(
+                "INSERT INTO slides(deck_id, slide_index, title, body_text, notes, thumb_path) \
+                 VALUES(?1, 1, ?2, 'body', NULL, NULL)",
+                params![deck_id, file_name],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn browse_sort_selects_window_by_key() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO roots(path, last_scan_unix, exclude_globs) VALUES('/r', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        let root_id = lib.conn.last_insert_rowid();
+        // (path, file_name, modified, first_seen)
+        insert_deck(&lib, root_id, "/r/zeta.pptx", "zeta.pptx", 300, 100, "h1");
+        insert_deck(&lib, root_id, "/r/alpha.pptx", "alpha.pptx", 200, 300, "h2");
+        insert_deck(&lib, root_id, "/r/mid.pptx", "mid.pptx", 100, 200, "h3");
+        // Export mid.pptx twice so it leads the "exported" sort despite the
+        // oldest modified time — the very case a client reorder of a
+        // modified-DESC window past the limit could never surface.
+        lib.record_export(
+            "/out.pptx",
+            "t",
+            2,
+            1,
+            &[
+                SlidePick { pptx_path: "/r/mid.pptx".into(), slide_index: 1 },
+                SlidePick { pptx_path: "/r/mid.pptx".into(), slide_index: 1 },
+            ],
+        )
+        .unwrap();
+
+        // With LIMIT 1, the single returned slide must belong to the deck the
+        // key ranks first — proving the window itself (not just a client
+        // reorder) honors the sort.
+        let top = |sort: &str| -> String {
+            let f = SearchFilters {
+                limit: Some(1),
+                sort: Some(sort.to_string()),
+                ..Default::default()
+            };
+            lib.search("", &f).unwrap()[0].deck.file_name.clone()
+        };
+        assert_eq!(top("name"), "alpha.pptx", "alphabetical first");
+        assert_eq!(top("modified"), "zeta.pptx", "newest modified");
+        assert_eq!(top("added"), "alpha.pptx", "newest first_seen");
+        assert_eq!(top("exported"), "mid.pptx", "most exported");
+        // No/unknown sort keeps the historical modified-DESC default.
+        let f = SearchFilters { limit: Some(1), ..Default::default() };
+        assert_eq!(lib.search("", &f).unwrap()[0].deck.file_name, "zeta.pptx");
+    }
+
+    #[test]
+    fn render_drops_aggregates_and_excludes_stale_and_orphans() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.conn
+            .execute(
+                "INSERT INTO roots(path, last_scan_unix, exclude_globs) VALUES('/r', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        let root_id = lib.conn.last_insert_rowid();
+        insert_deck(&lib, root_id, "/r/a.pptx", "a.pptx", 1, 1, "hashA");
+
+        // Two live slides of the deck record drops with the matching content
+        // hash; chart appears on both, smartart on one.
+        lib.record_render_issues("/r/a.pptx", 1, "hashA", &["chart".into()]).unwrap();
+        lib.record_render_issues("/r/a.pptx", 2, "hashA", &["chart".into(), "smartart".into()])
+            .unwrap();
+        // Stale row (hash no longer matches the deck) — excluded by the JOIN.
+        lib.record_render_issues("/r/a.pptx", 3, "STALE", &["ole".into()]).unwrap();
+        // Orphan row (no such deck path) — excluded by the JOIN.
+        lib.record_render_issues("/r/gone.pptx", 1, "whatever", &["chart".into()]).unwrap();
+
+        let drops: Vec<(String, i64)> = lib
+            .stats_overview()
+            .unwrap()
+            .render_drops
+            .into_iter()
+            .map(|d| (d.kind, d.slides))
+            .collect();
+        // Distinct-slide counts, sorted by count desc then kind asc; the stale
+        // "ole" and orphan "chart" rows must not appear.
+        assert_eq!(drops, vec![("chart".into(), 2), ("smartart".into(), 1)]);
+    }
+
+    #[test]
+    fn export_history_trim_cascades_picks() {
+        let mut lib = Library::open_in_memory().unwrap();
+        // 205 exports, each contributing one pick for the same deck.
+        for i in 0..205 {
+            lib.record_export(
+                &format!("/out/{i}.pptx"),
+                "t",
+                1,
+                1,
+                &[SlidePick { pptx_path: "/decks/a.pptx".into(), slide_index: 1 }],
+            )
+            .unwrap();
+        }
+        let history: i64 =
+            lib.conn.query_row("SELECT COUNT(*) FROM export_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(history, 200, "export_history bounded to 200 rows");
+
+        let orphans: i64 = lib
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM export_picks \
+                 WHERE export_id NOT IN (SELECT id FROM export_history)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "trim cascade left no orphan picks");
+
+        // export_counts sees only surviving picks — one per surviving export.
+        assert_eq!(lib.export_counts().unwrap().get("/decks/a.pptx").copied(), Some(200));
+    }
+
+    #[test]
+    fn clean_rescan_clears_last_scan_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Good")
+            .slide(SlideSpec::new("Title").bullets(&["ok"]))
+            .write_to(&dir.path().join("good.pptx"))
+            .unwrap();
+        std::fs::write(dir.path().join("broken.pptx"), b"not a zip").unwrap();
+
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        let o = lib.stats_overview().unwrap();
+        assert_eq!(o.last_scan.as_ref().unwrap().skipped, 1);
+        assert_eq!(o.last_scan_issues.len(), 1);
+
+        // Remove the broken file and rescan: the newest scan has no issues, so
+        // the Problems surface empties even though older scans' rows persist in
+        // the table until trimmed. Guards the MAX(scan_id) scoping.
+        std::fs::remove_file(dir.path().join("broken.pptx")).unwrap();
+        scan_silent(&mut lib);
+        let o = lib.stats_overview().unwrap();
+        assert_eq!(o.last_scan.as_ref().unwrap().skipped, 0);
+        assert!(o.last_scan_issues.is_empty());
     }
 }

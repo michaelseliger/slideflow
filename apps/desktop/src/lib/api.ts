@@ -327,6 +327,14 @@ export function setAutoUpdateEnabled(enabled: boolean): Promise<void> {
     : mock.setAutoUpdateEnabled(enabled);
 }
 
+/** Read the persisted auto-update preference — the same backend file the
+ *  scheduler gates on — so the Settings toggle reflects the real state. */
+export function getAutoUpdateEnabled(): Promise<boolean> {
+  return isTauri()
+    ? tauriInvoke("get_auto_update_enabled")
+    : mock.getAutoUpdateEnabled();
+}
+
 // Browser-mode fake update flow, opt-in so `pnpm dev` isn't nagged:
 //   localStorage.setItem("slideflow:mockUpdate", "1")
 const mockUpdateListeners = new Set<(ev: UpdateEvent) => void>();

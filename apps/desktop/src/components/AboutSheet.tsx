@@ -130,6 +130,13 @@ export default function AboutSheet() {
             exit={reduce ? { opacity: 0 } : { scale: 0.97, opacity: 0 }}
             transition={{ type: "spring", stiffness: 320, damping: 30 }}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              // Trap keys so grid shortcuts and Escape don't leak to App.tsx's
+              // window listener behind the modal (mirrors ConfirmDialog);
+              // Escape closes.
+              e.stopPropagation();
+              if (e.key === "Escape") close();
+            }}
           >
             <div className="flex items-center justify-end px-3 py-2">
               <button

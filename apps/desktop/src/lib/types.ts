@@ -65,6 +65,9 @@ export interface SearchFilters {
   /** Only slides the user starred. */
   favorites_only?: boolean | null;
   limit?: number | null;
+  /** Browse-mode sort key; ignored by full-text search. Drives the browse
+   *  ORDER BY so the limit window selects the correct top-N for the key. */
+  sort?: string | null;
 }
 
 /** A watched root folder. Mirrors `RootRecord`. */

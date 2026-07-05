@@ -409,10 +409,39 @@ impl Ctx<'_> {
             "cxnSp" => self.render_sp(node, tf),
             // graphicFrame: tables render; charts/SmartArt/OLE skip gracefully.
             "graphicFrame" => self.render_graphic_frame(node, tf),
+            // mc:AlternateContent wraps post-2007 constructs (inserted media,
+            // chartex charts, ink, effect shapes) alongside a broadly-compatible
+            // fallback. Descend into the Fallback branch (or the first Choice if
+            // none) so its inner shapes render AND classify correctly, rather
+            // than mislabeling the whole wrapper "unknown-shape".
+            "AlternateContent" => self.render_alternate_content(node, tf),
             // Structural (non-shape) spTree children reach here in the slide and
             // the master/layout static passes; they are not dropped content.
-            "nvGrpSpPr" | "grpSpPr" | "extLst" => {}
+            // `contentPart` references an external ink/richtext part we don't
+            // render; skip it structurally rather than flag it as a drop.
+            "nvGrpSpPr" | "grpSpPr" | "extLst" | "contentPart" => {}
             _ => self.record_drop("unknown-shape"), // unknowns: skip gracefully.
+        }
+    }
+
+    /// Render the selected branch of an `mc:AlternateContent` wrapper. Prefer
+    /// `mc:Fallback` (guaranteed broadly-compatible content — a poster picture
+    /// for media, a rasterized/legacy shape for effects); otherwise take the
+    /// first `mc:Choice`. Each branch holds ordinary shapes, so its element
+    /// children go back through `render_shape` (which classifies a nested
+    /// chart/SmartArt graphicFrame correctly).
+    fn render_alternate_content(&mut self, node: Node, tf: Transform) {
+        let branch = node
+            .children()
+            .find(|c| c.is_element() && c.tag_name().name() == "Fallback")
+            .or_else(|| {
+                node.children()
+                    .find(|c| c.is_element() && c.tag_name().name() == "Choice")
+            });
+        if let Some(branch) = branch {
+            for child in branch.children().filter(|n| n.is_element()) {
+                self.render_shape(child, tf);
+            }
         }
     }
 

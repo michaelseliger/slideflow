@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Monitor, Sun, Moon, Minus, Plus, Folder, FolderPlus, Trash2 } from "lucide-react";
 import { useApp, type ThemeMode } from "../stores/useApp";
@@ -36,6 +36,17 @@ export default function SettingsSheet() {
             exit={reduce ? { opacity: 0 } : { scale: 0.97, opacity: 0 }}
             transition={{ type: "spring", stiffness: 320, damping: 30 }}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              // Trap keys inside the sheet so grid shortcuts and Escape don't
+              // leak to App.tsx's window listener behind the modal (mirrors
+              // ConfirmDialog). Escape closes the sheet unless a field has focus
+              // (there, let the field keep the key — don't nuke an in-progress
+              // exclude-glob edit).
+              e.stopPropagation();
+              const tag = (e.target as HTMLElement).tagName;
+              const editing = tag === "INPUT" || tag === "TEXTAREA";
+              if (e.key === "Escape" && !editing) close();
+            }}
           >
             <div className="flex items-center justify-between px-5 py-3 hairline-b">
               <div className="text-title font-semibold text-ink">Settings</div>
@@ -186,6 +197,25 @@ function UpdatesSection() {
   const [auto, setAuto] = useState<boolean>(
     () => localStorage.getItem(AUTO_UPDATE_KEY) !== "0",
   );
+
+  // Reconcile the toggle against the backend file the scheduler actually gates
+  // on (localStorage is only an optimistic cache and can drift, e.g. webview
+  // storage cleared while the config file persists). Runs each time the sheet
+  // opens, since this section mounts with it.
+  useEffect(() => {
+    let alive = true;
+    api
+      .getAutoUpdateEnabled()
+      .then((enabled) => {
+        if (!alive) return;
+        setAuto(enabled);
+        localStorage.setItem(AUTO_UPDATE_KEY, enabled ? "1" : "0");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const onToggle = () => {
     const next = !auto;

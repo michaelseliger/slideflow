@@ -23,7 +23,9 @@ const SHORT: Record<SortMode, string> = {
 export default function SortMenu() {
   const sortMode = useApp((s) => s.sortMode);
   const setSortMode = useApp((s) => s.setSortMode);
-  const searching = useApp((s) => s.query.trim() !== "");
+  // Sort is inert during a search (bm25-ranked) or single-deck nav (fixed slide
+  // order); dim the trigger in both cases. The reorder defers until browsing.
+  const inert = useApp((s) => s.query.trim() !== "" || s.nav.type === "deck");
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -45,14 +47,14 @@ export default function SortMenu() {
     <div ref={ref} className="relative">
       <button
         title={
-          searching
-            ? "Sorting applies while browsing (search is ranked by relevance)"
+          inert
+            ? "Sorting applies while browsing (search and deck views keep their own order)"
             : "Sort slides"
         }
         onClick={() => setOpen((v) => !v)}
         className={cx(
           "flex h-6 items-center gap-1 rounded-[6px] border border-hairline/10 px-1.5 text-caption transition-colors",
-          searching && "opacity-50",
+          inert && "opacity-50",
           open ? "bg-accent/10 text-accent" : "text-subtle hover:bg-ink/8",
         )}
       >

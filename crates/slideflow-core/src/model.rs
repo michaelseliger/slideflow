@@ -69,6 +69,10 @@ pub struct SearchFilters {
     /// Only slides the user starred.
     pub favorites_only: Option<bool>,
     pub limit: Option<usize>,
+    /// Browse-mode sort key ("name" | "added" | "modified" | "exported").
+    /// Ignored by full-text search (always bm25-ranked); drives the browse
+    /// `ORDER BY` so the `limit` window selects the correct top-N for the key.
+    pub sort: Option<String>,
 }
 
 /// A watched root folder.

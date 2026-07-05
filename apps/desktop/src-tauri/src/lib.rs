@@ -110,6 +110,7 @@ pub fn run() {
             updates::check_for_updates,
             updates::restart_to_update,
             updates::set_auto_update_enabled,
+            updates::get_auto_update_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Slideflow")

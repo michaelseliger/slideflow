@@ -104,6 +104,14 @@ pub fn auto_update_enabled(app: &AppHandle) -> bool {
     )
 }
 
+/// Read the persisted preference for the UI. The Settings toggle initializes
+/// from this so it reflects the same source of truth the scheduler gates on,
+/// rather than drifting from a separate cache.
+#[tauri::command]
+pub fn get_auto_update_enabled(app: AppHandle) -> bool {
+    auto_update_enabled(&app)
+}
+
 /// Persist whether automatic update checks run. Manual "Check for Updates…" is
 /// unaffected. Takes effect on the next scheduler cycle (does not cancel an
 /// in-flight download).
@@ -113,7 +121,19 @@ pub fn set_auto_update_enabled(app: AppHandle, enabled: bool) -> Result<(), Stri
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, if enabled { "1" } else { "0" }).map_err(|e| e.to_string())
+    std::fs::write(&path, if enabled { "1" } else { "0" }).map_err(|e| e.to_string())?;
+    // Turning auto-update OFF also drops any already-downloaded update parked in
+    // PendingUpdate, so install-on-quit can't apply a version the user just
+    // opted out of. (An in-flight download still finishes but won't be parked/
+    // installed while disabled — the next scheduler cycle is gated too.)
+    if !enabled {
+        if let Some(state) = app.try_state::<PendingUpdate>() {
+            if let Ok(mut guard) = state.update.lock() {
+                *guard = None;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Install the downloaded update and relaunch as the new version.
@@ -221,6 +241,12 @@ async fn check_and_download(app: &AppHandle) -> Result<(), tauri_plugin_updater:
 /// next launch instead. Best-effort: a failure here must never block exit.
 pub fn install_pending_on_exit(app: &AppHandle) {
     if cfg!(target_os = "windows") {
+        return;
+    }
+    // Respect an opt-out: a user who turned auto-update OFF must not get a
+    // previously-parked download silently installed on quit. (set_auto_update_
+    // enabled also clears the park on disable; this is the belt-and-suspenders.)
+    if !auto_update_enabled(app) {
         return;
     }
     let Some(state) = app.try_state::<PendingUpdate>() else {

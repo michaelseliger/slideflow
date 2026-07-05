@@ -303,14 +303,16 @@ export const useApp = create<AppState>((set, get) => ({
 
   setSortMode: (m) => {
     localStorage.setItem(SORT_KEY, m);
-    const { query, nav, results, exportCounts } = get();
+    const { query, nav } = get();
     const browsing = query.trim() === "" && nav.type !== "deck";
-    set({
-      sortMode: m,
-      results: browsing ? sortHits(results, m, exportCounts) : results,
-      selectedIds: new Set(),
-      anchorIndex: null,
-    });
+    set({ sortMode: m });
+    // Only re-fetch (and clear selection, which refresh() does) when the sort
+    // is actually live: browse mode re-runs so the backend LIMIT window is
+    // reselected for the new key — a client reorder of a modified-DESC window
+    // would be wrong past the limit. During a search or single-deck nav the
+    // sort is inert, so leave results + selection untouched (it applies when
+    // browsing resumes).
+    if (browsing) void get().refresh();
   },
 
   refreshExportCounts: async () => {
@@ -349,8 +351,10 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       let hits: SearchHit[];
 
-      // Effective filters: fold the active nav source into path_prefix.
-      const eff: SearchFilters = { ...filters };
+      // Effective filters: fold the active nav source into path_prefix, and
+      // carry the browse sort so the backend LIMIT window is chosen by the
+      // active key (ignored by full-text search, which is bm25-ranked).
+      const eff: SearchFilters = { ...filters, sort: get().sortMode };
       if (nav.type === "root") {
         const root = get().roots.find((r) => r.id === nav.id);
         if (root) eff.path_prefix = root.path;
@@ -669,7 +673,7 @@ export const useApp = create<AppState>((set, get) => ({
     get().requestConfirm({
       title: "Clear index & rebuild?",
       message:
-        "This clears the search index and preview cache, then re-scans your folders from scratch. Starred slides and decks are kept. Recent scan, search, and export history will be cleared, and tray slides show as moved until the rescan finishes.",
+        "This clears the search index and preview cache, then re-scans your folders from scratch. Starred slides and decks are kept. Recent scan, search, and export history will be cleared, decks' “Added” dates reset to the rebuild time, and tray slides show as moved until the rescan finishes.",
       confirmLabel: "Clear & rebuild",
       destructive: true,
       onConfirm: () => get().clearAndRebuild(),

@@ -136,6 +136,12 @@ export default function Sidebar() {
               }}
             />
           </div>
+          {scan.skipped.length > 0 && (
+            <div className="mt-1 text-caption text-subtle/70">
+              <span className="tabnum">{scan.skipped.length}</span>{" "}
+              {scan.skipped.length === 1 ? "file skipped" : "files skipped"}
+            </div>
+          )}
         </div>
       )}
       {scan.running && collapsed && (
