@@ -7,6 +7,7 @@
 //! - [`render`]   — slide → SVG preview renderer (theme-aware, no LibreOffice).
 //! - [`export`]   — picked slides → PNG images / a PDF, via the SVG renderer.
 //! - [`index`]    — SQLite + FTS5 library: scanning, incremental indexing, full-text search with filters, and filesystem watching.
+//! - [`embed`]    — local semantic search: embedder trait, in-memory vector store, hybrid fusion, duplicate clustering (real model behind the `embeddings` feature).
 //! - [`hash`]     — content/text hashing for duplicate detection and embedding keys.
 //! - [`thumbs`]   — content-addressed cache keys for the on-disk slide-preview cache.
 //! - [`dragout`]  — content-addressed cache keys for the desktop "drag a slide out" scratch files.
@@ -14,6 +15,7 @@
 //! - [`fixtures`] — programmatic minimal-but-valid PPTX builders for tests.
 
 pub mod dragout;
+pub mod embed;
 pub mod error;
 pub mod export;
 pub mod fixtures;

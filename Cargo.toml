@@ -29,6 +29,9 @@ thiserror = "2"
 sha2 = "0.10"
 base64 = "0.22"
 imagesize = "0.13"
+# Pure-Rust data-parallelism for brute-force cosine search and near-duplicate
+# clustering. No system libraries, so core still builds on Linux CI.
+rayon = "1"
 # Pure-Rust decode/resize/re-encode for downscaling grid thumbnails. No system
 # libraries, so the core crate still builds on Linux CI without GUI deps.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }

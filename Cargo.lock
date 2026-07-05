@@ -1390,6 +1390,7 @@ dependencies = [
  "lopdf",
  "notify",
  "quick-xml",
+ "rayon",
  "resvg",
  "roxmltree 0.20.0",
  "rusqlite",

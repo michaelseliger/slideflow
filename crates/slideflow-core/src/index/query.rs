@@ -67,6 +67,13 @@ pub(crate) struct ParsedQuery {
     /// tokenization of THIS — not the raw input — so consumed tokens (dates,
     /// negatives) are never accidentally text-searched.
     pub residual: String,
+    /// The query's plain text for EMBEDDING: the unquoted content of every
+    /// POSITIVE term (fielded terms contribute their content, never the
+    /// `field:` prefix) plus any unclassifiable residual tokens, space-joined
+    /// in query order. Negated terms, date bounds, and `OR`/`NOT` operators are
+    /// excluded — none of them belong in a semantic vector. Empty when the
+    /// query has nothing embeddable (empty, date-only, or purely negative).
+    pub semantic_text: String,
 }
 
 /// Combine two optional bounds keeping the larger (more restrictive lower bound).
@@ -287,6 +294,9 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
     let mut after: Option<i64> = None;
     let mut before: Option<i64> = None;
     let mut residual: Vec<String> = Vec::new();
+    // Embeddable plain text, collected in query order: positive-term content +
+    // residual junk. Negatives, dates, and operators never contribute.
+    let mut semantic: Vec<String> = Vec::new();
 
     for tok in lex(input) {
         if tok == "OR" {
@@ -314,11 +324,13 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
                 if negate || pending_not {
                     neg.push(rendered);
                 } else {
+                    semantic.push(term.content.clone());
                     pos.push(rendered);
                 }
                 pending_not = false;
             }
             Token::Nothing => {
+                semantic.push(tok.clone());
                 residual.push(tok);
                 pending_not = false;
             }
@@ -328,7 +340,13 @@ pub(crate) fn parse_query(input: &str) -> ParsedQuery {
         groups.push((pos, neg));
     }
 
-    ParsedQuery { match_expr: render_query(&groups), after, before, residual: residual.join(" ") }
+    ParsedQuery {
+        match_expr: render_query(&groups),
+        after,
+        before,
+        residual: residual.join(" "),
+        semantic_text: semantic.join(" "),
+    }
 }
 
 #[cfg(test)]
@@ -494,5 +512,47 @@ mod tests {
             // Must not panic; result is either None or a rendered string.
             let _ = parse_query(q);
         }
+    }
+
+    // --- semantic_text (the embeddable plain text of a query) ----------------
+
+    fn sem(input: &str) -> String {
+        parse_query(input).semantic_text
+    }
+
+    #[test]
+    fn semantic_text_is_plain_positive_content() {
+        // Bare terms pass through; order preserved.
+        assert_eq!(sem("customer churn"), "customer churn");
+        // Quoted phrases contribute their unquoted content.
+        assert_eq!(sem("\"annual report\" revenue"), "annual report revenue");
+    }
+
+    #[test]
+    fn semantic_text_strips_field_prefixes() {
+        // Fielded terms contribute the CONTENT, never the `field:` prefix.
+        assert_eq!(sem("title:report churn"), "report churn");
+        assert_eq!(sem("deck:\"board deck\" title:budget"), "board deck budget");
+    }
+
+    #[test]
+    fn semantic_text_excludes_negatives_dates_and_operators() {
+        // Negated terms (both spellings) are excluded.
+        assert_eq!(sem("churn -secret NOT draft"), "churn");
+        // Dates are lifted into bounds, never embedded.
+        assert_eq!(sem("churn after:2024-01-01 before:2025-01-01"), "churn");
+        // OR is an operator, not content; both branches' contents remain.
+        assert_eq!(sem("alpha OR beta"), "alpha beta");
+        // Date-only and purely-negative queries have nothing to embed.
+        assert_eq!(sem("after:2024-01-01"), "");
+        assert_eq!(sem("-churn NOT draft"), "");
+        assert_eq!(sem(""), "");
+    }
+
+    #[test]
+    fn semantic_text_keeps_residual_junk() {
+        // Unclassifiable tokens ride along (they also feed the plain fallback),
+        // interleaved in query order.
+        assert_eq!(sem("churn ::: rate"), "churn ::: rate");
     }
 }

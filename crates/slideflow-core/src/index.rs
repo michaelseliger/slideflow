@@ -29,9 +29,11 @@
 //! - All methods are synchronous; the desktop layer wraps them in blocking
 //!   tasks. `Library` is `Send` (no `!Send` fields) so it can live in a Mutex.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,16 +44,26 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
+use crate::embed::store::{blob_to_vec, vec_to_blob};
+use crate::embed::{rrf_fuse, Embedder, VectorStore};
 use crate::error::{Error, Result};
 use crate::model::{
-    DeckRecord, ExportRecord, RenderDropStat, RootRecord, SavedSearch, ScanEvent, ScanIssue,
-    ScanRecord, SearchFilters, SearchHit, SearchHistoryEntry, SlidePick, SlideRecord,
-    StatsOverview, TagRecord,
+    DeckRecord, DuplicateGroup, DuplicateSlide, ExportRecord, RenderDropStat, RootRecord,
+    SavedSearch, ScanEvent, ScanIssue, ScanRecord, SearchFilters, SearchHit, SearchHistoryEntry,
+    SimilarSlide, SlidePick, SlideRecord, StatsOverview, TagRecord,
 };
 use crate::pptx::PresentationFile;
 
 mod query;
-use query::{max_opt, min_opt, parse_query};
+use query::{max_opt, min_opt, parse_query, ParsedQuery};
+
+/// Near-duplicate cosine threshold and per-slide neighbor fan-out (roadmap #9).
+const NEAR_DUP_THRESHOLD: f32 = 0.92;
+const NEAR_DUP_TOP_N: usize = 10;
+/// Pool size taken from each retrieval arm before reciprocal-rank fusion.
+const HYBRID_POOL: usize = 200;
+/// Embedding batch size fed to the model at once.
+const EMBED_BATCH: usize = 32;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roots(
@@ -154,6 +166,16 @@ const TAG_SLIDE_COUNT: &str = "COALESCE((SELECT COUNT(*) FROM slide_tags stc \
 
 pub struct Library {
     conn: Connection,
+    /// Optional embedder; when set, the scan path embeds new slide texts and
+    /// semantic/hybrid search + find-similar + near-dup detection are enabled.
+    embedder: Option<Arc<dyn Embedder>>,
+    /// Lazily-loaded in-memory vectors for the active model. `None` = not yet
+    /// loaded (or invalidated by a scan/backfill); interior-mutable so read-only
+    /// (`&self`) search paths can populate it on first use.
+    vectors: RefCell<Option<VectorStore>>,
+    /// Memoized near-duplicate clusters (slide-id groups), invalidated whenever
+    /// the library changes. Recomputing is O(n²), so the Duplicates view reuses it.
+    near_clusters: RefCell<Option<Vec<Vec<i64>>>>,
 }
 
 impl Library {
@@ -174,9 +196,33 @@ impl Library {
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )?;
         conn.execute_batch(SCHEMA)?; // frozen v0 baseline (IF NOT EXISTS, idempotent)
-        let mut lib = Library { conn };
+        let mut lib = Library {
+            conn,
+            embedder: None,
+            vectors: RefCell::new(None),
+            near_clusters: RefCell::new(None),
+        };
         lib.migrate()?;
         Ok(lib)
+    }
+
+    /// Attach (or detach) the embedder. Detaching, or swapping models, invalidates
+    /// the in-memory vector caches. Setting this enables the semantic features.
+    pub fn set_embedder(&mut self, embedder: Option<Arc<dyn Embedder>>) {
+        self.embedder = embedder;
+        self.invalidate_vector_cache();
+    }
+
+    /// Whether a model is attached (semantic features available).
+    pub fn has_embedder(&self) -> bool {
+        self.embedder.is_some()
+    }
+
+    /// Drop the lazily-loaded vector store and memoized near-dup clusters. Call
+    /// after any change to slides or embeddings (scan/backfill completion).
+    pub fn invalidate_vector_cache(&self) {
+        *self.vectors.borrow_mut() = None;
+        *self.near_clusters.borrow_mut() = None;
     }
 
     /// Apply additive migrations up to SCHEMA_VERSION. Each migration + its
@@ -463,6 +509,11 @@ impl Library {
             [],
         );
 
+        // Drop embeddings orphaned by removed/changed slides, and force the
+        // in-memory vector + near-dup caches to reload on next use.
+        self.cleanup_orphan_embeddings()?;
+        self.invalidate_vector_cache();
+
         progress(ScanEvent::Finished { indexed, removed, unchanged, skipped: skipped.len() });
         Ok(())
     }
@@ -566,6 +617,21 @@ impl Library {
             )?;
         }
         tx.commit()?;
+
+        // With a model attached, embed any of this deck's slide texts not already
+        // vectorized (keyed by text_hash, so unchanged text and cross-deck reuse
+        // are skipped). Runs after the slide rows are committed.
+        if self.embedder.is_some() {
+            let pairs: Vec<(String, String)> = deck
+                .slides
+                .iter()
+                .filter_map(|s| match (&s.text_hash, &s.embed_text) {
+                    (Some(th), Some(t)) => Some((th.clone(), t.clone())),
+                    _ => None,
+                })
+                .collect();
+            self.embed_and_store_missing(&pairs)?;
+        }
         Ok(())
     }
 
@@ -591,24 +657,53 @@ impl Library {
     pub fn search(&self, query: &str, filters: &SearchFilters) -> Result<Vec<SearchHit>> {
         let limit = filters.limit.unwrap_or(200) as i64;
 
-        // Parse the advanced query syntax into an FTS5 MATCH expression plus any
-        // `before:`/`after:` date bounds lifted out of the text.
+        // Parse ONCE: the advanced query syntax becomes an FTS5 MATCH expression,
+        // `before:`/`after:` date bounds lifted out of the text, and the plain
+        // semantic text (positive-term content only — see ParsedQuery).
         let parsed = parse_query(query);
 
         // Fold the parsed date bounds into the caller's filters, combining
         // restrictively (max of the froms, min of the tos) so a `before:`/`after:`
-        // in the query box can only narrow a range the FilterPopover set.
+        // in the query box can only narrow a range the FilterPopover set. EVERY
+        // retrieval arm below — FTS, browse, and vector post-filtering — sees
+        // these effective filters.
         let mut eff = filters.clone();
         eff.modified_from = max_opt(eff.modified_from, parsed.after);
         eff.modified_to = min_opt(eff.modified_to, parsed.before);
 
-        match parsed.match_expr {
+        // Mode dispatch AFTER parsing. Semantic/hybrid need a model and some
+        // embeddable text; otherwise (lexical mode, no model, or a query that
+        // reduced to no positive terms) this is exactly the lexical flow — the
+        // embedder is never touched, and no mode ever errors.
+        let mode = filters.search_mode.as_deref().unwrap_or("lexical");
+        let want_vector = matches!(mode, "semantic" | "hybrid")
+            && self.embedder.is_some()
+            && !parsed.semantic_text.is_empty();
+        if !want_vector {
+            return self.lexical_flow(query, &parsed, &eff, limit);
+        }
+        match mode {
+            "semantic" => self.semantic_search(&parsed.semantic_text, &eff, limit as usize),
+            _ => self.hybrid_search(query, &parsed, &eff, limit as usize),
+        }
+    }
+
+    /// The lexical retrieval flow (advanced-syntax FTS with fallbacks), shared by
+    /// lexical mode and the hybrid FTS arm.
+    fn lexical_flow(
+        &self,
+        raw: &str,
+        parsed: &ParsedQuery,
+        eff: &SearchFilters,
+        limit: i64,
+    ) -> Result<Vec<SearchHit>> {
+        match &parsed.match_expr {
             // Primary path: run the parsed MATCH. It is constructed to be valid
             // FTS5, but as a belt-and-suspenders guarantee that a user never sees
             // an FTS syntax error, fall back to plain tokens if it ever errors.
-            Some(match_str) => match self.run_fts(&match_str, &eff, limit) {
+            Some(match_str) => match self.run_fts(match_str, eff, limit) {
                 Ok(hits) => Ok(hits),
-                Err(_) => self.search_plain(query, &eff, limit),
+                Err(_) => self.search_plain(raw, eff, limit),
             },
             // No positive text term (empty, date-only, or purely negative): fall
             // back on the RESIDUAL — only the tokens the parser could not
@@ -616,7 +711,7 @@ impl Library {
             // text-search consumed tokens (e.g. a date-only query's digits) and
             // wrongly return zero hits; with the residual, date-only and
             // purely-negative queries browse with the merged filters applied.
-            None => self.search_plain(&parsed.residual, &eff, limit),
+            None => self.search_plain(&parsed.residual, eff, limit),
         }
     }
 
@@ -685,6 +780,91 @@ impl Library {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(hits)
+    }
+
+    /// Semantic-only retrieval: cosine top-`limit` over the vector store for the
+    /// parsed query's semantic text, post-filtered to the EFFECTIVE filter set
+    /// (structured filters + parsed date bounds), with a fallback body snippet
+    /// per hit (there is no FTS match to mark up).
+    fn semantic_search(
+        &self,
+        semantic_text: &str,
+        eff: &SearchFilters,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let pool = self.vector_pool(semantic_text, eff, limit)?;
+        let ids: Vec<i64> = pool.iter().map(|(id, _)| *id).collect();
+        let fetched = self.fetch_slides_with_decks(&ids)?;
+        let mut out = Vec::with_capacity(pool.len());
+        for (id, score) in pool {
+            if let Some((slide, deck, body)) = fetched.get(&id) {
+                out.push(SearchHit {
+                    slide: slide.clone(),
+                    deck: deck.clone(),
+                    snippet: fallback_snippet(body),
+                    score: score as f64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Hybrid retrieval: reciprocal-rank fusion of the lexical top-N and the
+    /// cosine top-N. The FTS arm is exactly the lexical flow (parsed MATCH with
+    /// its fallbacks) over the effective filters — except that when the query
+    /// has no positive term and no residual tokens it contributes an EMPTY list
+    /// rather than browse results (fusing recency-ordered browse hits into a
+    /// ranked semantic result would poison the ranking). The vector arm embeds
+    /// only the parsed semantic text and is post-filtered against the same
+    /// effective filters, so `before:`/`after:`, tags, and favorites constrain
+    /// both arms identically. FTS hits keep their `<mark>` snippet; semantic-only
+    /// hits get the fallback body snippet. Result score is the RRF score.
+    fn hybrid_search(
+        &self,
+        raw: &str,
+        parsed: &ParsedQuery,
+        eff: &SearchFilters,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let fts = match &parsed.match_expr {
+            Some(match_str) => match self.run_fts(match_str, eff, HYBRID_POOL as i64) {
+                Ok(hits) => hits,
+                // Same belt-and-suspenders fallback as the lexical flow; a Some
+                // match_expr implies raw has alphanumeric tokens, so this never
+                // reaches browse.
+                Err(_) => self.search_plain(raw, eff, HYBRID_POOL as i64)?,
+            },
+            None if sanitize_query(&parsed.residual).is_empty() => Vec::new(),
+            None => self.search_plain(&parsed.residual, eff, HYBRID_POOL as i64)?,
+        };
+        let vec = self.vector_pool(&parsed.semantic_text, eff, HYBRID_POOL)?;
+
+        let fts_ids: Vec<i64> = fts.iter().map(|h| h.slide.id).collect();
+        let vec_ids: Vec<i64> = vec.iter().map(|(id, _)| *id).collect();
+        let fused = rrf_fuse(&[&fts_ids, &vec_ids]);
+
+        let mut fts_map: HashMap<i64, SearchHit> =
+            fts.into_iter().map(|h| (h.slide.id, h)).collect();
+        let top: Vec<(i64, f64)> = fused.into_iter().take(limit).collect();
+        let missing: Vec<i64> =
+            top.iter().map(|(id, _)| *id).filter(|id| !fts_map.contains_key(id)).collect();
+        let fetched = self.fetch_slides_with_decks(&missing)?;
+
+        let mut out = Vec::with_capacity(top.len());
+        for (id, score) in top {
+            if let Some(mut hit) = fts_map.remove(&id) {
+                hit.score = score;
+                out.push(hit);
+            } else if let Some((slide, deck, body)) = fetched.get(&id) {
+                out.push(SearchHit {
+                    slide: slide.clone(),
+                    deck: deck.clone(),
+                    snippet: fallback_snippet(body),
+                    score,
+                });
+            }
+        }
+        Ok(out)
     }
 
     // --- saved searches ------------------------------------------------------
@@ -801,6 +981,431 @@ impl Library {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(hits)
+    }
+
+    // --- semantic search / find-similar / duplicates ------------------------
+
+    /// Lazily (re)load the in-memory vector store for the active model. No-op when
+    /// no embedder is attached or the store is already loaded.
+    fn ensure_vectors(&self) -> Result<()> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(());
+        };
+        if self.vectors.borrow().is_some() {
+            return Ok(());
+        }
+        let model_id = embedder.id().to_string();
+        let dims = embedder.dims();
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.text_hash, e.vector \
+             FROM slides s JOIN embeddings e \
+             ON e.text_hash = s.text_hash AND e.model_id = ?1 \
+             WHERE s.text_hash IS NOT NULL ORDER BY s.id",
+        )?;
+        let rows = stmt
+            .query_map(params![model_id], |r| {
+                let id: i64 = r.get(0)?;
+                let th: String = r.get(1)?;
+                let blob: Vec<u8> = r.get(2)?;
+                Ok((id, th, blob_to_vec(&blob)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        *self.vectors.borrow_mut() = Some(VectorStore::new(model_id, dims, rows));
+        Ok(())
+    }
+
+    /// Cosine-top-`cap` slide ids (+scores) for `query`, post-filtered to the
+    /// structured-filter allowed set when any filter is active. Empty when no
+    /// model/vectors are available.
+    fn vector_pool(&self, query: &str, filters: &SearchFilters, cap: usize) -> Result<Vec<(i64, f32)>> {
+        let Some(embedder) = self.embedder.clone() else {
+            return Ok(Vec::new());
+        };
+        self.ensure_vectors()?;
+        let qv = embedder.embed_query(query)?;
+        let allowed = if filters_active(filters) {
+            Some(self.allowed_slide_ids(filters)?)
+        } else {
+            None
+        };
+        let guard = self.vectors.borrow();
+        let Some(store) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if store.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hits = store.top_k(&qv, cap, |i| match &allowed {
+            Some(set) => !set.contains(&store.slide_ids()[i]),
+            None => false,
+        });
+        Ok(hits.into_iter().map(|(i, s)| (store.slide_ids()[i], s)).collect())
+    }
+
+    /// Slide ids satisfying the structured filters (no text match) — the allowed
+    /// set for post-filtering vector hits.
+    fn allowed_slide_ids(&self, filters: &SearchFilters) -> Result<HashSet<i64>> {
+        let mut clauses = Vec::new();
+        let mut fparams = Vec::new();
+        push_filters(filters, &mut clauses, &mut fparams);
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        };
+        let sql = format!("SELECT s.id FROM slides s JOIN decks d ON d.id = s.deck_id{where_sql}");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let ids = stmt
+            .query_map(params_from_iter(fparams), |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        Ok(ids)
+    }
+
+    /// Fetch `(SlideRecord, DeckRecord, body_text)` for a set of slide ids, keyed
+    /// by slide id. Missing ids are simply absent from the map.
+    fn fetch_slides_with_decks(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, (SlideRecord, DeckRecord, String)>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT {SLIDE_COLS}, {DECK_COLS}, s.body_text \
+             FROM slides s JOIN decks d ON d.id = s.deck_id WHERE s.id IN ({placeholders})"
+        );
+        let params: Vec<Value> = ids.iter().map(|id| Value::Integer(*id)).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map = HashMap::with_capacity(ids.len());
+        let rows = stmt.query_map(params_from_iter(params), |row| {
+            let slide = row_to_slide(row, 0)?;
+            let deck = row_to_deck(row, SLIDE_COL_COUNT)?;
+            let body: String = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT)?;
+            Ok((slide.id, (slide, deck, body)))
+        })?;
+        for r in rows {
+            let (id, v) = r?;
+            map.insert(id, v);
+        }
+        Ok(map)
+    }
+
+    /// Slides semantically closest to `slide_id` (find-similar, roadmap #6).
+    /// Excludes the anchor and any same-text twin. Empty when the model is absent
+    /// or the anchor isn't embedded — never an error.
+    pub fn get_similar_slides(&self, slide_id: i64, limit: usize) -> Result<Vec<SimilarSlide>> {
+        if self.embedder.is_none() {
+            return Ok(Vec::new());
+        }
+        self.ensure_vectors()?;
+        let scored: Vec<(i64, f32)> = {
+            let guard = self.vectors.borrow();
+            let Some(store) = guard.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let Some(row) = store.row_of_slide(slide_id) else {
+                return Ok(Vec::new());
+            };
+            let anchor_hash = store.text_hash_at(row).to_string();
+            let qv = store.row(row).to_vec();
+            store
+                .top_k(&qv, limit, |i| {
+                    store.slide_ids()[i] == slide_id || store.text_hash_at(i) == anchor_hash
+                })
+                .into_iter()
+                .map(|(i, s)| (store.slide_ids()[i], s))
+                .collect()
+        };
+        let ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
+        let fetched = self.fetch_slides_with_decks(&ids)?;
+        let mut out = Vec::with_capacity(scored.len());
+        for (id, score) in scored {
+            if let Some((slide, deck, _)) = fetched.get(&id) {
+                out.push(SimilarSlide {
+                    slide: slide.clone(),
+                    deck: deck.clone(),
+                    score: score as f64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// All duplicate groups: exact (identical content hash) first, then near
+    /// (embedding-similar, when a model is attached). Near groups redundant with
+    /// an exact group (all members share one content hash) are omitted.
+    pub fn list_duplicate_groups(&self) -> Result<Vec<DuplicateGroup>> {
+        let exact = self.exact_dup_groups()?;
+        let near = self.near_dup_groups()?;
+
+        let mut all_ids: Vec<i64> = Vec::new();
+        for g in exact.iter().chain(near.iter()) {
+            all_ids.extend_from_slice(g);
+        }
+        let fetched = self.fetch_slides_with_decks(&all_ids)?;
+
+        let build = |ids: &[i64]| -> Vec<DuplicateSlide> {
+            let mut v: Vec<DuplicateSlide> = ids
+                .iter()
+                .filter_map(|id| fetched.get(id))
+                .map(|(slide, deck, _)| DuplicateSlide { slide: slide.clone(), deck: deck.clone() })
+                .collect();
+            // Newest-modified first so the UI can badge the newest copy.
+            v.sort_by(|a, b| {
+                b.deck.modified_unix.cmp(&a.deck.modified_unix).then(a.slide.id.cmp(&b.slide.id))
+            });
+            v
+        };
+
+        let mut out = Vec::with_capacity(exact.len() + near.len());
+        for g in &exact {
+            let slides = build(g);
+            if slides.len() >= 2 {
+                out.push(DuplicateGroup { kind: "exact".into(), score: None, slides });
+            }
+        }
+        if !near.is_empty() {
+            let guard = self.vectors.borrow();
+            for g in &near {
+                let slides = build(g);
+                if slides.len() < 2 {
+                    continue;
+                }
+                let score = guard.as_ref().and_then(|s| s.group_cohesion(g));
+                out.push(DuplicateGroup { kind: "near".into(), score, slides });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Exact-duplicate slide-id groups (identical `content_hash`, count > 1),
+    /// largest first.
+    fn exact_dup_groups(&self) -> Result<Vec<Vec<i64>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_hash, s.id FROM slides s \
+             WHERE content_hash IN \
+               (SELECT content_hash FROM slides WHERE content_hash IS NOT NULL \
+                GROUP BY content_hash HAVING COUNT(*) > 1) \
+             ORDER BY content_hash, s.id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut groups: Vec<Vec<i64>> = Vec::new();
+        let mut cur_hash: Option<String> = None;
+        for (hash, id) in rows {
+            if cur_hash.as_deref() != Some(hash.as_str()) {
+                groups.push(Vec::new());
+                cur_hash = Some(hash);
+            }
+            groups.last_mut().unwrap().push(id);
+        }
+        groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+        Ok(groups)
+    }
+
+    /// Near-duplicate slide-id groups (memoized until the library changes). Empty
+    /// without a model. Groups whose members all share one content hash are
+    /// dropped as redundant with the exact groups.
+    fn near_dup_groups(&self) -> Result<Vec<Vec<i64>>> {
+        if self.embedder.is_none() {
+            return Ok(Vec::new());
+        }
+        self.ensure_vectors()?;
+        let need = self.near_clusters.borrow().is_none();
+        if need {
+            let clusters = {
+                let guard = self.vectors.borrow();
+                match guard.as_ref() {
+                    Some(store) => store.near_dup_clusters(NEAR_DUP_THRESHOLD, NEAR_DUP_TOP_N),
+                    None => Vec::new(),
+                }
+            };
+            *self.near_clusters.borrow_mut() = Some(clusters);
+        }
+        let clusters = self.near_clusters.borrow().clone().unwrap_or_default();
+        let mut out = Vec::new();
+        for g in clusters {
+            if !self.all_same_content_hash(&g)? {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether every slide id in `ids` shares one non-null content hash (→ already
+    /// captured by an exact group).
+    fn all_same_content_hash(&self, ids: &[i64]) -> Result<bool> {
+        if ids.len() < 2 {
+            return Ok(false);
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT content_hash), COUNT(*), COUNT(content_hash) \
+             FROM slides WHERE id IN ({placeholders})"
+        );
+        let params: Vec<Value> = ids.iter().map(|id| Value::Integer(*id)).collect();
+        let (distinct, total, non_null): (i64, i64, i64) =
+            self.conn.query_row(&sql, params_from_iter(params), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        Ok(distinct == 1 && non_null == total)
+    }
+
+    // --- embedding pipeline -------------------------------------------------
+
+    /// Embed and store any `(text_hash, embed_text)` not already vectorized for
+    /// the active model. Dedupes within the batch, filters against existing rows,
+    /// embeds in batches of [`EMBED_BATCH`]. Returns the number of new vectors.
+    fn embed_and_store_missing(&mut self, pairs: &[(String, String)]) -> Result<usize> {
+        let Some(embedder) = self.embedder.clone() else {
+            return Ok(0);
+        };
+        let model_id = embedder.id().to_string();
+        let dims = embedder.dims();
+
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut todo: Vec<(String, String)> = Vec::new();
+        for (th, text) in pairs {
+            if !seen.insert(th.as_str()) {
+                continue;
+            }
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM embeddings WHERE model_id=?1 AND text_hash=?2)",
+                params![model_id, th],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                todo.push((th.clone(), text.clone()));
+            }
+        }
+        if todo.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0usize;
+        for chunk in todo.chunks(EMBED_BATCH) {
+            let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+            let vectors = embedder.embed_passages(&texts)?;
+            let tx = self.conn.transaction()?;
+            for ((th, _), mut vec) in chunk.iter().zip(vectors) {
+                crate::embed::store::l2_normalize(&mut vec); // normalize at write time
+                let blob = vec_to_blob(&vec);
+                tx.execute(
+                    "INSERT OR IGNORE INTO embeddings(model_id, text_hash, dims, vector) \
+                     VALUES(?1,?2,?3,?4)",
+                    params![model_id, th, dims as i64, blob],
+                )?;
+                written += 1;
+            }
+            tx.commit()?;
+        }
+        Ok(written)
+    }
+
+    /// Decks with at least one slide missing its content hash (indexed before
+    /// hashing existed). The backfill reparses these to fill the hashes.
+    pub fn decks_needing_hash_backfill(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.id, d.path FROM decks d \
+             JOIN slides s ON s.deck_id = d.id WHERE s.content_hash IS NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Reparse `path` and fill each slide's content/text hash by slide index,
+    /// without touching FTS or embeddings. Brings pre-hashing rows up to date.
+    pub fn backfill_deck_hashes(&mut self, deck_id: i64, path: &str) -> Result<()> {
+        let deck = extract_deck(Path::new(path))?;
+        let tx = self.conn.transaction()?;
+        for slide in &deck.slides {
+            tx.execute(
+                "UPDATE slides SET content_hash=?3, text_hash=?4 \
+                 WHERE deck_id=?1 AND slide_index=?2",
+                params![deck_id, slide.index, slide.content_hash, slide.text_hash],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `(text_hash, embed_text)` for every distinct slide text lacking a vector for
+    /// the active model. `embed_text` is rebuilt from the stored title/body/notes
+    /// (identical to the inline path, so it hashes back to `text_hash`). Empty
+    /// without a model.
+    pub fn pending_embedding_texts(&self) -> Result<Vec<(String, String)>> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let model_id = embedder.id().to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT s.text_hash, s.title, s.body_text, s.notes FROM slides s \
+             WHERE s.text_hash IS NOT NULL \
+               AND NOT EXISTS(SELECT 1 FROM embeddings e \
+                 WHERE e.model_id = ?1 AND e.text_hash = s.text_hash) \
+             GROUP BY s.text_hash",
+        )?;
+        let rows = stmt.query_map(params![model_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (th, title, body, notes) = row?;
+            if let Some(text) =
+                crate::hash::slide_embed_text(title.as_deref(), &body, notes.as_deref())
+            {
+                out.push((th, text));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Embed and store a chunk of `(text_hash, embed_text)` pairs (idempotent;
+    /// skips already-stored texts). Used by the desktop backfill loop. Returns the
+    /// number of new vectors written.
+    pub fn embed_and_store(&mut self, pairs: &[(String, String)]) -> Result<usize> {
+        self.embed_and_store_missing(pairs)
+    }
+
+    /// Remove embeddings whose text no longer appears in any slide.
+    pub fn cleanup_orphan_embeddings(&mut self) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM embeddings WHERE text_hash NOT IN \
+             (SELECT DISTINCT text_hash FROM slides WHERE text_hash IS NOT NULL)",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    /// `(embedded_slides, embeddable_slides)` for the active model: slides whose
+    /// text has a stored vector, and slides that carry indexable text. With no
+    /// model attached, `embedded_slides` is 0.
+    pub fn embedding_counts(&self) -> Result<(i64, i64)> {
+        let embeddable: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM slides WHERE text_hash IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let embedded: i64 = match self.embedder.as_ref() {
+            Some(e) => self.conn.query_row(
+                "SELECT COUNT(*) FROM slides s WHERE s.text_hash IS NOT NULL \
+                 AND EXISTS(SELECT 1 FROM embeddings e \
+                   WHERE e.model_id=?1 AND e.text_hash=s.text_hash)",
+                params![e.id()],
+                |r| r.get(0),
+            )?,
+            None => 0,
+        };
+        Ok((embedded, embeddable))
     }
 
     pub fn decks(&self) -> Result<Vec<DeckRecord>> {
@@ -1489,6 +2094,23 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Whether any structured (non-text) filter is active — the trigger for
+/// post-filtering semantic hits against an allowed-slide set.
+fn filters_active(f: &SearchFilters) -> bool {
+    f.deck_query.as_ref().is_some_and(|q| !q.is_empty())
+        || f.path_prefix.as_ref().is_some_and(|p| !p.is_empty())
+        || f.modified_from.is_some()
+        || f.modified_to.is_some()
+        || f.favorites_only == Some(true)
+        || f.tag_id.is_some()
+}
+
+/// Fallback snippet for a hit with no FTS match (semantic-only): the first ~160
+/// chars of the body, HTML-escaped like the browse snippets.
+fn fallback_snippet(body: &str) -> String {
+    html_escape(&body.chars().take(160).collect::<String>())
+}
+
 /// Bump to force a one-time reindex of every deck (e.g. when the extraction
 /// logic or FTS content changes) — a new version makes every stored hash stale.
 const INDEX_VERSION: u32 = 2;
@@ -1686,6 +2308,10 @@ struct ExtractedSlide {
     /// sha256 of the embedder input string, or `None` when the slide has no
     /// indexable text. Keys the (model_id, text_hash) embeddings rows.
     text_hash: Option<String>,
+    /// The exact text an embedder is fed (title/body/notes joined). Not persisted
+    /// — carried so the inline scan path can embed newly-seen texts without a
+    /// second parse. `None` mirrors `text_hash` being `None`.
+    embed_text: Option<String>,
 }
 
 struct ExtractedDeck {
@@ -1733,6 +2359,7 @@ fn extract_deck(path: &Path) -> Result<ExtractedDeck> {
             notes: content.notes.clone(),
             content_hash,
             text_hash,
+            embed_text,
         });
     }
 
@@ -1827,9 +2454,36 @@ fn watch_relevant(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::FakeEmbedder;
     use crate::fixtures::{DeckSpec, SlideSpec};
     use std::collections::HashSet;
     use std::fs::OpenOptions;
+    use std::sync::Arc;
+
+    fn embedding_rows(lib: &Library) -> i64 {
+        lib.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap()
+    }
+
+    /// A small three-slide, two-deck library with a FakeEmbedder attached and a
+    /// completed scan (so every slide is embedded).
+    fn embedded_library() -> (tempfile::TempDir, Library, Arc<FakeEmbedder>) {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Finance")
+            .slide(SlideSpec::new("Revenue").bullets(&["Revenue up 12%", "Churn down"]))
+            .slide(SlideSpec::new("Outlook").bullets(&["Zürich office opens"]))
+            .write_to(&dir.path().join("finance.pptx"))
+            .unwrap();
+        DeckSpec::new("Product")
+            .slide(SlideSpec::new("Roadmap").bullets(&["Ship search", "Ship compose"]))
+            .write_to(&dir.path().join("product.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(32));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        (dir, lib, fake)
+    }
 
     fn scan_silent(lib: &mut Library) -> ScanEvent {
         let mut finished = ScanEvent::Finished { indexed: 0, removed: 0, unchanged: 0, skipped: 0 };
@@ -1947,6 +2601,306 @@ mod tests {
             stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
         assert!(before.iter().all(|h| h.is_some()));
+    }
+
+    #[test]
+    fn inline_embeds_only_missing_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Alpha").bullets(&["aaa"]))
+            .slide(SlideSpec::new("Beta").bullets(&["bbb"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(16));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        assert_eq!(fake.passage_count(), 2, "two distinct texts embedded");
+        assert_eq!(embedding_rows(&lib), 2);
+
+        // Unchanged rescan: deck skipped by (mtime,size) → no new embed calls/rows.
+        scan_silent(&mut lib);
+        assert_eq!(fake.passage_count(), 2, "unchanged rescan must not re-embed");
+        assert_eq!(embedding_rows(&lib), 2);
+
+        // A new deck reusing the SAME "Alpha/aaa" text embeds nothing new.
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Alpha").bullets(&["aaa"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        scan_silent(&mut lib);
+        assert_eq!(fake.passage_count(), 2, "identical text across decks embeds once");
+        assert_eq!(embedding_rows(&lib), 2);
+    }
+
+    #[test]
+    fn lexical_mode_never_embeds_query() {
+        let (_dir, lib, fake) = embedded_library();
+        let before = fake.query_count();
+        // Default (no search_mode) is lexical.
+        lib.search("revenue", &SearchFilters::default()).unwrap();
+        // Explicit lexical.
+        let lex = SearchFilters { search_mode: Some("lexical".into()), ..Default::default() };
+        lib.search("revenue", &lex).unwrap();
+        assert_eq!(fake.query_count(), before, "lexical search must never embed the query");
+    }
+
+    #[test]
+    fn semantic_search_embeds_query_and_ranks_all() {
+        let (_dir, lib, fake) = embedded_library();
+        let before = fake.query_count();
+        let f = SearchFilters { search_mode: Some("semantic".into()), ..Default::default() };
+        let hits = lib.search("revenue growth", &f).unwrap();
+        assert!(fake.query_count() > before, "semantic search embeds the query");
+        assert_eq!(hits.len(), 3, "all embedded slides are candidates");
+        assert!(hits.iter().all(|h| !h.snippet.is_empty()), "fallback snippets present");
+        // Scores are non-increasing.
+        for w in hits.windows(2) {
+            assert!(w[0].score >= w[1].score);
+        }
+    }
+
+    #[test]
+    fn hybrid_surfaces_semantic_only_hits() {
+        let (_dir, lib, _fake) = embedded_library();
+        // FTS alone matches only the "Revenue" slide.
+        let lex = lib.search("revenue", &SearchFilters::default()).unwrap();
+        assert_eq!(lex.len(), 1);
+        assert!(lex[0].snippet.contains("<mark>"));
+
+        let hy = SearchFilters { search_mode: Some("hybrid".into()), ..Default::default() };
+        let hits = lib.search("revenue", &hy).unwrap();
+        assert!(hits.len() > lex.len(), "hybrid adds semantic-only hits");
+        assert!(hits.iter().any(|h| h.snippet.contains("<mark>")), "FTS mark retained");
+        assert!(
+            hits.iter().any(|h| !h.snippet.contains("<mark>")),
+            "a semantic-only hit surfaces with a fallback snippet"
+        );
+    }
+
+    #[test]
+    fn hybrid_and_semantic_respect_parsed_date_bounds() {
+        // Two decks, BOTH with a semantically-matching "revenue" slide; one deck
+        // is made old. A parsed `after:` bound must exclude the old deck's slide
+        // from the vector arm too (eff post-filtering), not just from FTS.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Old")
+            .slide(SlideSpec::new("Revenue").bullets(&["quarterly revenue growth"]))
+            .write_to(&dir.path().join("old.pptx"))
+            .unwrap();
+        DeckSpec::new("New")
+            .slide(SlideSpec::new("Revenue").bullets(&["revenue outlook and growth"]))
+            .write_to(&dir.path().join("new.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.set_embedder(Some(Arc::new(FakeEmbedder::new(32))));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        // Backdate old.pptx to 2010 (fixtures share the real file mtime).
+        lib.conn
+            .execute(
+                "UPDATE decks SET modified_unix = 1262304000 WHERE file_name = 'old.pptx'",
+                [],
+            )
+            .unwrap();
+
+        for mode in ["hybrid", "semantic"] {
+            let f = SearchFilters { search_mode: Some(mode.into()), ..Default::default() };
+            // Control: without the bound, both decks' slides surface.
+            let all = lib.search("revenue", &f).unwrap();
+            assert!(
+                all.iter().any(|h| h.deck.file_name == "old.pptx"),
+                "{mode}: old deck present without a date bound"
+            );
+            // With `after:` parsed out of the query, the old deck must vanish
+            // from BOTH retrieval arms.
+            let bounded = lib.search("revenue after:2015-01-01", &f).unwrap();
+            assert!(
+                bounded.iter().all(|h| h.deck.file_name != "old.pptx"),
+                "{mode}: parsed after: must exclude the old deck's hits"
+            );
+            assert!(
+                bounded.iter().any(|h| h.deck.file_name == "new.pptx"),
+                "{mode}: the in-range deck still matches"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_falls_back_to_lexical_without_model() {
+        // No embedder attached: semantic/hybrid silently behave lexically.
+        let (_dir, lib) = two_deck_library();
+        let f = SearchFilters { search_mode: Some("semantic".into()), ..Default::default() };
+        let hits = lib.search("revenue", &f).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].snippet.contains("<mark>"), "degraded to FTS, not empty/error");
+    }
+
+    #[test]
+    fn similar_excludes_self_and_twins_ordered_by_score() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Shared").bullets(&["same text"]))
+            .slide(SlideSpec::new("Other").bullets(&["different alpha content"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Shared").bullets(&["same text"])) // twin of A/Shared
+            .slide(SlideSpec::new("Third").bullets(&["different beta content"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(32));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let a = lib.decks().unwrap().into_iter().find(|d| d.file_name == "a.pptx").unwrap();
+        let anchor = lib
+            .slides_for_deck(a.id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.title.as_deref() == Some("Shared"))
+            .unwrap();
+
+        let sim = lib.get_similar_slides(anchor.id, 10).unwrap();
+        assert!(!sim.is_empty());
+        assert!(sim.iter().all(|s| s.slide.id != anchor.id), "anchor excluded");
+        assert!(
+            sim.iter().all(|s| s.slide.title.as_deref() != Some("Shared")),
+            "same-text twin excluded"
+        );
+        for w in sim.windows(2) {
+            assert!(w[0].score >= w[1].score, "ordered by score desc");
+        }
+    }
+
+    #[test]
+    fn get_similar_slides_empty_without_model() {
+        let (_dir, lib) = two_deck_library(); // no embedder
+        let any = lib.decks().unwrap()[0].id;
+        let s = lib.slides_for_deck(any).unwrap()[0].id;
+        assert!(lib.get_similar_slides(s, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_duplicate_groups_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Shared").bullets(&["dup body"]))
+            .slide(SlideSpec::new("UniqueA").bullets(&["only here"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Shared").bullets(&["dup body"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap(); // no model → exact only
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let groups = lib.list_duplicate_groups().unwrap();
+        assert!(groups.iter().all(|g| g.kind == "exact"), "no near groups without a model");
+        let exact: Vec<_> = groups.iter().filter(|g| g.kind == "exact").collect();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].slides.len(), 2);
+        assert!(exact[0].score.is_none());
+        let decks: HashSet<&str> =
+            exact[0].slides.iter().map(|s| s.deck.file_name.as_str()).collect();
+        assert!(decks.contains("a.pptx") && decks.contains("b.pptx"));
+    }
+
+    #[test]
+    fn near_duplicate_groups_detected_with_model() {
+        // Identical visible text, different XML (one has an extra text-less shape):
+        // content hashes differ (not exact), embeddings match (near).
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Deck").bullets(&["identical body"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(
+                SlideSpec::new("Deck").bullets(&["identical body"]).raw_shape(
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="99" name="deco"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>"#,
+                ),
+            )
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(32));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let groups = lib.list_duplicate_groups().unwrap();
+        assert!(groups.iter().all(|g| g.kind != "exact"), "differing XML → not exact");
+        let near: Vec<_> = groups.iter().filter(|g| g.kind == "near").collect();
+        assert_eq!(near.len(), 1, "the two same-text slides form one near group");
+        assert_eq!(near[0].slides.len(), 2);
+        assert!(near[0].score.unwrap() >= NEAR_DUP_THRESHOLD);
+    }
+
+    #[test]
+    fn backfill_fills_hashes_and_embeds_missing() {
+        // Emulate a library indexed before hashing: NULL content/text hashes.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Old")
+            .slide(SlideSpec::new("One").bullets(&["alpha"]))
+            .slide(SlideSpec::new("Two").bullets(&["beta"]))
+            .write_to(&dir.path().join("old.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        lib.conn.execute("UPDATE slides SET content_hash=NULL, text_hash=NULL", []).unwrap();
+
+        // Attach a model and run the primitives the desktop backfill loop uses.
+        let fake = Arc::new(FakeEmbedder::new(16));
+        lib.set_embedder(Some(fake.clone()));
+        let decks = lib.decks_needing_hash_backfill().unwrap();
+        assert_eq!(decks.len(), 1);
+        for (id, path) in decks {
+            lib.backfill_deck_hashes(id, &path).unwrap();
+        }
+        let nulls: i64 = lib
+            .conn
+            .query_row("SELECT COUNT(*) FROM slides WHERE content_hash IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(nulls, 0, "hashes backfilled");
+
+        let pending = lib.pending_embedding_texts().unwrap();
+        assert_eq!(pending.len(), 2);
+        for chunk in pending.chunks(1) {
+            lib.embed_and_store(chunk).unwrap();
+        }
+        assert_eq!(embedding_rows(&lib), 2);
+        assert_eq!(fake.passage_count(), 2);
+        assert_eq!(lib.embedding_counts().unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn orphan_embeddings_cleaned_after_text_change() {
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("D")
+            .slide(SlideSpec::new("S").bullets(&["alpha one"]))
+            .write_to(&dir.path().join("d.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(16));
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+        assert_eq!(embedding_rows(&lib), 1);
+
+        // Rewrite the slide text (different length → new deck hash forces reindex).
+        DeckSpec::new("D")
+            .slide(SlideSpec::new("S").bullets(&["beta two three four five"]))
+            .write_to(&dir.path().join("d.pptx"))
+            .unwrap();
+        scan_silent(&mut lib);
+        assert_eq!(embedding_rows(&lib), 1, "old text's embedding cleaned; new one added");
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub struct SearchFilters {
     /// Ignored by full-text search (always bm25-ranked); drives the browse
     /// `ORDER BY` so the `limit` window selects the correct top-N for the key.
     pub sort: Option<String>,
+    /// Retrieval mode: "lexical" (FTS bm25), "semantic" (embedding cosine), or
+    /// "hybrid" (reciprocal-rank fusion of both). Absent/`None` = lexical. When
+    /// no embedder is available, semantic/hybrid silently degrade to lexical.
+    pub search_mode: Option<String>,
 }
 
 /// A user-saved search: a named query plus the filters that were active when it
@@ -244,4 +248,46 @@ pub struct StatsOverview {
     pub last_scan_issues: Vec<ScanIssue>,
     /// Renderer drop telemetry aggregated by construct kind (populated in step6).
     pub render_drops: Vec<RenderDropStat>,
+}
+
+/// A slide semantically similar to a query slide (find-similar, roadmap #6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimilarSlide {
+    pub slide: SlideRecord,
+    pub deck: DeckRecord,
+    /// Cosine similarity to the anchor slide, in `[-1, 1]` (higher = closer).
+    pub score: f64,
+}
+
+/// One slide (with its owning deck) inside a duplicate group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateSlide {
+    pub slide: SlideRecord,
+    pub deck: DeckRecord,
+}
+
+/// A cluster of duplicate or near-duplicate slides (roadmap #9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    /// "exact" (identical content hash) or "near" (embedding-similar).
+    pub kind: String,
+    /// Group cohesion score for near groups (mean cosine to the first member);
+    /// `None` for exact groups.
+    pub score: Option<f32>,
+    /// Members, ordered newest-modified first so the UI can badge the newest copy.
+    pub slides: Vec<DuplicateSlide>,
+}
+
+/// Snapshot of the semantic-search subsystem for the settings UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingStatus {
+    /// "disabled" | "not_downloaded" | "downloading" | "ready" | "error".
+    pub state: String,
+    pub model_id: String,
+    pub dims: i64,
+    /// Slides with a stored vector for the active model.
+    pub embedded_slides: i64,
+    /// Slides that carry indexable text (the achievable maximum).
+    pub total_slides: i64,
+    pub error: Option<String>,
 }
