@@ -7,6 +7,8 @@
 import type {
   ComposeReport,
   DeckRecord,
+  ExportEvent,
+  ExportReport,
   FitMode,
   RootRecord,
   SavedSearch,
@@ -282,6 +284,69 @@ export function composeDeck(
     : mock.composeDeck(picks, outputPath, title, includeNotes, fitMode);
 }
 
+/** Export the picked slides as a single PDF at `outputPath`. */
+export function exportTrayPdf(
+  picks: SlidePick[],
+  outputPath: string,
+  title: string,
+): Promise<ExportReport> {
+  return isTauri()
+    ? tauriInvoke("export_tray_pdf", {
+        args: { picks, output_path: outputPath, title },
+      })
+    : mockExport(picks, outputPath, "pdf");
+}
+
+/** Export the picked slides as one PNG each into `outDir`, at `width` px. */
+export function exportTrayPngs(
+  picks: SlidePick[],
+  outDir: string,
+  width: number,
+): Promise<ExportReport> {
+  return isTauri()
+    ? tauriInvoke("export_tray_pngs", {
+        args: { picks, out_dir: outDir, width },
+      })
+    : mockExport(picks, outDir, width);
+}
+
+/**
+ * Subscribe to `export:event` progress while a PDF/PNG export runs. Returns an
+ * unlisten function. In browser mode `mockExport` drives an in-memory bus.
+ */
+export async function onExportEvent(
+  handler: (ev: ExportEvent) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const un = await listen<ExportEvent>("export:event", (e) => handler(e.payload));
+    return un;
+  }
+  mockExportListeners.add(handler);
+  return () => mockExportListeners.delete(handler);
+}
+
+const mockExportListeners = new Set<(ev: ExportEvent) => void>();
+function emitMockExport(ev: ExportEvent) {
+  for (const l of mockExportListeners) l(ev);
+}
+/** Browser-mode fake export: streams short per-slide progress, then hands off to
+ *  the mock library for a plausible report (and "Most exported" bump). The
+ *  third arg is a PNG width when a number, or the PDF marker `"pdf"`. */
+async function mockExport(
+  picks: SlidePick[],
+  target: string,
+  kind: number | "pdf",
+): Promise<ExportReport> {
+  const total = picks.length;
+  emitMockExport({ done: 0, total });
+  for (let i = 1; i <= total; i++) {
+    await sleep(Math.max(50, 400 / Math.max(1, total)));
+    emitMockExport({ done: i, total });
+  }
+  return mock.exportTray(picks, target, kind);
+}
+
 // ---------------------------------------------------------------------------
 // System integration
 // ---------------------------------------------------------------------------
@@ -435,11 +500,13 @@ export async function pickFolder(): Promise<string | null> {
   return typeof result === "string" ? result : null;
 }
 
-/** Native "save as .pptx" dialog; browser mode returns a canned path.
- *  `defaultDir` (a remembered folder) pre-points the dialog when provided. */
+/** Native "save as…" dialog; browser mode returns a canned path. `defaultDir`
+ *  (a remembered folder) pre-points the dialog when provided; `filter` sets the
+ *  file-type filter (defaults to PowerPoint/.pptx). */
 export async function pickSavePath(
   defaultName: string,
   defaultDir?: string,
+  filter: { name: string; extensions: string[] } = { name: "PowerPoint", extensions: ["pptx"] },
 ): Promise<string | null> {
   if (!isTauri()) {
     const dir = defaultDir && defaultDir.length > 0 ? defaultDir : "/Users/you/Desktop";
@@ -449,9 +516,6 @@ export async function pickSavePath(
   const sep = defaultDir && defaultDir.includes("\\") ? "\\" : "/";
   const defaultPath =
     defaultDir && defaultDir.length > 0 ? `${defaultDir}${sep}${defaultName}` : defaultName;
-  const result = await save({
-    defaultPath,
-    filters: [{ name: "PowerPoint", extensions: ["pptx"] }],
-  });
+  const result = await save({ defaultPath, filters: [filter] });
   return result ?? null;
 }

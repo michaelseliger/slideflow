@@ -17,11 +17,11 @@ use tokio::sync::Semaphore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use slideflow_core::export::{export_pdf, export_pngs, system_fonts, PdfOptions, PngOptions};
 use slideflow_core::index::Library;
 use slideflow_core::model::{
-    ComposeReport, DeckRecord, FitMode, RootRecord, SavedSearch, SearchFilters, SearchHit,
-    SlidePick,
-    SlideRecord, StatsOverview,
+    ComposeReport, DeckRecord, ExportReport, FitMode, RootRecord, SavedSearch, SearchFilters,
+    SearchHit, SlidePick, SlideRecord, StatsOverview,
 };
 use slideflow_core::pptx::composer::{compose, ComposeOptions};
 use slideflow_core::pptx::PresentationFile;
@@ -473,6 +473,125 @@ pub async fn compose_deck(
         );
     }
     Ok(report)
+}
+
+/// Progress event streamed on `export:event` while a PDF/PNG export runs — the
+/// engine fires it once per processed slide so the sheet's bar is determinate.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ExportEvent {
+    pub done: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportPdfArgs {
+    pub picks: Vec<SlidePick>,
+    pub output_path: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportPngsArgs {
+    pub picks: Vec<SlidePick>,
+    pub out_dir: String,
+    pub width: u32,
+}
+
+/// Distinct source-deck count among `picks` — the `source_decks` figure for the
+/// stats view (an export can pull slides from several decks).
+fn distinct_decks(picks: &[SlidePick]) -> usize {
+    picks
+        .iter()
+        .map(|p| p.pptx_path.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+/// Record a PNG/PDF export in the same history table `compose_deck` uses, so the
+/// "Most exported" stat includes them. Best-effort — a stats write never fails
+/// an otherwise-good export.
+fn record_export_best_effort(
+    state: &AppState,
+    output_path: &str,
+    title: &str,
+    slide_count: usize,
+    picks: &[SlidePick],
+) {
+    if let Ok(mut lib) = state.library.lock() {
+        let _ = lib.record_export(
+            output_path,
+            title,
+            slide_count as i64,
+            distinct_decks(picks) as i64,
+            picks,
+        );
+    }
+}
+
+#[tauri::command]
+pub async fn export_tray_pdf(
+    app: AppHandle,
+    args: ExportPdfArgs,
+) -> Result<ExportReport, String> {
+    let ExportPdfArgs { picks, output_path, title } = args;
+    // Title for the stats row: the chosen title, else the output file stem.
+    let record_title = title.clone().unwrap_or_else(|| file_stem_or(&output_path, "Slideflow PDF"));
+    let record_picks = picks.clone();
+    let slide_count = picks.len();
+
+    let fonts = system_fonts();
+    let app_emit = app.clone();
+    let out = output_path.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let opts = PdfOptions { title };
+        export_pdf(&picks, Path::new(&out), &opts, &fonts, &mut |done, total| {
+            let _ = app_emit.emit("export:event", ExportEvent { done, total });
+        })
+        .map_err(e)
+    })
+    .await
+    .map_err(e)??;
+
+    let state = app.state::<AppState>();
+    record_export_best_effort(&state, &output_path, &record_title, slide_count, &record_picks);
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn export_tray_pngs(
+    app: AppHandle,
+    args: ExportPngsArgs,
+) -> Result<ExportReport, String> {
+    let ExportPngsArgs { picks, out_dir, width } = args;
+    let record_title = file_stem_or(&out_dir, "Slideflow PNGs");
+    let record_picks = picks.clone();
+
+    let fonts = system_fonts();
+    let app_emit = app.clone();
+    let dir = out_dir.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let opts = PngOptions { target_width_px: width };
+        export_pngs(&picks, Path::new(&dir), &opts, &fonts, &mut |done, total| {
+            let _ = app_emit.emit("export:event", ExportEvent { done, total });
+        })
+        .map_err(e)
+    })
+    .await
+    .map_err(e)??;
+
+    // One row per exported PNG; count the files actually written.
+    let slide_count = report.files_written.len();
+    let state = app.state::<AppState>();
+    record_export_best_effort(&state, &out_dir, &record_title, slide_count, &record_picks);
+    Ok(report)
+}
+
+/// The final path component's file stem, or `fallback` when there isn't one.
+fn file_stem_or(path: &str, fallback: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 // ---------------------------------------------------------------------------

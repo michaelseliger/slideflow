@@ -136,6 +136,22 @@ export interface ComposeReport {
   notes: string[];
 }
 
+/** Result of a PNG/PDF export of picked slides. Mirrors `ExportReport`
+ *  (`files_written: Vec<PathBuf>` serializes as an array of path strings). */
+export interface ExportReport {
+  /** Absolute paths written — one PNG per slide, or a single PDF. */
+  files_written: string[];
+  /** Non-fatal notes (e.g. a slide whose deck could not be opened). */
+  warnings: string[];
+}
+
+/** Progress streamed on `export:event` during a PNG/PDF export. Mirrors the
+ *  `ExportEvent` struct in `src-tauri/src/commands.rs`. */
+export interface ExportEvent {
+  done: number;
+  total: number;
+}
+
 /** Library-wide stats. Mirrors the desktop `Stats` command struct. */
 export interface Stats {
   deck_count: number;

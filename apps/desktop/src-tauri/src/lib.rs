@@ -107,6 +107,8 @@ pub fn run() {
             commands::delete_saved_search,
             commands::get_slide_preview,
             commands::compose_deck,
+            commands::export_tray_pdf,
+            commands::export_tray_pngs,
             commands::get_stats,
             commands::get_stats_overview,
             commands::get_export_counts,

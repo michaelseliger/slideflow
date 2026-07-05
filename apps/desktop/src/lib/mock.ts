@@ -6,6 +6,7 @@ import type {
   ComposeReport,
   DeckRecord,
   ExportRecord,
+  ExportReport,
   FitMode,
   RootRecord,
   SavedSearch,
@@ -381,6 +382,35 @@ export const mock = {
       warnings: [],
       notes: [],
     };
+  },
+
+  // PNG/PDF export (WS-D). `kind` is a PNG width, or "pdf" for a single PDF.
+  // Bumps the same "Most exported" counters as composeDeck so the stats view
+  // reacts in browser mode too.
+  exportTray: async (
+    picks: SlidePick[],
+    target: string,
+    kind: number | "pdf",
+  ): Promise<ExportReport> => {
+    await new Promise((r) => setTimeout(r, 200));
+    const decks = new Set(picks.map((p) => p.pptx_path));
+    const isPdf = kind === "pdf";
+    const files_written = isPdf
+      ? [target]
+      : picks.map((p, i) => {
+          const stem = (p.pptx_path.split("/").pop() ?? "deck").replace(/\.pptx$/i, "");
+          return `${target}/${String(i + 1).padStart(3, "0")} — ${stem} — slide ${p.slide_index}.png`;
+        });
+    mockExports.unshift({
+      output_path: target,
+      title: (target.split("/").pop() ?? "Export").replace(/\.[^.]+$/, ""),
+      slide_count: isPdf ? picks.length : files_written.length,
+      source_decks: decks.size,
+      exported_unix: Math.floor(Date.now() / 1000),
+    });
+    for (const p of picks)
+      mockExportCounts[p.pptx_path] = (mockExportCounts[p.pptx_path] ?? 0) + 1;
+    return { files_written, warnings: [] };
   },
 
   // --- favorites / stats ---------------------------------------------------
