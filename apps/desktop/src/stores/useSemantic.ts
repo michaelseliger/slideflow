@@ -133,15 +133,33 @@ function handleDownloadEvent(ev: ModelDownloadEvent) {
   }
 }
 
+// Throttle the mid-backfill status re-fetches: progress events fire once per
+// embedding batch, and each refresh runs two cheap COUNTs over the library. One
+// fetch per ~500 ms keeps the "X of Y slides indexed" line honestly live without
+// hammering IPC on a large first-time index.
+let lastStatusRefresh = 0;
+function refreshStatusThrottled() {
+  const now = Date.now();
+  if (now - lastStatusRefresh < 500) return;
+  lastStatusRefresh = now;
+  void useSemantic.getState().refresh();
+}
+
 function handleEmbedEvent(ev: EmbedEvent) {
   const set = useSemantic.setState;
 
   switch (ev.kind) {
     case "started":
       set({ indexing: { done: 0, total: ev.total } });
+      // Pull the real embedded/total counts now — otherwise the summary line
+      // stays frozen at whatever it was before the backfill (e.g. "0 of 0" when
+      // semantic search was enabled on an empty library, then slides scanned).
+      lastStatusRefresh = 0;
+      refreshStatusThrottled();
       break;
     case "progress":
       set({ indexing: { done: ev.done, total: ev.total } });
+      refreshStatusThrottled();
       break;
     case "finished":
       set({ indexing: null });

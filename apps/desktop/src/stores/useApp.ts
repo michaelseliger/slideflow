@@ -758,6 +758,11 @@ export const useApp = create<AppState>((set, get) => ({
         if (ev.indexed > 0 || ev.removed > 0) clearSlideSvgCache();
         // Refresh library + current view now that the index changed.
         void get().reloadLibrary().then(() => get().refresh());
+        // Slides embedded inline during the scan don't emit an embed:event, so
+        // re-poll the semantic status here too — otherwise "X of Y slides
+        // indexed" lags behind the freshly scanned corpus until the next
+        // backfill.
+        if (ev.indexed > 0 || ev.removed > 0) void useSemantic.getState().refresh();
         break;
     }
     set({ scan });
