@@ -205,7 +205,9 @@ fn pf_slide_png(
 /// Render a single slide (1-based) of a deck on disk to PNG bytes.
 ///
 /// Opens the deck fresh each call — for multi-slide exports prefer
-/// [`export_pngs`], which opens each source deck at most once.
+/// [`export_pngs`], which opens each source deck at most once. A caller that
+/// already holds an opened [`PresentationFile`] should use
+/// [`render_slide_png_from`] to avoid reopening it.
 pub fn render_slide_png(
     pptx: &Path,
     slide_index: usize,
@@ -213,9 +215,23 @@ pub fn render_slide_png(
     fonts: &fontdb::Database,
 ) -> Result<Vec<u8>> {
     let pf = PresentationFile::open(pptx)?;
+    render_slide_png_from(&pf, slide_index, width_px, fonts)
+}
+
+/// Render one slide (1-based) of an ALREADY-OPENED deck to PNG bytes, enriching
+/// `fonts` with the deck's embedded fonts (usvg ignores SVG `@font-face`, so the
+/// rasterizer needs them fontdb-side). Thin public wrapper over the internal
+/// `pf_slide_png` + `deck_fonts`, so a caller holding a [`PresentationFile`] (the
+/// drag-out icon path) renders without a second open/parse.
+pub fn render_slide_png_from(
+    pf: &PresentationFile,
+    slide_index: usize,
+    width_px: u32,
+    fonts: &fontdb::Database,
+) -> Result<Vec<u8>> {
     let base = Arc::new(fonts.clone());
-    let db = deck_fonts(&base, &pf);
-    pf_slide_png(&pf, slide_index, width_px, &db)
+    let db = deck_fonts(&base, pf);
+    pf_slide_png(pf, slide_index, width_px, &db)
 }
 
 // ---------------------------------------------------------------------------
@@ -228,13 +244,13 @@ pub fn render_slide_png(
 /// embedded fonts share the base `Arc` untouched — the common case costs one
 /// pointer clone.
 fn deck_fonts(base: &Arc<fontdb::Database>, pf: &PresentationFile) -> Arc<fontdb::Database> {
-    let fonts = crate::pptx::embedded_fonts(pf);
+    let fonts = &pf.embedded_font_set().fonts;
     if fonts.is_empty() {
         return base.clone();
     }
     let mut db = (**base).clone();
     for f in fonts {
-        db.load_font_data(f.bytes);
+        db.load_font_data(f.bytes.clone());
     }
     Arc::new(db)
 }

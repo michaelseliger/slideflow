@@ -2,12 +2,14 @@
 //! document metadata, slide dimensions.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::error::{Error, Result};
 use crate::opc::{local_name, rel_type, resolve_target, Package};
+use crate::pptx::embedded_fonts::EmbeddedFontSet;
 
 /// Default slide size (16:9) in EMU, used when `p:sldSz` is absent.
 pub const DEFAULT_SLIDE_W_EMU: i64 = 12_192_000;
@@ -30,6 +32,11 @@ pub struct PresentationFile {
     pub slide_width_emu: i64,
     pub slide_height_emu: i64,
     pub core: CoreProps,
+    /// Lazily-computed, cached scan of this deck's embedded fonts. Extraction
+    /// re-parses `presentation.xml` and copies each font's bytes, so caching it
+    /// keeps a multi-slide render/export from repeating that per slide. Populated
+    /// on first call to [`PresentationFile::embedded_font_set`].
+    embedded_font_cache: OnceLock<EmbeddedFontSet>,
 }
 
 /// Extracted text of one slide.
@@ -82,11 +89,21 @@ impl PresentationFile {
             slide_width_emu: w,
             slide_height_emu: h,
             core,
+            embedded_font_cache: OnceLock::new(),
         })
     }
 
     pub fn slide_count(&self) -> usize {
         self.slide_parts.len()
+    }
+
+    /// This deck's embedded-font scan, extracted once and cached. Every embedded-
+    /// font consumer — the renderer's `@font-face`, `export::deck_fonts`,
+    /// `register_embedded_fonts` — goes through here, so a 40-slide export parses
+    /// and copies the fonts once instead of once per slide.
+    pub fn embedded_font_set(&self) -> &EmbeddedFontSet {
+        self.embedded_font_cache
+            .get_or_init(|| crate::pptx::embedded_fonts::extract_embedded_font_set(self))
     }
 
     /// Part name of a slide by 1-based index.

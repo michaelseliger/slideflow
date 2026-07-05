@@ -45,7 +45,7 @@ use base64::Engine as _;
 use roxmltree::{Document, Node};
 
 use crate::error::{Error, Result};
-use crate::pptx::embedded_fonts::{embedded_font_set, font_media_type};
+use crate::pptx::embedded_fonts::font_media_type;
 use crate::pptx::PresentationFile;
 
 mod color;
@@ -440,7 +440,7 @@ impl Ctx<'_> {
         if self.used_fonts.is_empty() {
             return String::new();
         }
-        let set = embedded_font_set(self.pf);
+        let set = self.pf.embedded_font_set();
         if set.fonts.is_empty() && set.skipped.is_empty() {
             return String::new();
         }

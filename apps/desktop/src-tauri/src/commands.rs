@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::dragout::cache_key;
 use slideflow_core::export::{
-    export_pdf, export_pngs, render_slide_png, system_fonts, PdfOptions, PngOptions,
+    export_pdf, export_pngs, render_slide_png_from, system_fonts, PdfOptions, PngOptions,
 };
 use slideflow_core::index::Library;
 use slideflow_core::model::{
@@ -749,7 +749,6 @@ pub async fn prepare_slide_drag(
     // present, non-empty file, but a partially-written one could still be
     // non-empty — hence both the atomic writes and the single-flight guard.
     let title = deck_stem(&pptx_path);
-    let fonts = system_fonts();
     let src = pptx_path.clone();
     let app_for_thread = app.clone();
     let pptx_out = pptx_out.clone();
@@ -771,9 +770,14 @@ pub async fn prepare_slide_drag(
         compose(&[pick], &pptx_tmp, &opts).map_err(e)?;
         atomic_place(&pptx_tmp, &pptx_out).map_err(e)?;
 
-        // Rasterize the drag icon and write it atomically too.
+        // Rasterize the drag icon and write it atomically too. Resolve the font DB
+        // here (its first call scans all installed fonts) and open the source deck
+        // once — render_slide_png would otherwise reopen it — via the pf-taking
+        // wrapper.
+        let fonts = system_fonts();
+        let icon_pf = PresentationFile::open(Path::new(&src)).map_err(e)?;
         let png =
-            render_slide_png(Path::new(&src), slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
+            render_slide_png_from(&icon_pf, slide_index, DRAGOUT_ICON_PX, &fonts).map_err(e)?;
         atomic_write(&png_out, &png).map_err(e)?;
         Ok(())
     })
@@ -847,10 +851,12 @@ pub async fn export_tray_pdf(
     let record_picks = picks.clone();
     let slide_count = picks.len();
 
-    let fonts = system_fonts();
     let app_emit = app.clone();
     let out = output_path.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
+        // Resolve the font DB on the blocking thread: the first call scans every
+        // installed face (100–300 ms) and must not stall the IPC worker.
+        let fonts = system_fonts();
         let opts = PdfOptions { title };
         export_pdf(&picks, Path::new(&out), &opts, &fonts, &mut |done, total| {
             let _ = app_emit.emit("export:event", ExportEvent { done, total });
@@ -874,10 +880,11 @@ pub async fn export_tray_pngs(
     let record_title = file_stem_or(&out_dir, "Slideflow PNGs");
     let record_picks = picks.clone();
 
-    let fonts = system_fonts();
     let app_emit = app.clone();
     let dir = out_dir.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
+        // Resolve the font DB on the blocking thread (see export_tray_pdf).
+        let fonts = system_fonts();
         let opts = PngOptions { target_width_px: width };
         export_pngs(&picks, Path::new(&dir), &opts, &fonts, &mut |done, total| {
             let _ = app_emit.emit("export:event", ExportEvent { done, total });

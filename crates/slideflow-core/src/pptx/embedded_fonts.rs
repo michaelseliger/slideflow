@@ -55,15 +55,23 @@ pub struct EmbeddedFontSet {
     pub skipped: Vec<SkippedFont>,
 }
 
-/// Extract every usable embedded font variant from a deck. Skipped variants are
-/// silently dropped; use [`embedded_font_set`] when you also need the skip
-/// notes (the renderer surfaces them as dropped-construct telemetry).
+/// Every usable embedded font variant of a deck (skip notes dropped). Thin
+/// wrapper over the cached [`PresentationFile::embedded_font_set`] — clones the
+/// variants out; use the accessor directly to avoid the clone when you only need
+/// a borrow.
 pub fn embedded_fonts(pf: &PresentationFile) -> Vec<EmbeddedFont> {
-    embedded_font_set(pf).fonts
+    pf.embedded_font_set().fonts.clone()
 }
 
-/// Extract embedded fonts *and* the notes for any variant that was skipped.
+/// A deck's embedded fonts *and* the skip notes. Thin wrapper over the cached
+/// [`PresentationFile::embedded_font_set`] accessor (clones the cached set).
 pub fn embedded_font_set(pf: &PresentationFile) -> EmbeddedFontSet {
+    pf.embedded_font_set().clone()
+}
+
+/// The actual scan of `<p:embeddedFontLst>` (uncached). Called at most once per
+/// deck by [`PresentationFile::embedded_font_set`], which memoizes the result.
+pub(crate) fn extract_embedded_font_set(pf: &PresentationFile) -> EmbeddedFontSet {
     let mut set = EmbeddedFontSet::default();
 
     let Ok(main) = pf.package.main_document_part() else {
@@ -190,12 +198,11 @@ fn attr_local<'a>(n: &roxmltree::Node<'a, 'a>, name: &str) -> Option<&'a str> {
 /// (real embedded fonts carry the matching family). Returns how many variants
 /// were handed to the database.
 pub fn register_embedded_fonts(db: &mut fontdb::Database, pf: &PresentationFile) -> usize {
-    let fonts = embedded_fonts(pf);
-    let n = fonts.len();
+    let fonts = &pf.embedded_font_set().fonts;
     for f in fonts {
-        db.load_font_data(f.bytes);
+        db.load_font_data(f.bytes.clone());
     }
-    n
+    fonts.len()
 }
 
 #[cfg(test)]
