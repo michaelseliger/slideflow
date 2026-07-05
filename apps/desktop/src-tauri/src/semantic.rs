@@ -252,11 +252,14 @@ pub async fn delete_embedding_model(app: AppHandle) -> Result<(), String> {
         return Err("Cancel the running download first.".into());
     }
     semantic.backfill_cancel.store(true, Ordering::SeqCst);
-    detach_embedder(&app);
-
+    // Disable the pref BEFORE detaching: the deferred scan-connection detach
+    // re-checks the pref under the lock, so it must already read "disabled" (this
+    // mirrors set_semantic_search_enabled, which writes the pref first too).
     if let Some(path) = pref_path(&app) {
         let _ = fs::write(path, "0");
     }
+    detach_embedder(&app);
+
     if semantic.model_dir.exists() {
         fs::remove_dir_all(&semantic.model_dir).map_err(|e| e.to_string())?;
     }
@@ -291,8 +294,14 @@ fn detach_embedder(app: &AppHandle) {
         let app = app.clone();
         std::thread::spawn(move || {
             let state = app.state::<AppState>();
+            // Blocks until the (already-canceling) backfill releases the scan
+            // connection. Re-check the pref UNDER the lock: if the user toggled
+            // the feature back on meanwhile, a bootstrap may have reattached the
+            // embedder — don't rip it back out.
             if let Ok(mut lib) = state.scan_library.lock() {
-                lib.set_embedder(None);
+                if !semantic_enabled(&app) {
+                    lib.set_embedder(None);
+                }
             };
         });
     }
