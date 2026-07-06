@@ -69,7 +69,7 @@ use style::LstStyle;
 /// builds should bump this: it is baked into the thumbnail cache key
 /// ([`crate::thumbs::thumb_file_name`]) so stale caches invalidate automatically
 /// on upgrade, with no eviction bookkeeping.
-pub const RENDER_VERSION: u32 = 7; // 7: per-slide font subsetting; fonts on the thumb tier
+pub const RENDER_VERSION: u32 = 8; // 8: skip cNvPr@hidden shapes
 
 const EMU_PER_PT: f64 = 12700.0;
 // Per indent-level extra left padding, in points (fallback when a paragraph's
@@ -686,6 +686,13 @@ impl Ctx<'_> {
     }
 
     fn render_shape(&mut self, node: Node, tf: Transform) {
+        // ECMA-376 `cNvPr@hidden`: the shape stays in the file (Selection Pane
+        // visibility toggle) but must not be drawn. Real decks stack hidden
+        // alternates (e.g. DE/EN footer variants on a master) on top of the
+        // visible one, so ignoring this renders them all superimposed.
+        if is_hidden(node) {
+            return;
+        }
         match node.tag_name().name() {
             "sp" => self.render_sp(node, tf),
             "pic" => self.render_pic(node, tf),
@@ -968,6 +975,17 @@ fn ch<'a, 'i>(n: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
     n.children().find(|c| c.is_element() && c.tag_name().name() == name)
 }
 
+/// Whether a shape's non-visual properties mark it hidden (`cNvPr@hidden`).
+/// The cNvPr sits inside the per-kind wrapper (`nvSpPr`, `nvPicPr`,
+/// `nvGrpSpPr`, `nvCxnSpPr`, `nvGraphicFramePr`), so match any `nv*` child.
+fn is_hidden(n: Node) -> bool {
+    n.children()
+        .find(|c| c.is_element() && c.tag_name().name().starts_with("nv"))
+        .and_then(|nv| ch(nv, "cNvPr"))
+        .and_then(|c| a(c, "hidden"))
+        .is_some_and(|v| v == "1" || v == "true")
+}
+
 /// Attribute value by local name (ignoring namespace).
 fn a<'a>(n: Node<'a, '_>, name: &str) -> Option<&'a str> {
     n.attributes().find(|at| at.name() == name).map(|at| at.value())
@@ -1176,6 +1194,19 @@ mod tests {
         let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert!(svg.contains(r##"fill="#C81E1E""##), "svg: {svg}");
+    }
+
+    #[test]
+    fn hidden_shapes_are_not_rendered() {
+        // A visible text box, a hidden one stacked on top of it, and a hidden
+        // group with a visible child — mirrors masters that keep alternate
+        // (e.g. DE/EN) footer variants hidden via the Selection Pane.
+        let shapes = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Shown"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>VisibleText</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="10" name="Ghost" hidden="1"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>HiddenText</a:t></a:r></a:p></p:txBody></p:sp><p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="GhostGroup" hidden="1"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="1000000"/><a:ext cx="2000000" cy="400000"/><a:chOff x="0" y="0"/><a:chExt cx="2000000" cy="400000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="21" name="Inner"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>HiddenGroupText</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>"#;
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("VisibleText"), "svg: {svg}");
+        assert!(!svg.contains("HiddenText"), "hidden shape rendered: {svg}");
+        assert!(!svg.contains("HiddenGroupText"), "hidden group rendered: {svg}");
     }
 
     #[test]
