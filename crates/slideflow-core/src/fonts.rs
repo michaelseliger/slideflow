@@ -17,9 +17,10 @@
 //!    (Carlito for Calibri, Caladea for Cambria), each in all four weight/style
 //!    variants, under the SIL Open Font License (see `assets/fonts/`). The
 //!    exporter registers them into its [`fontdb::Database`] so a "…, Carlito, …"
-//!    list resolves during rasterization on any OS; the full-tier preview embeds
-//!    the matching variant as an `@font-face` data-URI (grid thumbnails stay
-//!    lean — they never embed substitutes; see `render::text`).
+//!    list resolves during rasterization on any OS; previews embed the matching
+//!    variant as an `@font-face` data-URI, subsetted per slide via
+//!    [`subset_to_chars`] so even grid thumbnails can afford it (see
+//!    [`crate::render::FontEmbedding`] for the per-tier policy).
 //!
 //! We deliberately do **not** bundle Arial/Times/Georgia clones: macOS ships
 //! Arial, Times New Roman and Georgia, so those (and the humanist/UI/mono Office
@@ -182,6 +183,107 @@ pub fn register_bundled_fonts(db: &mut fontdb::Database) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-slide font subsetting
+// ---------------------------------------------------------------------------
+
+/// Subset a font to (at least) the given characters, for embedding as a
+/// preview `@font-face` data-URI. Unlike a PDF subsetter, the output keeps
+/// everything a *browser* needs to shape and render live text: `cmap`
+/// (remapped), GPOS kerning, GSUB with its glyph closure (so ligature glyphs
+/// referenced by kept characters survive), hinting, and — for variable fonts —
+/// the full `fvar`/`gvar`/`avar` set, so `font-weight` still selects real
+/// instances. This is what makes it safe to embed real typefaces on every
+/// preview tier: a face shrinks from hundreds of KB to a few KB per slide.
+///
+/// Returns `None` when subsetting fails (unparseable/exotic font) or when the
+/// result wouldn't actually be smaller — callers then decide per size policy
+/// whether to embed the full bytes or skip the face. Over-inclusion of
+/// characters is harmless (slightly larger subset); characters missing from
+/// the *font* are simply not mapped, and the browser falls through to the next
+/// family in the emitted `font-family` chain, exactly as it does today.
+pub fn subset_to_chars(bytes: &[u8], chars: &std::collections::BTreeSet<char>) -> Option<Vec<u8>> {
+    use write_fonts::read::{
+        collections::IntSet,
+        types::{GlyphId, NameId, Tag},
+        FontRef,
+    };
+
+    if chars.is_empty() {
+        return None;
+    }
+
+    // skera is a young port of hb-subset; a malformed font must degrade to
+    // "embed the full bytes", never take down the whole slide render, so the
+    // call is fenced against panics as well as errors. The inputs are
+    // read-only, so unwinding cannot leave them inconsistent.
+    let chars = chars.clone();
+    let bytes_owned = bytes.to_vec();
+    let out = std::panic::catch_unwind(move || -> Option<Vec<u8>> {
+        let font = FontRef::new(&bytes_owned).ok()?;
+
+        let mut unicodes = IntSet::<u32>::empty();
+        for c in &chars {
+            unicodes.insert(*c as u32);
+        }
+
+        // hb-subset's defaults (see harfbuzz hb-subset-input.cc): drop the
+        // legacy/AAT/Graphite layout tables, keep name IDs 0–6 in English,
+        // retain all scripts and the default feature set (kern, liga, …).
+        let gids = IntSet::<GlyphId>::empty();
+        let drop_tables: IntSet<Tag> = [
+            skera::MORX,
+            skera::MORT,
+            skera::KERX,
+            skera::KERN,
+            skera::JSTF,
+            skera::DSIG,
+            Tag::new(b"EBDT"),
+            Tag::new(b"EBLC"),
+            skera::EBSC,
+            Tag::new(b"SVG "),
+            skera::PCLT,
+            skera::LTSH,
+            Tag::new(b"Feat"),
+            skera::GLAT,
+            skera::GLOC,
+            skera::SILF,
+            skera::SILL,
+        ]
+        .into_iter()
+        .collect();
+        let mut layout_scripts = IntSet::<Tag>::empty();
+        layout_scripts.invert(); // keep all scripts
+        let mut layout_features = IntSet::<Tag>::empty();
+        layout_features.extend(skera::DEFAULT_LAYOUT_FEATURES.iter().copied());
+        let mut name_ids = IntSet::<NameId>::empty();
+        name_ids.insert_range(NameId::from(0)..=NameId::from(6));
+        let mut name_languages = IntSet::<u16>::empty();
+        name_languages.insert(0x0409);
+
+        let plan = skera::Plan::new(
+            &gids,
+            &unicodes,
+            &font,
+            skera::SubsetFlags::default(),
+            &drop_tables,
+            &layout_scripts,
+            &layout_features,
+            &name_ids,
+            &name_languages,
+        );
+        skera::subset_font(&font, &plan).ok()
+    })
+    .ok()
+    .flatten()?;
+
+    // A "subset" that grew (tiny fonts, pathological layout tables) is useless.
+    if out.is_empty() || out.len() >= bytes.len() {
+        return None;
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
 // App-local fonts (harvested / user-added / downloaded)
 // ---------------------------------------------------------------------------
 
@@ -223,9 +325,10 @@ impl std::fmt::Debug for AppFontFace {
 /// The engine NEVER reads the fonts directory itself — it only consults the set
 /// the host hands it — so core stays filesystem-side-effect-free and network-
 /// free, and tests inject in-memory sets. The preview path embeds a used face as
-/// an `@font-face` data-URI (full/peek tier only, mirroring the bundled-
-/// substitute size policy); the export path registers the same bytes into its
-/// `fontdb::Database` via [`AppFontSet::register`].
+/// an `@font-face` data-URI, subsetted per slide ([`subset_to_chars`]; see
+/// [`crate::render::FontEmbedding`] for the per-tier failure policy); the export
+/// path registers the same complete bytes into its `fontdb::Database` via
+/// [`AppFontSet::register`].
 #[derive(Debug, Clone, Default)]
 pub struct AppFontSet {
     faces: Vec<AppFontFace>,
@@ -341,6 +444,62 @@ mod tests {
             "resolved to {:?}, expected the registered app face",
             face.families
         );
+    }
+
+    /// The preview-subsetting contract: a per-slide subset of a real face is a
+    /// fraction of the size, still parses as a font under the SAME family name
+    /// (fontdb — the export-side proxy for "a renderer can use this"), and its
+    /// `cmap` still maps exactly the requested characters — that's what lets
+    /// the webview render live text from it, unlike a PDF-style subset.
+    #[test]
+    fn subset_to_chars_keeps_family_and_cmap_and_shrinks() {
+        use write_fonts::read::FontRef;
+
+        let carlito = bundled_face("Carlito", false, false).expect("bundled Carlito regular");
+        let chars: std::collections::BTreeSet<char> = "Hi there".chars().collect();
+        let sub = subset_to_chars(carlito.bytes, &chars).expect("Carlito subsets");
+
+        assert!(
+            sub.len() < carlito.bytes.len() / 10,
+            "subset ({}) is a fraction of the full face ({})",
+            sub.len(),
+            carlito.bytes.len()
+        );
+
+        // Family name survives (fontdb resolves it like the exporter would).
+        let mut db = fontdb::Database::new();
+        db.load_font_data(sub.clone());
+        let id = db
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Carlito")],
+                ..fontdb::Query::default()
+            })
+            .expect("subset still resolves as Carlito");
+        assert!(db.face(id).unwrap().families.iter().any(|(f, _)| f == "Carlito"));
+
+        // cmap still maps every requested character (and, as a sanity bound,
+        // no longer maps one we did not ask for).
+        use write_fonts::read::TableProvider;
+        let font = FontRef::new(&sub).expect("subset parses");
+        let cmap = font.cmap().expect("subset keeps a cmap");
+        for c in &chars {
+            assert!(cmap.map_codepoint(*c as u32).is_some(), "subset cmap covers {c:?}");
+        }
+        assert!(cmap.map_codepoint('Z' as u32).is_none(), "unrequested glyphs are gone");
+    }
+
+    #[test]
+    fn subset_to_chars_degrades_to_none() {
+        let chars: std::collections::BTreeSet<char> = "Hi".chars().collect();
+        // Bytes that are no font at all → None, never a panic.
+        assert!(subset_to_chars(&[0xDE, 0xAD, 0xBE, 0xEF, 0, 1, 2, 3], &chars).is_none());
+        // An empty character set has nothing to embed.
+        let carlito = bundled_face("Carlito", false, false).unwrap();
+        assert!(subset_to_chars(carlito.bytes, &std::collections::BTreeSet::new()).is_none());
+        // Characters the font does not cover are simply absent — the subset
+        // still succeeds for the ones it has.
+        let chars: std::collections::BTreeSet<char> = ['H', '\u{1F984}'].into_iter().collect();
+        assert!(subset_to_chars(carlito.bytes, &chars).is_some());
     }
 
     #[test]

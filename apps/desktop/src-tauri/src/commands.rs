@@ -481,8 +481,9 @@ pub async fn get_slide_preview(
     };
 
     // Render off the async runtime too — it's CPU-bound. Inject the app-local
-    // font set so the full/peek tier embeds harvested/user/downloaded faces as
-    // @font-face under their real names (the thumb tier ignores it — no embed).
+    // font set so both tiers embed harvested/user/downloaded faces as per-slide
+    // subsetted @font-face under their real names (thumb tier skips a face when
+    // subsetting fails; the full/peek tier embeds it whole — FontEmbedding).
     let mut options = match tier {
         ThumbTier::Thumb => RenderOptions::thumb(),
         ThumbTier::Full => RenderOptions::preview(),

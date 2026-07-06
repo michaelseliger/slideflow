@@ -89,13 +89,20 @@ impl Ctx<'_> {
             if !line.spans.is_empty() {
                 // Record the typefaces actually rendered, so the SVG assembler
                 // knows which embedded (or bundled-substitute) fonts to emit as
-                // @font-face — the family set for embedded matching, and the
-                // (family, weight, style) variants for substitute embedding.
+                // @font-face — the family set for embedded matching, the
+                // (family, weight, style) variants for substitute embedding,
+                // and the characters drawn per family for subsetting. This is
+                // the single funnel all text passes through (shapes, tables,
+                // bullet spans included), so the char sets are complete.
                 for s in &line.spans {
                     if let Some(tf) = s.typeface.as_deref() {
                         if !tf.is_empty() {
                             self.used_fonts.insert(tf.to_string());
                             self.used_font_variants.insert((tf.to_string(), s.bold, s.italic));
+                            self.used_font_chars
+                                .entry(tf.to_ascii_lowercase())
+                                .or_default()
+                                .extend(s.text.chars());
                         }
                     }
                 }

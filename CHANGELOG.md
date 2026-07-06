@@ -28,6 +28,7 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 
 ### Improved
 
+- **Real typefaces in grid thumbnails.** Fonts embedded into previews (a deck's own embedded fonts, fonts you added or downloaded in Settings, and the bundled Calibri/Cambria substitutes) are now subsetted per slide to just the characters that slide uses — a few KB instead of hundreds. That makes them cheap enough to include in every grid thumbnail, so the grid now shows the same real typefaces as the large preview, and large previews shrink substantially. Existing preview caches rebuild automatically.
 - Library databases now migrate in place between app versions (schema versioning) — no more manual database deletion after upgrades.
 - Update checks can be disabled in Settings; disabling also cancels an already-downloaded pending install.
 - Renderer telemetry descends into `mc:AlternateContent`, so modern PowerPoint charts/media are classified correctly instead of flagged as unknown shapes.

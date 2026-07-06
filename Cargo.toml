@@ -59,6 +59,12 @@ tiny-skia = "0.12"
 fontdb = "0.23"
 krilla = "0.8"
 krilla-svg = "0.8.1"
+# Per-slide font subsetting for preview @font-face embedding (fontations'
+# hb-subset port — keeps cmap/GPOS/variations, so subsets render in the
+# webview). write-fonts must stay in lockstep with skera: its `read` re-export
+# (read-fonts) provides the FontRef/IntSet/Tag types skera's API takes.
+skera = "0.3"
+write-fonts = "0.49"
 
 [profile.release]
 lto = "thin"

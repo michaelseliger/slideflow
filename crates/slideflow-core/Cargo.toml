@@ -27,6 +27,9 @@ tiny-skia.workspace = true
 fontdb.workspace = true
 krilla.workspace = true
 krilla-svg.workspace = true
+# Per-slide font subsetting for preview @font-face embedding (see src/fonts.rs).
+skera.workspace = true
+write-fonts.workspace = true
 # Pure-Rust data-parallelism for brute-force cosine search and near-duplicate
 # clustering (src/embed). No system libraries, so core still builds on Linux CI.
 rayon.workspace = true
