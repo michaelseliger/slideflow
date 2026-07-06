@@ -4,6 +4,8 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-06
+
 ### Added
 
 - **Semantic search (optional, fully local).** Enable AI search in Settings to find slides by meaning — "customer churn" finds the deck that says "Kundenabwanderung". A one-time ≈490 MB model download (multilingual, English + German); everything runs and stays on your machine, off by default. Search modes: exact, semantic, or hybrid. Each slide card gains *Find similar (AI)*, and the Inspector shows similar slides.
@@ -16,6 +18,7 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 - **Mixed slide sizes, fixed on export.** Slides from differently-sized decks are now scaled onto the output canvas: same aspect ratio scales automatically; mixed aspect ratios ask — *Ensure fit* (letterbox) or *Maximize* (fill, may crop). Fonts, line widths, tables, and effects scale along, like PowerPoint itself does.
 - **Drag a slide out of the app** (macOS-first). Hold ⌥ and drag any slide card to Finder or an open PowerPoint window — it lands as a single-slide .pptx with full formatting. Or right-click → *Save slide as .pptx…* on any platform.
 - **Embedded fonts in previews.** Decks that embed their fonts now render previews with the real typefaces instead of fallbacks.
+- **Font management.** A Fonts section in Settings lists the fonts Slideflow uses for previews and export, and lets you add your own (from file) or download common families on demand, and remove them again — so slides that reference fonts you don't have installed still render correctly.
 - **`slideflow` CLI.** A companion command-line tool: `slideflow index/search/compose/render/stats` — scriptable library indexing, advanced-syntax search (`--json`), and deck composition without the app.
 - **Settings.** A proper preferences sheet (`⌘,`, command palette, or *Slideflow → Settings…* in the macOS menu bar): theme, grid density, library folders, per-folder exclude patterns, and update preferences. *About* is also reachable from the menu bar now.
 - **Clear index & rebuild.** One action (Settings or command palette) wipes the search index and preview cache and re-scans from scratch — the recovery tool for stale previews or a corrupted index. Starred slides and decks survive.
@@ -32,6 +35,14 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 - Library databases now migrate in place between app versions (schema versioning) — no more manual database deletion after upgrades.
 - Update checks can be disabled in Settings; disabling also cancels an already-downloaded pending install.
 - Renderer telemetry descends into `mc:AlternateContent`, so modern PowerPoint charts/media are classified correctly instead of flagged as unknown shapes.
+- **Office fonts without embedding.** Slides that reference Calibri or Cambria but don't embed them now render with metric-compatible substitutes (bundled Carlito/Caladea), and other unembedded fonts fall back through sensible chains instead of a single generic face.
+- **More image formats in previews.** TIFF images and WMF-embedded bitmaps now render instead of being dropped.
+
+### Fixed
+
+- PDF and PNG export could lose slide background photos whose deck declared the wrong image MIME type (e.g. a JPEG labelled `image/png`); the renderer now sniffs the actual bytes.
+- Shapes marked hidden in PowerPoint are no longer drawn in previews.
+- A round of 47 audited correctness fixes across the engine, host, and frontend — most notably: scanning while a library volume is unmounted no longer silently empties the library, and scan errors now surface in the UI.
 
 ## [0.3.0] — 2026-07-05
 
