@@ -11,46 +11,32 @@ export default function SearchHelpPopover({ onClose }: { onClose: () => void }) 
   return (
     <div
       ref={ref}
-      className="absolute left-0 top-full z-50 mt-1.5 w-80 rounded-[8px] border border-hairline/10 bg-elevated p-3 text-body shadow-peek"
+      className="absolute left-0 top-full z-50 mt-1.5 w-[400px] rounded-[10px] border border-hairline/10 bg-elevated p-4 text-body shadow-peek"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-subtle/70">
-        Search syntax
-      </div>
-      <ul className="space-y-2">
-        <Row tokens={["title:", "deck:", "notes:", "body:"]}>
-          Limit a term to one field
-        </Row>
-        <Row tokens={["“exact phrase”"]}>Match words together, in order</Row>
-        <Row tokens={["term OR term"]}>Match either term</Row>
-        <Row tokens={["-term", "NOT term"]}>Exclude a term</Row>
-        <Row tokens={["after:2026-01-31", "before:2026-01-31"]}>
-          Filter by modified date
-        </Row>
+      <div className="mb-3 text-body font-semibold text-ink">Search syntax</div>
+      <ul className="space-y-2.5">
+        <Row token="title:roadmap">match the slide title</Row>
+        <Row token={`deck:"Q3"`}>restrict to a deck</Row>
+        <Row token="notes:budget">search speaker notes</Row>
+        <Row token={`"exact phrase"`}>match a whole phrase</Row>
+        <Row token="revenue OR arr">either term</Row>
+        <Row token="-draft">exclude a term</Row>
+        <Row token="after:2026-01">modified-date range</Row>
       </ul>
-      <p className="mt-2.5 border-t border-hairline/10 pt-2 text-caption text-subtle/80">
-        Terms combine with AND by default. Example:{" "}
-        <code className="rounded bg-ink/8 px-1 py-0.5 font-mono text-[11px] text-ink">
-          title:roadmap -draft after:2026-01-01
-        </code>
+      <p className="mt-3 border-t border-hairline/10 pt-2.5 text-caption text-subtle">
+        AND by default · prefix matching · accent-insensitive
       </p>
     </div>
   );
 }
 
-function Row({ tokens, children }: { tokens: string[]; children: React.ReactNode }) {
+function Row({ token, children }: { token: string; children: React.ReactNode }) {
   return (
-    <li className="flex items-baseline gap-2">
-      <span className="flex shrink-0 flex-wrap gap-1">
-        {tokens.map((t) => (
-          <code
-            key={t}
-            className="rounded bg-ink/8 px-1.5 py-0.5 font-mono text-[11px] leading-tight text-ink"
-          >
-            {t}
-          </code>
-        ))}
-      </span>
+    <li className="flex items-baseline gap-3">
+      <code className="shrink-0 whitespace-nowrap rounded bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[12px] leading-tight text-ink">
+        {token}
+      </code>
       <span className="text-caption text-subtle">{children}</span>
     </li>
   );

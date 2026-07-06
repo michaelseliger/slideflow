@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { X, Coffee, Globe, Layers } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { X, Coffee } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useUpdater } from "../stores/useUpdater";
 import * as api from "../lib/api";
@@ -7,7 +7,9 @@ import OverlaySheet from "./OverlaySheet";
 
 const WEBSITE_URL = "https://slideflow.app";
 const COFFEE_URL = "https://www.buymeacoffee.com/michaelseliger";
-const RELEASE_URL = "https://github.com/michaelseliger/slideflow/releases/tag/v";
+const REPO_URL = "https://github.com/michaelseliger/slideflow";
+const RELEASES_URL = "https://github.com/michaelseliger/slideflow/releases";
+const ISSUES_URL = "https://github.com/michaelseliger/slideflow/issues/new";
 
 /** Inline update status under the version line. States mirror `useUpdater`;
  *  release notes deliberately link to the GitHub release page (the notes baked
@@ -55,20 +57,13 @@ export function UpdateStatus() {
 
   if (phase === "ready") {
     return (
-      <div className="mt-3 space-y-1.5">
-        <button
-          onClick={() => void useUpdater.getState().restart()}
-          className="w-full rounded-[8px] bg-accent px-4 py-2 text-body font-medium text-white hover:opacity-90"
-        >
-          Restart to Update
-        </button>
-        <button
-          onClick={() => void api.openUrl(`${RELEASE_URL}${version}`)}
-          className="text-caption text-accent hover:underline"
-        >
-          See what's new in {version}
-        </button>
-      </div>
+      <button
+        onClick={() => void useUpdater.getState().restart()}
+        title="Restart to install the update"
+        className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-accent/[0.12] px-3 py-1 text-caption font-semibold text-accent hover:bg-accent/[0.18]"
+      >
+        Version {version} ready · restart to update
+      </button>
     );
   }
 
@@ -123,35 +118,82 @@ export default function AboutSheet() {
             </div>
 
             <div className="px-6 pb-6 pt-1 text-center">
-              <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-[14px] bg-accent/[0.12]">
-                <Layers size={28} className="text-accent" />
+              <AppMark />
+              <div className="text-[20px] font-bold leading-tight tracking-tight text-ink">
+                Slideflow
               </div>
-              <div className="text-title font-semibold text-ink">Slideflow</div>
               <div className="tabnum mt-0.5 text-caption text-subtle">
                 {version ? `Version ${version}` : " "}
               </div>
               <UpdateStatus />
-              <p className="mx-auto mt-3 max-w-[16rem] text-caption text-subtle">
-                Search every slide across your decks and compose new ones — with
-                every slide's original formatting intact.
-              </p>
 
-              <div className="mt-5 space-y-2">
-                <button
-                  onClick={() => void api.openUrl(WEBSITE_URL)}
-                  className="flex w-full items-center justify-center gap-2 rounded-[8px] border border-hairline/10 px-4 py-2.5 text-body font-medium text-ink hover:bg-ink/5"
-                >
-                  <Globe size={16} /> slideflow.app
-                </button>
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1 text-caption">
+                <AboutLink onClick={() => void api.openUrl(WEBSITE_URL)}>Website</AboutLink>
+                <span className="text-hairline/20">·</span>
+                <AboutLink onClick={() => void api.openUrl(RELEASES_URL)}>
+                  What's new
+                </AboutLink>
+                <span className="text-hairline/20">·</span>
+                <AboutLink onClick={() => void api.openUrl(REPO_URL)}>GitHub</AboutLink>
+                <span className="text-hairline/20">·</span>
+                <AboutLink onClick={() => void api.openUrl(ISSUES_URL)}>
+                  Report a bug
+                </AboutLink>
+              </div>
 
+              <div className="mt-5 hairline-t pt-5">
                 <button
                   onClick={() => void api.openUrl(COFFEE_URL)}
-                  className="flex w-full items-center justify-center gap-2 rounded-[8px] border border-black bg-[#FFDD00] px-4 py-2.5 text-body font-semibold text-black hover:opacity-90"
+                  className="inline-flex items-center gap-2 rounded-[8px] border border-hairline/[0.14] px-4 py-2 text-body font-medium text-ink hover:bg-ink/5"
                 >
                   <Coffee size={16} /> Buy me a coffee
                 </button>
               </div>
+
+              <p className="mt-3.5 text-caption text-subtle/80">
+                MIT License · local-first · no telemetry
+              </p>
             </div>
     </OverlaySheet>
+  );
+}
+
+/** The Slideflow app mark: three stacked, fanned slides on a warm off-white
+ *  squircle — matches the icon shipped in `src-tauri/icons`. */
+function AppMark() {
+  return (
+    <div
+      className="relative mx-auto mb-4 h-[66px] w-[66px] overflow-hidden rounded-[19px] shadow-tile"
+      style={{ background: "#F3F1EC" }}
+      aria-hidden
+    >
+      <span
+        className="absolute h-[23px] w-[34px] rounded-[4px]"
+        style={{ left: 16, top: 15, background: "var(--brand-beige)", transform: "rotate(-9deg)" }}
+      />
+      <span
+        className="absolute h-[23px] w-[34px] rounded-[4px]"
+        style={{ left: 16, top: 21, background: "var(--brand-gray)", transform: "rotate(-2deg)" }}
+      />
+      <span
+        className="absolute h-[23px] w-[34px] rounded-[4px]"
+        style={{ left: 16, top: 27, background: "var(--brand-blue)", transform: "rotate(6deg)" }}
+      />
+    </div>
+  );
+}
+
+/** A plain accent text link in the About footer row. */
+function AboutLink({
+  children,
+  onClick,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick} className="text-accent hover:underline">
+      {children}
+    </button>
   );
 }

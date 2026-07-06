@@ -21,6 +21,19 @@
      A native build can layer a real vibrancy view behind these. */
   --material: 242 242 244;
   --material-alpha: 0.72;
+
+  /* Semantic status colors (Tailwind defaults) exposed as CSS vars so both
+     utility classes and inline styles can reach them. */
+  --success: #22c55e; /* green-500 — success */
+  --warning: #f59e0b; /* amber-500 — moved / off-size / duplicate pills */
+  --warning-badge: #fbbf24; /* amber-400 — favorite star, tray badges */
+  --danger: #ef4444; /* red-500 — destructive actions */
+  --near-duplicate: #a855f7; /* purple-500 — near-duplicate clusters (AI) */
+
+  /* App-icon slide-stack palette (brand mark colors). */
+  --brand-beige: #c9c7bd;
+  --brand-gray: #8b897e;
+  --brand-blue: #3056d6;
 }
 
 .dark {

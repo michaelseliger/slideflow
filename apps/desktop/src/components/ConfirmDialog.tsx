@@ -29,8 +29,13 @@ export default function ConfirmDialog() {
     >
       {confirm && (
         <>
-          <h2 className="text-title font-semibold text-ink">{confirm.title}</h2>
-          <p className="mt-2 text-body text-subtle">{confirm.message}</p>
+          {confirm.icon != null && (
+            <div className="mb-3.5 flex h-11 w-11 items-center justify-center rounded-full bg-accent/[0.12] text-accent">
+              {confirm.icon}
+            </div>
+          )}
+          <h2 className="text-heading font-semibold text-ink">{confirm.title}</h2>
+          <p className="mt-2 text-body leading-relaxed text-subtle">{confirm.message}</p>
 
           <div className="mt-5 flex justify-end gap-2">
             <button
@@ -42,10 +47,11 @@ export default function ConfirmDialog() {
             </button>
             <button
               onClick={() => void run()}
-              className={`rounded-[8px] px-4 py-2 text-body font-medium text-white hover:opacity-90 ${
+              className={`flex items-center gap-1.5 rounded-[8px] px-4 py-2 text-body font-medium text-white hover:opacity-90 ${
                 confirm.destructive ? "bg-red-500" : "bg-accent"
               }`}
             >
+              {confirm.confirmIcon}
               {confirm.confirmLabel}
             </button>
           </div>

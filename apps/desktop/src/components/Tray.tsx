@@ -131,33 +131,30 @@ export default function Tray() {
         </button>
 
         {movedCount > 0 && (
-          <span
-            className="flex items-center gap-1 text-caption text-amber-500"
+          <WarningPill
             title="Some source decks moved or changed since they were added"
           >
-            <AlertTriangle size={12} />
+            <AlertTriangle size={11} />
             {movedCount} moved
-          </span>
+          </WarningPill>
         )}
 
         {mismatchCount > 0 && (
-          <span
-            className="flex items-center gap-1 text-caption text-amber-500"
+          <WarningPill
             title="Some picks use a different slide size than the first pick — they may not fit the exported deck"
           >
-            <Ratio size={12} />
+            <Ratio size={11} />
             {mismatchCount} off-size
-          </span>
+          </WarningPill>
         )}
 
         {dupCount > 0 && (
-          <span
-            className="flex items-center gap-1 text-caption text-amber-500"
+          <WarningPill
             title="Some picks have identical content — the exported deck would contain the same slide more than once"
           >
-            <Copy size={12} />
+            <Copy size={11} />
             {dupCount} duplicates
-          </span>
+          </WarningPill>
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
@@ -193,7 +190,7 @@ export default function Tray() {
               axis="x"
               values={items}
               onReorder={reorder}
-              className="flex h-full items-center gap-2 overflow-x-auto overflow-y-hidden pb-1"
+              className="flex h-full items-center gap-3 overflow-x-auto overflow-y-hidden pb-1"
             >
               <AnimatePresence initial={false}>
                 {items.map((item, index) => (
@@ -224,6 +221,25 @@ export default function Tray() {
 function openExport() {
   useApp.getState().setCommandOpen(false);
   useApp.getState().setExportOpen(true);
+}
+
+/** Filled amber pill flagging a tray composition warning (moved / off-size /
+ *  duplicate picks). */
+function WarningPill({
+  children,
+  title,
+}: {
+  children: React.ReactNode;
+  title: string;
+}) {
+  return (
+    <span
+      className="flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-caption font-medium text-amber-600"
+      title={title}
+    >
+      {children}
+    </span>
+  );
 }
 
 function TrayThumb({

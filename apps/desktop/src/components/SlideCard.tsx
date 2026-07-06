@@ -1,5 +1,17 @@
 import { memo, useRef, useState } from "react";
-import { Eye, Plus, FolderOpen, Check, Star } from "lucide-react";
+import {
+  Eye,
+  Plus,
+  FolderOpen,
+  Check,
+  Star,
+  Tag,
+  Download,
+  Copy,
+  Sparkles,
+  Layers,
+  ExternalLink,
+} from "lucide-react";
 import type { SearchHit, SlideDragPaths, SlidePick } from "../lib/types";
 import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import { useApp } from "../stores/useApp";
@@ -29,6 +41,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
   const selected = useApp((s) => s.selectedIds.has(slide.id));
   const inTray = useTray((s) => s.items.some((i) => i.uid === uidFor(deck, slide)));
   const semanticReady = useSemantic((s) => s.status?.state === "ready");
+  const showApproxBadge = useApp((s) => s.showApproxBadge);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Shares Thumbnail's (slide, "thumb") cache key, so no extra backend call.
   const { dropped } = useSlidePreview(slide.id, "thumb");
@@ -134,38 +147,58 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
   };
 
   const menuItems: MenuItem[] = [
-    { label: "Add to Tray", onClick: addThis },
+    { label: "Add to Tray", icon: <Plus size={15} />, hint: "return", onClick: addThis },
     {
-      label: slide.favorite ? "Remove from Favorites" : "Add to Favorites",
-      onClick: () => void useApp.getState().toggleFavoriteSlide(slide.id),
+      label: "Peek",
+      icon: <Eye size={15} />,
+      hint: "space",
+      onClick: () => useApp.getState().openPeek(index),
     },
     {
-      label: "Tags…",
+      label: "Add tag…",
+      icon: <Tag size={15} />,
+      separatorBefore: true,
       onClick: () => {
         // Select this slide and open the inspector, where the tag editor lives.
         useApp.getState().selectOnly(index);
         useApp.getState().setInspector(true);
       },
     },
-    { label: "Peek", onClick: () => useApp.getState().openPeek(index) },
+    {
+      label: slide.favorite ? "Remove from Favorites" : "Favorite",
+      icon: (
+        <Star
+          size={15}
+          className={slide.favorite ? "fill-current text-amber-400" : ""}
+        />
+      ),
+      onClick: () => void useApp.getState().toggleFavoriteSlide(slide.id),
+    },
     {
       label: "Save slide as .pptx…",
+      icon: <Download size={15} />,
       onClick: () => void saveSlideAsPptx(),
       separatorBefore: true,
     },
     {
       label: "Open source deck",
+      icon: <ExternalLink size={15} />,
       onClick: () => void api.openFile(deck.path),
-      separatorBefore: true,
     },
-    { label: "Reveal in Finder", onClick: () => void api.revealInFinder(deck.path) },
     {
-      label: "Copy source path",
+      label: "Reveal in Finder",
+      icon: <FolderOpen size={15} />,
+      onClick: () => void api.revealInFinder(deck.path),
+    },
+    {
+      label: "Copy path",
+      icon: <Copy size={15} />,
       onClick: () => void navigator.clipboard?.writeText(deck.path),
-      separatorBefore: true,
     },
     {
       label: "Find other slides from this deck",
+      icon: <Layers size={15} />,
+      separatorBefore: true,
       onClick: () => void useApp.getState().setNav({ type: "deck", id: deck.id }),
     },
     // AI find-similar: only offered while the semantic model is ready. Routes
@@ -175,7 +208,8 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
     ...(semanticReady
       ? [
           {
-            label: "Find similar (AI)",
+            label: "Find similar slides",
+            icon: <Sparkles size={15} />,
             onClick: () => useApp.getState().findSimilar(index),
           },
         ]
@@ -260,7 +294,7 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
               </QuickBtn>
             </div>
 
-            {(inTray || slide.favorite || dropped.length > 0) && (
+            {(inTray || slide.favorite || (showApproxBadge && dropped.length > 0)) && (
               <div className="absolute left-1.5 top-1.5 flex flex-col gap-1">
                 {inTray && (
                   <div className="rounded-full bg-accent p-0.5 text-white shadow">
@@ -272,7 +306,9 @@ function SlideCardImpl({ hit, index }: SlideCardProps) {
                     <Star size={11} className="fill-current" />
                   </div>
                 )}
-                {dropped.length > 0 && <ApproxBadge dropped={dropped} variant="tile" />}
+                {showApproxBadge && dropped.length > 0 && (
+                  <ApproxBadge dropped={dropped} variant="tile" />
+                )}
               </div>
             )}
           </div>

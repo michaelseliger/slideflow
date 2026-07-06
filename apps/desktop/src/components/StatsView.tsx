@@ -1,18 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   AlertTriangle,
-  BarChart3,
-  Clock,
-  Download,
-  FolderOpen,
   HardDrive,
-  Layers,
   Loader2,
-  Presentation,
   RefreshCw,
-  Search,
-  Sparkles,
-  Star,
 } from "lucide-react";
 import type { EmbeddingStatus, StatsOverview } from "../lib/types";
 import { useApp } from "../stores/useApp";
@@ -27,6 +18,7 @@ export default function StatsView() {
   const [overview, setOverview] = useState<StatsOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scanRunning = useApp((s) => s.scan.running);
+  const roots = useApp((s) => s.roots);
   const semanticStatus = useSemantic((s) => s.status);
   const aiIndexing = useSemantic((s) => s.indexing);
 
@@ -63,13 +55,9 @@ export default function StatsView() {
   const scan = overview.last_scan;
 
   return (
-    <div className="h-full overflow-y-auto bg-canvas p-5">
-      <div className="mx-auto max-w-3xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="flex items-center gap-2 text-title font-semibold text-ink">
-            <BarChart3 size={17} className="text-accent" />
-            Statistics
-          </h1>
+    <div className="h-full overflow-y-auto bg-canvas p-4">
+      <div className="mx-auto max-w-[900px]">
+        <div className="mb-4 flex items-center justify-end">
           <button
             onClick={load}
             className="flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-caption text-subtle hover:bg-ink/5 hover:text-ink"
@@ -80,25 +68,12 @@ export default function StatsView() {
           </button>
         </div>
 
-        {/* Stat tiles */}
+        {/* Stat tiles — value-first, iconless. */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatTile label="Slides indexed" value={compact(overview.slide_count)} />
+          <StatTile label="Decks" value={compact(overview.deck_count)} />
+          <StatTile label="Folders" value={compact(roots.length)} />
           <StatTile
-            icon={<Presentation size={14} />}
-            label="Decks"
-            value={compact(overview.deck_count)}
-          />
-          <StatTile
-            icon={<Layers size={14} />}
-            label="Slides"
-            value={compact(overview.slide_count)}
-          />
-          <StatTile
-            icon={<HardDrive size={14} />}
-            label="Library size"
-            value={formatBytes(overview.total_bytes)}
-          />
-          <StatTile
-            icon={<Star size={14} />}
             label="Favorites"
             value={compact(overview.favorite_slides)}
             detail={
@@ -109,27 +84,82 @@ export default function StatsView() {
           />
         </div>
 
-        {/* Last index run */}
-        <Section icon={<Clock size={14} />} title="Last index run">
-          {scan ? (
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-body text-ink">
-              <span>{formatModified(scan.started_unix)}</span>
-              <span className="text-subtle">
-                took {formatDuration(scan.duration_ms)}
-              </span>
-              <span className="text-subtle">
-                {scan.indexed} indexed · {scan.unchanged} unchanged · {scan.removed} removed
-              </span>
-            </div>
-          ) : (
-            <Empty>No index run recorded yet.</Empty>
-          )}
-        </Section>
+        {/* Primary activity cards — 2×2. */}
+        <div className="mt-4 grid grid-cols-1 gap-3.5 md:grid-cols-2">
+          <Card title="Last index run">
+            {scan ? (
+              <>
+                <div className="text-title font-semibold text-ink">
+                  {formatModified(scan.started_unix)}
+                </div>
+                <div className="mt-0.5 text-caption text-subtle">
+                  {formatDuration(scan.duration_ms)} · {scan.indexed} indexed ·{" "}
+                  {scan.unchanged} unchanged · {scan.removed} removed
+                </div>
+              </>
+            ) : (
+              <div className="text-caption text-subtle">No index run recorded yet.</div>
+            )}
+          </Card>
 
-        {/* AI index (semantic embedding subsystem) */}
-        <Section icon={<Sparkles size={14} />} title="AI index">
-          <AiIndexBody status={semanticStatus} indexing={aiIndexing} />
-        </Section>
+          <Card title="AI index">
+            <AiIndexBody status={semanticStatus} indexing={aiIndexing} />
+          </Card>
+
+          <Card title="Recent searches">
+            {overview.recent_searches.length === 0 ? (
+              <div className="text-caption text-subtle">
+                Searches show up here once you start looking for slides.
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {overview.recent_searches.map((s, i) => (
+                  <button
+                    key={`${s.searched_unix}-${i}`}
+                    title={`${s.result_count} hit${s.result_count === 1 ? "" : "s"} · run again`}
+                    onClick={() => {
+                      const app = useApp.getState();
+                      void app.setNav({ type: "all" });
+                      app.setQuery(s.query);
+                    }}
+                    className="max-w-full truncate rounded-full bg-ink/[0.06] px-2.5 py-1 text-caption text-ink transition-colors hover:bg-ink/10"
+                  >
+                    {s.query}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card title="Recent exports">
+            {overview.recent_exports.length === 0 ? (
+              <div className="text-caption text-subtle">
+                Exported decks show up here after your first composition.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {overview.recent_exports.map((ex, i) => (
+                  <button
+                    key={`${ex.exported_unix}-${i}`}
+                    title={ex.output_path}
+                    onClick={() => void api.revealInFinder(ex.output_path)}
+                    className="flex items-center gap-2 text-left"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-body text-ink">
+                      {ex.title}
+                    </span>
+                    <span className="tabnum shrink-0 text-caption text-subtle">
+                      {ex.slide_count} slides
+                    </span>
+                    <span className="shrink-0 text-caption text-subtle/80">
+                      {formatModified(ex.exported_unix)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
 
         {/* Problems (hidden when the last run had no skips) */}
         {overview.last_scan_issues.length > 0 && (
@@ -155,76 +185,6 @@ export default function StatsView() {
             </ul>
           </Section>
         )}
-
-        {/* Recent searches */}
-        <Section icon={<Search size={14} />} title="Recent searches">
-          {overview.recent_searches.length === 0 ? (
-            <Empty>Searches show up here once you start looking for slides.</Empty>
-          ) : (
-            <ul>
-              {overview.recent_searches.map((s, i) => (
-                <li key={`${s.searched_unix}-${i}`}>
-                  <button
-                    className="flex w-full items-center gap-3 rounded-[6px] px-2 py-1.5 text-left hover:bg-ink/5"
-                    title="Run this search again"
-                    onClick={() => {
-                      const app = useApp.getState();
-                      void app.setNav({ type: "all" });
-                      app.setQuery(s.query);
-                    }}
-                  >
-                    <span className="min-w-0 flex-1 truncate text-body text-ink">
-                      {s.query}
-                    </span>
-                    <span className="tabnum shrink-0 text-caption text-subtle">
-                      {s.result_count} hit{s.result_count === 1 ? "" : "s"}
-                    </span>
-                    <span className="shrink-0 text-caption text-subtle/70">
-                      {formatModified(s.searched_unix)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Section>
-
-        {/* Recent exports */}
-        <Section icon={<Download size={14} />} title="Recent exports & compositions">
-          {overview.recent_exports.length === 0 ? (
-            <Empty>Exported decks show up here after your first composition.</Empty>
-          ) : (
-            <ul>
-              {overview.recent_exports.map((ex, i) => (
-                <li
-                  key={`${ex.exported_unix}-${i}`}
-                  className="flex items-center gap-3 rounded-[6px] px-2 py-1.5 hover:bg-ink/5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-body text-ink">{ex.title}</div>
-                    <div className="truncate text-caption text-subtle/70" title={ex.output_path}>
-                      {basename(ex.output_path)}
-                    </div>
-                  </div>
-                  <span className="tabnum shrink-0 text-caption text-subtle">
-                    {ex.slide_count} slides · {ex.source_decks} deck
-                    {ex.source_decks === 1 ? "" : "s"}
-                  </span>
-                  <span className="shrink-0 text-caption text-subtle/70">
-                    {formatModified(ex.exported_unix)}
-                  </span>
-                  <button
-                    className="shrink-0 rounded-[5px] p-1 text-subtle hover:bg-ink/10 hover:text-ink"
-                    title="Reveal in Finder"
-                    onClick={() => void api.revealInFinder(ex.output_path)}
-                  >
-                    <FolderOpen size={13} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Section>
 
         {/* Largest decks */}
         <Section icon={<HardDrive size={14} />} title="Largest decks">
@@ -296,24 +256,33 @@ function formatDuration(ms: number): string {
 }
 
 function StatTile({
-  icon,
   label,
   value,
   detail,
 }: {
-  icon: React.ReactNode;
   label: string;
   value: string;
   detail?: string;
 }) {
   return (
-    <div className="rounded-[8px] bg-surface p-3 shadow-tile">
-      <div className="flex items-center gap-1.5 text-caption text-subtle">
-        <span className="text-subtle/70">{icon}</span>
-        {label}
+    <div className="rounded-[8px] bg-surface px-4 py-3.5 shadow-tile">
+      <div className="tabnum text-[26px] font-semibold leading-[30px] text-ink">
+        {value}
       </div>
-      <div className="mt-1 text-[22px] font-semibold leading-7 text-ink">{value}</div>
+      <div className="mt-0.5 text-caption text-subtle">{label}</div>
       {detail && <div className="text-caption text-subtle/70">{detail}</div>}
+    </div>
+  );
+}
+
+/** A titled surface card for the stats activity grid. */
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-[8px] bg-surface px-4 py-3.5 shadow-tile">
+      <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+        {title}
+      </div>
+      {children}
     </div>
   );
 }
@@ -371,7 +340,7 @@ function AiIndexBody({
   const hasModel = status.state === "ready" || status.embedded_slides > 0;
 
   return (
-    <div className="space-y-1.5 px-2 py-1.5">
+    <div className="space-y-1.5">
       <div className="flex items-center gap-2 text-body text-ink">
         <span className={cx("h-2 w-2 shrink-0 rounded-full", meta.dot)} />
         <span className="font-medium">{meta.label}</span>

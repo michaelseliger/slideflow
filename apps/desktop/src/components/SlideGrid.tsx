@@ -3,14 +3,14 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, FolderOpen } from "lucide-react";
 import type { SearchHit } from "../lib/types";
 import { useApp } from "../stores/useApp";
-import { cx, deckDisplayName } from "../lib/utils";
+import { deckDisplayName } from "../lib/utils";
 import * as api from "../lib/api";
 import SlideCard from "./SlideCard";
 
-const GAP = 18; // brief: generous 16–20px gutters
-const PAD = 20;
+const GAP = 14; // brief: tight, even gutters between cards
+const PAD = 16;
 const TEXT_BLOCK = 74; // title + snippet + meta + paddings under the thumb
-const HEADER_H = 44;
+const HEADER_H = 40;
 
 interface IndexedHit {
   hit: SearchHit;
@@ -187,37 +187,32 @@ function GroupHeader({
 }) {
   return (
     <div
-      className="flex items-center gap-1.5 px-5 pb-1.5 pt-3"
-      style={{ height: HEADER_H }}
+      className="group flex items-center gap-2 pb-1.5 pt-3"
+      style={{ height: HEADER_H, paddingLeft: PAD, paddingRight: PAD }}
     >
       <button
         onClick={onToggle}
-        className="flex items-center gap-1.5 rounded-[5px] px-1 py-0.5 hover:bg-ink/5"
+        className="flex min-w-0 items-center gap-1.5 rounded-[5px] px-1 py-0.5 hover:bg-ink/5"
       >
         {collapsed ? (
-          <ChevronRight size={14} className="text-subtle" />
+          <ChevronRight size={14} className="shrink-0 text-subtle" />
         ) : (
-          <ChevronDown size={14} className="text-subtle" />
+          <ChevronDown size={14} className="shrink-0 text-subtle" />
         )}
-        <span className="text-title font-semibold text-ink" title={path}>
+        <span className="shrink-0 text-body font-semibold text-ink" title={path}>
           {title}
         </span>
-        <span className="tabnum ml-1 rounded-full bg-ink/8 px-1.5 text-caption text-subtle">
-          {count}
-        </span>
+        <span className="truncate text-caption text-subtle/80">{path}</span>
       </button>
       <button
         title="Reveal deck in Finder"
         onClick={() => void api.revealInFinder(path)}
-        className={cx(
-          "ml-1 flex h-6 w-6 items-center justify-center rounded-[5px] text-subtle opacity-0 hover:bg-ink/5 hover:opacity-100",
-          "group-hover:opacity-100",
-        )}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[5px] text-subtle opacity-0 hover:bg-ink/5 group-hover:opacity-100"
       >
         <FolderOpen size={13} />
       </button>
-      <span className="ml-auto truncate pr-2 text-caption text-subtle/70">
-        {path}
+      <span className="tabnum ml-auto shrink-0 pr-1 text-caption text-subtle/80">
+        {count}
       </span>
     </div>
   );

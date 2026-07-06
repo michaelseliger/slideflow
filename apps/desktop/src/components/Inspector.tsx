@@ -35,19 +35,23 @@ export default function Inspector() {
             <Thumbnail slideId={hit.slide.id} rounded={false} />
           </div>
 
-          <h2 className="mt-3 text-title font-semibold text-ink">
+          <h2 className="mt-3.5 text-heading font-semibold leading-tight text-ink">
             {hit.slide.title || deckDisplayName(hit.deck)}
           </h2>
+          <div className="mt-1 text-body text-subtle">
+            {deckDisplayName(hit.deck)} · Slide {hit.slide.slide_index} of{" "}
+            {hit.deck.slide_count}
+          </div>
 
           {hit.snippet && (
             <div
-              className="selectable mt-1.5 rounded-[6px] bg-ink/5 p-2 text-caption leading-relaxed text-subtle [&_mark]:font-semibold"
+              className="selectable mt-2 rounded-[6px] bg-ink/5 p-2 text-caption leading-relaxed text-subtle [&_mark]:font-semibold"
               dangerouslySetInnerHTML={{ __html: hit.snippet }}
             />
           )}
 
-          <dl className="mt-3 space-y-2 text-caption">
-            <Meta label="Source deck" value={deckDisplayName(hit.deck)} />
+          <dl className="mt-3.5 space-y-2 text-body">
+            <Meta label="Deck" value={deckDisplayName(hit.deck)} />
             <Meta label="File" value={hit.deck.file_name} mono />
             {hit.deck.title &&
               hit.deck.title !== deckDisplayName(hit.deck) && (
@@ -60,17 +64,16 @@ export default function Inspector() {
             <Meta label="Modified" value={formatModified(hit.deck.modified_unix)} />
             <Meta label="Size" value={formatBytes(hit.deck.size_bytes)} />
             {hit.deck.author && <Meta label="Author" value={hit.deck.author} />}
-            <Meta label="Path" value={hit.deck.path} mono />
           </dl>
 
           <TagEditor key={hit.slide.id} slideId={hit.slide.id} />
 
           {hit.slide.notes && (
-            <div className="mt-3">
-              <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+            <div className="mt-4">
+              <div className="mb-1.5 text-caption font-semibold uppercase tracking-wide text-subtle/70">
                 Speaker notes
               </div>
-              <div className="selectable whitespace-pre-wrap rounded-[6px] bg-ink/5 p-2 text-caption leading-relaxed text-subtle">
+              <div className="selectable whitespace-pre-wrap rounded-[6px] bg-ink/[0.04] px-2.5 py-2 text-body leading-relaxed text-ink">
                 {hit.slide.notes}
               </div>
             </div>
@@ -87,28 +90,31 @@ export default function Inspector() {
                 if (added > 0) toast.success("Added to the tray");
               }}
               disabled={inTray}
-              className="flex items-center justify-center gap-2 rounded-[6px] bg-accent py-2 text-body font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="flex h-7 items-center justify-center gap-1.5 rounded-[6px] bg-accent text-body font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {inTray ? <Check size={15} /> : <Plus size={15} />}
+              {inTray ? <Check size={13} /> : <Plus size={13} />}
               {inTray ? "In tray" : "Add to Tray"}
             </button>
-            <button
-              onClick={() => void useApp.getState().toggleFavoriteSlide(hit.slide.id)}
-              className="flex items-center justify-center gap-2 rounded-[6px] border border-hairline/10 py-2 text-body text-ink transition-colors hover:bg-ink/5"
-            >
-              <Star
-                size={15}
-                className={hit.slide.favorite ? "fill-current text-amber-400" : ""}
-              />
-              {hit.slide.favorite ? "Remove from Favorites" : "Add to Favorites"}
-            </button>
-            <button
-              onClick={() => void api.revealInFinder(hit.deck.path)}
-              className="flex items-center justify-center gap-2 rounded-[6px] border border-hairline/10 py-2 text-body text-ink transition-colors hover:bg-ink/5"
-            >
-              <FolderOpen size={15} />
-              Reveal in Finder
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => void useApp.getState().toggleFavoriteSlide(hit.slide.id)}
+                title={hit.slide.favorite ? "Remove from Favorites" : "Add to Favorites"}
+                className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[6px] border border-hairline/10 text-body text-ink transition-colors hover:bg-ink/5"
+              >
+                <Star
+                  size={13}
+                  className={hit.slide.favorite ? "fill-current text-amber-400" : ""}
+                />
+                Favorite
+              </button>
+              <button
+                onClick={() => void api.revealInFinder(hit.deck.path)}
+                className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[6px] border border-hairline/10 text-body text-ink transition-colors hover:bg-ink/5"
+              >
+                <FolderOpen size={13} />
+                Reveal
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -127,6 +133,7 @@ function TagEditor({ slideId }: { slideId: number }) {
   // disabled and add/remove no-op until the fetch resolves (or rejects → []).
   const [names, setNames] = useState<string[] | null>(null);
   const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState(false);
   const listId = `taglist-${slideId}`;
   // Set once a local persist has happened; a late-resolving fetch must not
   // clobber the just-written set with stale DB state.
@@ -164,6 +171,8 @@ function TagEditor({ slideId }: { slideId: number }) {
     if (!names.some((n) => n.toLowerCase() === name.toLowerCase())) {
       persist([...names, name]);
     }
+    // Stay in edit mode so several tags can be typed in a row.
+    setEditing(true);
   };
 
   const remove = (name: string) => {
@@ -178,45 +187,68 @@ function TagEditor({ slideId }: { slideId: number }) {
     .filter((n) => !applied.some((a) => a.toLowerCase() === n.toLowerCase()));
 
   return (
-    <div className="mt-3">
-      <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+    <div className="mt-4">
+      <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-subtle/70">
         Tags
       </div>
-      {names && names.length > 0 && (
-        <div className="mb-1.5 flex flex-wrap gap-1">
-          {names.map((n) => (
-            <span
-              key={n}
-              className="flex items-center gap-1 rounded-full bg-ink/8 py-0.5 pl-2 pr-1 text-caption text-ink"
+      <div className="flex flex-wrap items-center gap-1.5">
+        {names?.map((n) => (
+          <span
+            key={n}
+            className="flex items-center gap-1 rounded-full bg-ink/8 py-0.5 pl-2 pr-1 text-caption text-ink"
+          >
+            {n}
+            <button
+              onClick={() => remove(n)}
+              title={`Remove ${n}`}
+              className="flex h-4 w-4 items-center justify-center rounded-full text-subtle hover:bg-ink/10 hover:text-ink"
             >
-              {n}
-              <button
-                onClick={() => remove(n)}
-                title={`Remove ${n}`}
-                className="flex h-4 w-4 items-center justify-center rounded-full text-subtle hover:bg-ink/10 hover:text-ink"
-              >
-                <X size={11} />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <input
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            addDraft();
-          } else if (e.key === "Backspace" && draft === "" && names && names.length > 0) {
-            remove(names[names.length - 1]);
-          }
-        }}
-        list={listId}
-        disabled={names == null}
-        placeholder={names == null ? "Loading tags…" : "Add a tag…"}
-        className="h-7 w-full rounded-[5px] border border-hairline/10 bg-canvas px-2 text-body text-ink outline-none focus:border-accent disabled:opacity-50"
-      />
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+        {editing ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addDraft();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setDraft("");
+                setEditing(false);
+              } else if (
+                e.key === "Backspace" &&
+                draft === "" &&
+                names &&
+                names.length > 0
+              ) {
+                remove(names[names.length - 1]);
+              }
+            }}
+            onBlur={() => {
+              addDraft();
+              setEditing(false);
+            }}
+            list={listId}
+            disabled={names == null}
+            placeholder="Add a tag…"
+            className="h-[22px] w-28 rounded-full border border-accent bg-canvas px-2.5 text-caption text-ink outline-none disabled:opacity-50"
+          />
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            disabled={names == null}
+            className="flex items-center gap-1 rounded-full border border-dashed border-hairline/20 px-2 py-0.5 text-caption text-subtle transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+          >
+            <Plus size={12} />
+            {names == null ? "Loading…" : "Add tag"}
+          </button>
+        )}
+      </div>
       <datalist id={listId}>
         {suggestions.map((n) => (
           <option key={n} value={n} />
@@ -276,9 +308,9 @@ function SimilarSlides({ slideId }: { slideId: number }) {
   if (!ready) return null;
 
   return (
-    <div ref={sectionRef} className="mt-3">
-      <div className="mb-1 flex items-center gap-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
-        <Sparkles size={11} />
+    <div ref={sectionRef} className="mt-4">
+      <div className="mb-2 flex items-center gap-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+        <Sparkles size={13} />
         Similar slides
       </div>
       {similar == null ? (
@@ -286,26 +318,29 @@ function SimilarSlides({ slideId }: { slideId: number }) {
       ) : similar.length === 0 ? (
         <div className="text-caption text-subtle">No similar slides found.</div>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2.5">
           {similar.map((s) => (
             <button
               key={s.slide.id}
               onClick={() => void useApp.getState().setNav({ type: "deck", id: s.deck.id })}
               title={`Open ${deckDisplayName(s.deck)}`}
-              className="flex w-full items-center gap-2 rounded-[6px] p-1 text-left transition-colors hover:bg-ink/5"
+              className="flex w-full items-center gap-2.5 rounded-[6px] text-left transition-colors hover:bg-ink/5"
             >
-              <div className="w-16 shrink-0 overflow-hidden rounded-[4px] shadow-tile">
+              <div className="w-14 shrink-0 overflow-hidden rounded-[4px] shadow-tile">
                 <Thumbnail slideId={s.slide.id} rounded={false} />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-caption font-medium text-ink">
+                <div className="truncate text-body font-medium text-ink">
                   {s.slide.title || deckDisplayName(s.deck)}
                 </div>
                 <div className="truncate text-caption text-subtle">
-                  {deckDisplayName(s.deck)} · #{s.slide.slide_index}
+                  {deckDisplayName(s.deck)}
                 </div>
               </div>
-              <span className="tabnum shrink-0 text-caption text-subtle/80">
+              <span
+                className="tabnum shrink-0 text-caption font-semibold"
+                style={{ color: "var(--near-duplicate)" }}
+              >
                 {Math.round(s.score * 100)}%
               </span>
             </button>
@@ -327,11 +362,12 @@ function Meta({
 }) {
   return (
     <div className="flex gap-2">
-      <dt className="w-20 shrink-0 text-subtle/70">{label}</dt>
+      <dt className="w-[70px] shrink-0 text-subtle">{label}</dt>
       <dd
-        className={`selectable min-w-0 flex-1 break-words text-ink ${
+        className={`selectable min-w-0 flex-1 truncate text-ink ${
           mono ? "font-mono text-[11px]" : ""
         }`}
+        title={value}
       >
         {value}
       </dd>

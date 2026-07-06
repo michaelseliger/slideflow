@@ -73,12 +73,12 @@ export function stripMarks(html: string): string {
   return html.replace(/<\/?mark>/g, "");
 }
 
-/** Whether the user prefers reduced motion right now. */
+/** Whether the user prefers reduced motion right now. A pref in Settings →
+ *  Appearance can force it on top of the OS `prefers-reduced-motion` setting. */
 export function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
-  );
+  if (typeof window === "undefined") return false;
+  if (window.localStorage?.getItem("slideflow.reduceMotion.v1") === "1") return true;
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 }
 
 /** Detect a Mac-like platform for shortcut hint rendering. */

@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { X, ChevronLeft, ChevronRight, Plus, FolderOpen, Check } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, FolderOpen, Check } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray, uidFor } from "../stores/useTray";
 import { toast } from "../stores/useToast";
@@ -13,6 +13,7 @@ import ApproxBadge from "./ApproxBadge";
 export default function PeekModal() {
   const peekIndex = useApp((s) => s.peekIndex);
   const results = useApp((s) => s.results);
+  const showApproxBadge = useApp((s) => s.showApproxBadge);
   const reduce = prefersReducedMotion();
   const hit = peekIndex != null ? results[peekIndex] : null;
   const { src: previewSrc, dropped } = useSlidePreview(hit?.slide.id ?? null, "full");
@@ -31,51 +32,58 @@ export default function PeekModal() {
           transition={{ duration: reduce ? 0 : 0.14 }}
           onClick={() => useApp.getState().closePeek()}
         >
-          <button
-            className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white/80 hover:bg-white/20"
-            onClick={() => useApp.getState().closePeek()}
-            title="Close (esc)"
-          >
-            <X size={18} />
-          </button>
-
-          {peekIndex! > 0 && (
-            <NavBtn side="left" onClick={() => useApp.getState().peekBy(-1)} />
-          )}
-          {peekIndex! < results.length - 1 && (
-            <NavBtn side="right" onClick={() => useApp.getState().peekBy(1)} />
-          )}
-
           <motion.div
-            className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-[12px] bg-surface shadow-peek"
+            className="flex max-h-full w-full max-w-[820px] flex-col overflow-hidden rounded-[12px] bg-elevated shadow-peek"
             initial={reduce ? false : { scale: 0.94, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             exit={reduce ? { opacity: 0 } : { scale: 0.96, opacity: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between gap-3 px-4 py-2.5 hairline-b">
-              <div className="min-w-0">
-                <div className="truncate text-title font-semibold text-ink">
+            {/* Preview, with in-frame prev/next controls. */}
+            <div className="relative shrink-0 bg-white" style={{ aspectRatio: "16 / 9" }}>
+              {previewSrc ? (
+                <img
+                  src={previewSrc}
+                  alt={hit.slide.title || "Slide preview"}
+                  draggable={false}
+                  decoding="async"
+                  className="h-full w-full object-contain"
+                />
+              ) : (
+                <div className="shimmer h-full w-full" />
+              )}
+              {peekIndex! > 0 && (
+                <NavBtn side="left" onClick={() => useApp.getState().peekBy(-1)} />
+              )}
+              {peekIndex! < results.length - 1 && (
+                <NavBtn side="right" onClick={() => useApp.getState().peekBy(1)} />
+              )}
+              {showApproxBadge && dropped.length > 0 && (
+                <div className="absolute left-3.5 top-3.5">
+                  <ApproxBadge dropped={dropped} variant="peek" />
+                </div>
+              )}
+            </div>
+
+            {/* Footer: identity + notes on the left, actions stacked on the right. */}
+            <div className="flex items-start gap-5 px-5 py-4">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-heading font-semibold text-ink">
                   {hit.slide.title || deckDisplayName(hit.deck)}
                 </div>
-                <div className="tabnum truncate text-caption text-subtle" title={hit.deck.path}>
+                <div className="tabnum mt-0.5 truncate text-body text-subtle" title={hit.deck.path}>
                   {deckDisplayName(hit.deck)} · Slide {hit.slide.slide_index} of{" "}
                   {hit.deck.slide_count}
                 </div>
-                {dropped.length > 0 && (
-                  <div className="mt-1">
-                    <ApproxBadge dropped={dropped} variant="peek" />
+                {hit.slide.notes && (
+                  <div className="selectable mt-3 whitespace-pre-wrap text-body leading-relaxed text-ink">
+                    <span className="text-subtle">Notes · </span>
+                    {hit.slide.notes}
                   </div>
                 )}
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  onClick={() => void api.openFile(hit.deck.path)}
-                  className="flex items-center gap-1.5 rounded-[6px] border border-hairline/10 px-2.5 py-1.5 text-caption text-ink hover:bg-ink/5"
-                >
-                  <FolderOpen size={13} /> Open source deck
-                </button>
+              <div className="flex w-[170px] shrink-0 flex-col gap-2">
                 <button
                   disabled={inTray}
                   onClick={() => {
@@ -84,41 +92,18 @@ export default function PeekModal() {
                       .add([{ slide: hit.slide, deck: hit.deck }]);
                     if (added > 0) toast.success("Added to the tray");
                   }}
-                  className="flex items-center gap-1.5 rounded-[6px] bg-accent px-3 py-1.5 text-caption font-medium text-white disabled:opacity-50"
+                  className="flex h-7 items-center justify-center gap-1.5 rounded-[6px] bg-accent text-body font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   {inTray ? <Check size={13} /> : <Plus size={13} />}
                   {inTray ? "In tray" : "Add to tray"}
                 </button>
+                <button
+                  onClick={() => void api.openFile(hit.deck.path)}
+                  className="flex h-7 items-center justify-center gap-1.5 rounded-[6px] border border-hairline/10 text-body text-ink transition-colors hover:bg-ink/5"
+                >
+                  <FolderOpen size={13} /> Open source deck
+                </button>
               </div>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-auto bg-canvas p-5">
-              {previewSrc ? (
-                <img
-                  src={previewSrc}
-                  alt={hit.slide.title || "Slide preview"}
-                  draggable={false}
-                  decoding="async"
-                  className="mx-auto block w-full max-w-4xl overflow-hidden rounded-[8px] bg-white object-contain shadow-tile"
-                  style={{ aspectRatio: "16 / 9" }}
-                />
-              ) : (
-                <div
-                  className="shimmer mx-auto w-full max-w-4xl overflow-hidden rounded-[8px]"
-                  style={{ aspectRatio: "16 / 9" }}
-                />
-              )}
-
-              {hit.slide.notes && (
-                <div className="mx-auto mt-4 max-w-4xl">
-                  <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
-                    Speaker notes
-                  </div>
-                  <div className="selectable whitespace-pre-wrap rounded-[8px] bg-ink/5 p-3 text-body leading-relaxed text-subtle">
-                    {hit.slide.notes}
-                  </div>
-                </div>
-              )}
             </div>
           </motion.div>
         </motion.div>
@@ -130,8 +115,8 @@ export default function PeekModal() {
 function NavBtn({ side, onClick }: { side: "left" | "right"; onClick: () => void }) {
   return (
     <button
-      className={`absolute top-1/2 -translate-y-1/2 rounded-full bg-white/10 p-2.5 text-white/80 hover:bg-white/20 ${
-        side === "left" ? "left-4" : "right-4"
+      className={`absolute top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/65 ${
+        side === "left" ? "left-3.5" : "right-3.5"
       }`}
       onClick={(e) => {
         e.stopPropagation();
@@ -139,7 +124,7 @@ function NavBtn({ side, onClick }: { side: "left" | "right"; onClick: () => void
       }}
       title={side === "left" ? "Previous (←)" : "Next (→)"}
     >
-      {side === "left" ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
+      {side === "left" ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
     </button>
   );
 }

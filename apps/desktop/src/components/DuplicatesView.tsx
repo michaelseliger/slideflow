@@ -4,7 +4,7 @@ import * as api from "../lib/api";
 import type { DuplicateGroup } from "../lib/types";
 import { useApp } from "../stores/useApp";
 import { useSemantic } from "../stores/useSemantic";
-import { cx, deckDisplayName, formatModified } from "../lib/utils";
+import { deckDisplayName, formatModified } from "../lib/utils";
 import Thumbnail from "./Thumbnail";
 
 /** Duplicates view (sidebar → Duplicates): clusters of identical (exact) and —
@@ -92,20 +92,29 @@ function Group({ group }: { group: DuplicateGroup }) {
   const near = group.kind === "near";
   return (
     <section>
-      <div className="mb-2 flex items-center gap-2">
-        <span
-          className={cx(
-            "flex items-center gap-1 rounded-full px-2 py-0.5 text-caption font-semibold",
-            near ? "bg-purple-500/15 text-purple-500" : "bg-amber-500/15 text-amber-600",
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="flex shrink-0 items-center" style={near ? { color: "var(--near-duplicate)" } : undefined}>
+          {near ? (
+            <Sparkles size={16} />
+          ) : (
+            <Copy size={16} className="text-subtle" />
           )}
-        >
-          {near ? <Sparkles size={11} /> : <Copy size={11} />}
+        </span>
+        <span className="text-title font-semibold text-ink">
           {near ? "Near duplicate" : "Exact duplicate"}
         </span>
-        <span className="tabnum text-caption text-subtle">
+        <span className="text-caption text-subtle">
           {group.slides.length} copies
-          {near && group.score != null ? ` · ${Math.round(group.score * 100)}% similar` : ""}
+          {near ? "" : " · identical content hash"}
         </span>
+        {near && group.score != null && (
+          <span
+            className="rounded-full px-2 py-0.5 text-caption font-semibold"
+            style={{ background: "rgb(168 85 247 / 0.14)", color: "var(--near-duplicate)" }}
+          >
+            {Math.round(group.score * 100)}% similar
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -122,7 +131,7 @@ function Group({ group }: { group: DuplicateGroup }) {
                 alt={s.slide.title ?? deckDisplayName(s.deck)}
               />
               {idx === 0 && (
-                <span className="absolute left-1.5 top-1.5 rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-semibold text-white shadow">
+                <span className="absolute left-3 top-3 rounded-full bg-ink px-1.5 py-0.5 text-[10px] font-semibold text-surface shadow">
                   Newest
                 </span>
               )}

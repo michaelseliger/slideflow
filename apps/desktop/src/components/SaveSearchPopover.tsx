@@ -21,10 +21,15 @@ export default function SaveSearchPopover({ onClose }: { onClose: () => void }) 
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full z-50 mt-1.5 w-64 rounded-[8px] border border-hairline/10 bg-elevated p-3 text-body shadow-peek"
+      className="absolute right-0 top-full z-50 mt-1.5 w-72 rounded-[10px] border border-hairline/10 bg-elevated p-4 text-body shadow-peek"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="mb-1.5 text-caption font-medium text-subtle">Save this search</div>
+      <div className="text-body font-semibold text-ink">Save this search</div>
+      {query.trim() && (
+        <div className="mt-0.5 truncate text-caption text-subtle" title={query.trim()}>
+          {query.trim()}
+        </div>
+      )}
       <input
         autoFocus
         spellCheck={false}
@@ -34,7 +39,7 @@ export default function SaveSearchPopover({ onClose }: { onClose: () => void }) 
           if (e.key === "Enter") submit();
         }}
         placeholder="Name"
-        className="selectable w-full rounded-[6px] border border-hairline/10 bg-canvas px-2 py-1.5 text-body text-ink outline-none focus:border-accent"
+        className="selectable mt-3 w-full rounded-[7px] border border-accent bg-canvas px-2.5 py-1.5 text-body text-ink outline-none focus:border-accent"
       />
       <div className="mt-2.5 flex justify-end gap-1.5">
         <button

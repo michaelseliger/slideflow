@@ -1,204 +1,367 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   X,
-  Monitor,
-  Sun,
-  Moon,
-  Minus,
-  Plus,
+  SunMoon,
   Folder,
   FolderPlus,
   FolderOpen,
   Download,
   Trash2,
+  Type,
+  Sparkles,
+  RefreshCw,
+  Loader2,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useApp, type ThemeMode } from "../stores/useApp";
 import { useUpdater } from "../stores/useUpdater";
 import { useSemantic } from "../stores/useSemantic";
 import { useFonts } from "../stores/useFonts";
 import type { FontFamily } from "../lib/types";
-import { basename, cx } from "../lib/utils";
+import { cx } from "../lib/utils";
 import * as api from "../lib/api";
 import { toast } from "../stores/useToast";
-import { UpdateStatus } from "./AboutSheet";
 import RootExcludesEditor from "./RootExcludesEditor";
 import OverlaySheet from "./OverlaySheet";
 
 const AUTO_UPDATE_KEY = "slideflow.autoUpdate.v1";
+const LAST_CHECK_KEY = "slideflow.updateLastChecked.v1";
 
-/** Preferences sheet: appearance, library, and update settings. Follows the
- *  AboutSheet overlay idiom (backdrop + spring card, reduced-motion aware).
- *  Opened by ⌘, or the command palette; closes via backdrop / X only. */
+type SectionKey = "appearance" | "library" | "fonts" | "updates" | "ai";
+
+const NAV: { key: SectionKey; label: string; icon: ReactNode }[] = [
+  { key: "appearance", label: "Appearance", icon: <SunMoon size={15} /> },
+  { key: "library", label: "Library", icon: <Folder size={15} /> },
+  { key: "fonts", label: "Fonts", icon: <Type size={15} /> },
+  { key: "updates", label: "Updates", icon: <Download size={15} /> },
+  { key: "ai", label: "Semantic search", icon: <Sparkles size={15} /> },
+];
+
+/** Preferences sheet: a two-pane master/detail (nav + section). Opened by ⌘, or
+ *  the command palette; closes via backdrop / X / Escape. */
 export default function SettingsSheet() {
   const open = useApp((s) => s.settingsOpen);
   const close = () => useApp.getState().setSettingsOpen(false);
+  const [section, setSection] = useState<SectionKey>("appearance");
 
   return (
     <OverlaySheet
       open={open}
       onClose={close}
-      cardClassName="max-w-md"
+      cardClassName="max-w-[640px]"
       onCardKeyDown={(e) => {
-        // Escape closes the sheet unless a field has focus (there, let the
-        // field keep the key — don't nuke an in-progress exclude-glob edit).
+        // Escape closes the sheet unless a field has focus (there, let the field
+        // keep the key — don't nuke an in-progress exclude-glob edit).
         const tag = (e.target as HTMLElement).tagName;
         const editing = tag === "INPUT" || tag === "TEXTAREA";
         if (e.key === "Escape" && !editing) close();
       }}
     >
-      <div className="flex items-center justify-between px-5 py-3 hairline-b">
-              <div className="text-title font-semibold text-ink">Settings</div>
-              <button
-                onClick={close}
-                aria-label="Close"
-                className="rounded-full p-1 text-subtle hover:bg-ink/10"
-              >
-                <X size={16} />
-              </button>
-            </div>
+      <div className="flex items-center px-4 py-3.5 hairline-b">
+        <span className="text-title font-semibold text-ink">Settings</span>
+        <button
+          onClick={close}
+          aria-label="Close"
+          className="ml-auto flex text-subtle hover:text-ink"
+        >
+          <X size={16} />
+        </button>
+      </div>
 
-            <div className="max-h-[70vh] space-y-6 overflow-y-auto px-5 py-5">
-              <AppearanceSection />
-              <LibrarySection />
-              <FontsSection />
-              <UpdatesSection />
-              <SemanticSection />
-            </div>
+      <div className="flex h-[520px]">
+        <nav className="flex w-[180px] shrink-0 flex-col gap-0.5 hairline-r p-2.5">
+          {NAV.map((n) => {
+            const active = n.key === section;
+            return (
+              <button
+                key={n.key}
+                onClick={() => setSection(n.key)}
+                className={cx(
+                  "flex items-center gap-2.5 rounded-[6px] px-2.5 py-[7px] text-body",
+                  active ? "bg-accent/[0.14] text-accent" : "text-ink hover:bg-ink/5",
+                )}
+              >
+                <span className={active ? "text-accent" : "text-subtle"}>{n.icon}</span>
+                {n.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="min-w-0 flex-1 overflow-y-auto px-5 py-[18px]">
+          {section === "appearance" && <AppearanceSection />}
+          {section === "library" && <LibrarySection />}
+          {section === "fonts" && <FontsSection />}
+          {section === "updates" && <UpdatesSection />}
+          {section === "ai" && <SemanticSection />}
+        </div>
+      </div>
     </OverlaySheet>
   );
 }
 
-/** Uppercase section header, matching the Sidebar section-label styling. */
-function SectionLabel({ children }: { children: ReactNode }) {
+/** Section heading (15px, sentence case). */
+function SectionHeading({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
   return (
-    <div className="px-0 pb-2 text-caption font-semibold uppercase tracking-wide text-subtle/70">
+    <div className="mb-3.5 flex items-center">
+      <span className="text-title font-semibold text-ink">{children}</span>
+      {aside && <span className="ml-auto flex items-center gap-1.5 text-caption text-subtle">{aside}</span>}
+    </div>
+  );
+}
+
+/** Small uppercase label for sub-groups within a section. */
+function GroupLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="mb-2 text-caption font-semibold uppercase tracking-wide text-subtle/70">
       {children}
     </div>
   );
 }
 
-const THEME_OPTIONS: Array<[ThemeMode, typeof Monitor, string]> = [
-  ["system", Monitor, "System"],
-  ["light", Sun, "Light"],
-  ["dark", Moon, "Dark"],
+/** A settings row: title (+ optional subtitle) on the left, control on the right. */
+function Row({
+  title,
+  subtitle,
+  control,
+  divider = true,
+}: {
+  title: string;
+  subtitle?: string;
+  control: ReactNode;
+  divider?: boolean;
+}) {
+  return (
+    <div className={cx("flex items-center gap-3 py-3", divider && "hairline-b")}>
+      <div className="min-w-0 flex-1">
+        <div className="text-body font-medium text-ink">{title}</div>
+        {subtitle && <div className="mt-0.5 text-caption text-subtle">{subtitle}</div>}
+      </div>
+      <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
+/** iOS-style switch, matching the design toggle (38×22, accent track). */
+function Switch({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      onClick={onToggle}
+      className={cx(
+        "relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors",
+        checked ? "bg-accent" : "bg-ink/20",
+      )}
+    >
+      <span
+        className={cx(
+          "absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full bg-white transition-transform",
+          checked ? "translate-x-[16px]" : "translate-x-0",
+        )}
+      />
+    </button>
+  );
+}
+
+/** A compact bordered segmented control (accent-filled active segment). */
+function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-[6px] border border-hairline/[0.12]">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          onClick={() => onChange(o.value)}
+          className={cx(
+            "px-3 py-[5px] text-caption",
+            o.value === value
+              ? "bg-accent font-semibold text-white"
+              : "font-medium text-subtle hover:bg-ink/5",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const dangerGhost =
+  "rounded-[6px] border border-red-500/30 px-3 py-1.5 text-caption font-medium text-red-500 hover:bg-red-500/10";
+const outlineBtn =
+  "flex items-center gap-1.5 rounded-[6px] border border-hairline/10 px-3 py-1.5 text-caption font-medium text-ink hover:bg-ink/5";
+
+const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
 ];
 
 function AppearanceSection() {
   const theme = useApp((s) => s.theme);
   const gridCols = useApp((s) => s.gridCols);
+  const showApproxBadge = useApp((s) => s.showApproxBadge);
+  const reduceMotion = useApp((s) => s.reduceMotion);
 
   return (
     <div>
-      <SectionLabel>Appearance</SectionLabel>
+      <SectionHeading>Appearance</SectionHeading>
 
-      <div className="mb-4">
-        <div className="mb-1.5 text-body text-ink">Theme</div>
-        <div className="flex gap-0.5 rounded-[8px] bg-ink/5 p-0.5">
-          {THEME_OPTIONS.map(([mode, Icon, label]) => (
-            <button
-              key={mode}
-              onClick={() => useApp.getState().setTheme(mode)}
-              className={cx(
-                "flex flex-1 items-center justify-center gap-1.5 rounded-[6px] px-2 py-1.5 text-body",
-                theme === mode ? "bg-accent text-white" : "text-subtle hover:text-ink",
-              )}
-            >
-              <Icon size={14} /> {label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <Row
+        title="Theme"
+        subtitle="Match system, or force light / dark"
+        control={
+          <Segmented
+            options={THEME_OPTIONS}
+            value={theme}
+            onChange={(v) => useApp.getState().setTheme(v)}
+          />
+        }
+      />
 
-      <div className="flex items-center justify-between">
-        <div className="text-body text-ink">Grid columns</div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => useApp.getState().decCols()}
-            disabled={gridCols <= 3}
-            aria-label="Fewer columns"
-            className="rounded-[6px] p-1 text-subtle hover:bg-ink/10 disabled:opacity-40 disabled:hover:bg-transparent"
-          >
-            <Minus size={14} />
-          </button>
-          <span className="tabnum w-6 text-center text-body">{gridCols}</span>
-          <button
-            onClick={() => useApp.getState().incCols()}
-            disabled={gridCols >= 10}
-            aria-label="More columns"
-            className="rounded-[6px] p-1 text-subtle hover:bg-ink/10 disabled:opacity-40 disabled:hover:bg-transparent"
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-      </div>
-      <p className="mt-1 text-caption text-subtle">
-        Fewer columns show larger thumbnails.
-      </p>
+      <Row
+        title="Grid density"
+        subtitle="Default columns in the slide grid"
+        control={
+          <div className="flex items-center gap-2.5">
+            <span className="text-caption text-subtle">3</span>
+            <input
+              type="range"
+              min={3}
+              max={10}
+              step={1}
+              value={gridCols}
+              onChange={(e) => useApp.getState().setGridCols(Number(e.target.value))}
+              className="h-1 w-[120px] cursor-pointer accent-[rgb(var(--accent-rgb))]"
+              aria-label="Grid columns"
+            />
+            <span className="tabnum w-3 text-caption text-ink">{gridCols}</span>
+          </div>
+        }
+      />
+
+      <Row
+        title="Show “Approximate” badge"
+        subtitle="Flag previews that skipped unsupported constructs"
+        control={
+          <Switch
+            checked={showApproxBadge}
+            onToggle={() => useApp.getState().setShowApproxBadge(!showApproxBadge)}
+          />
+        }
+      />
+
+      <Row
+        title="Reduce motion"
+        subtitle="Minimize animations, on top of your system setting"
+        divider={false}
+        control={
+          <Switch
+            checked={reduceMotion}
+            onToggle={() => useApp.getState().setReduceMotion(!reduceMotion)}
+          />
+        }
+      />
     </div>
   );
 }
 
 function LibrarySection() {
   const roots = useApp((s) => s.roots);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  const toggleExcludes = (id: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   return (
     <div>
-      <SectionLabel>Library</SectionLabel>
+      <SectionHeading>Library</SectionHeading>
 
-      <div className="space-y-0.5">
-        {roots.map((r) => (
-          <div key={r.id}>
-            <div className="flex items-center gap-2 rounded-[6px] px-2 py-1.5 hover:bg-ink/5">
+      <GroupLabel>Watched folders</GroupLabel>
+      <div className="overflow-hidden rounded-[8px] border border-hairline/10">
+        {roots.length === 0 && (
+          <div className="px-3 py-3 text-caption text-subtle">
+            No folders yet. Add one below to start indexing your decks.
+          </div>
+        )}
+        {roots.map((r, i) => (
+          <div key={r.id} className={cx(i < roots.length - 1 && "hairline-b")}>
+            <div className="flex items-center gap-2.5 px-3 py-2.5">
               <Folder size={15} className="shrink-0 text-subtle" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-body text-ink">{basename(r.path)}</div>
-                <div className="truncate text-caption text-subtle" title={r.path}>
-                  {r.path}
-                </div>
+              <div className="min-w-0 flex-1 truncate text-body text-ink" title={r.path}>
+                {r.path}
               </div>
-              <span className="tabnum text-caption text-subtle">{r.slide_count}</span>
+              <span className="tabnum shrink-0 text-caption text-subtle">
+                {r.deck_count} deck{r.deck_count === 1 ? "" : "s"}
+              </span>
+              <button
+                onClick={() => toggleExcludes(r.id)}
+                title="Edit exclude patterns"
+                className={cx(
+                  "flex shrink-0 rounded-[5px] p-1 hover:bg-ink/8 hover:text-ink",
+                  expanded.has(r.id) ? "text-accent" : "text-subtle",
+                )}
+              >
+                <SlidersHorizontal size={14} />
+              </button>
               <button
                 aria-label="Remove folder"
                 onClick={() => void useApp.getState().removeRoot(r.id)}
-                className="rounded-[6px] p-1 text-subtle hover:text-ink"
+                className="flex shrink-0 rounded-[5px] p-1 text-subtle hover:text-ink"
               >
-                <Trash2 size={14} />
+                <X size={14} />
               </button>
             </div>
-            {/* Per-root exclude-glob editor (step4 #17): reads r.exclude_globs,
-                calls setRootExcludes then re-scans. */}
-            <RootExcludesEditor root={r} />
+            {expanded.has(r.id) && (
+              <div className="hairline-t px-1 pb-2 pt-1">
+                <RootExcludesEditor root={r} />
+              </div>
+            )}
           </div>
         ))}
       </div>
 
-      <button
-        onClick={() => void useApp.getState().addFolder()}
-        className="mt-2 flex items-center gap-2 rounded-[6px] px-2 py-1.5 text-body text-subtle hover:text-ink"
-      >
-        <FolderPlus size={15} /> Add folder…
-      </button>
-
-      <button
-        onClick={() => useApp.getState().confirmClearAndRebuild()}
-        className="mt-3 w-full rounded-[8px] border border-hairline/15 px-4 py-2 text-body font-medium text-red-500 hover:bg-red-500/10"
-      >
-        Clear &amp; rebuild index…
-      </button>
+      <div className="mt-5 flex items-center gap-2">
+        <button onClick={() => void useApp.getState().addFolder()} className={outlineBtn}>
+          <FolderPlus size={13} /> Add folder…
+        </button>
+        <span className="flex-1" />
+        <button
+          onClick={() => useApp.getState().confirmClearAndRebuild()}
+          className={dangerGhost}
+        >
+          Clear &amp; rebuild index
+        </button>
+      </div>
     </div>
   );
 }
 
 function UpdatesSection() {
   const phase = useUpdater((s) => s.phase);
+  const version = useUpdater((s) => s.version);
+  const progress = useUpdater((s) => s.progress);
+  const error = useUpdater((s) => s.error);
   const [auto, setAuto] = useState<boolean>(
     () => localStorage.getItem(AUTO_UPDATE_KEY) !== "0",
   );
+  const [lastChecked, setLastChecked] = useState<string>(
+    () => localStorage.getItem(LAST_CHECK_KEY) ?? "",
+  );
 
-  // Reconcile the toggle against the backend file the scheduler actually gates
-  // on (localStorage is only an optimistic cache and can drift, e.g. webview
-  // storage cleared while the config file persists). Runs each time the sheet
-  // opens, since this section mounts with it.
   useEffect(() => {
     let alive = true;
     api
@@ -226,63 +389,105 @@ function UpdatesSection() {
       });
   };
 
+  const checkNow = () => {
+    const stamp = new Date().toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    localStorage.setItem(LAST_CHECK_KEY, stamp);
+    setLastChecked(stamp);
+    void useUpdater.getState().check();
+  };
+
   return (
     <div>
-      <SectionLabel>Updates</SectionLabel>
+      <SectionHeading>Updates</SectionHeading>
 
       {phase !== "unsupported" && (
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-body text-ink">Automatic updates</div>
-            <p className="text-caption text-subtle">
-              Check for updates on launch and daily.
-            </p>
+        <Row
+          title="Automatic updates"
+          subtitle="Check on launch and daily"
+          control={<Switch checked={auto} onToggle={onToggle} />}
+        />
+      )}
+
+      {phase === "ready" && (
+        <div className="mt-4 flex items-center gap-3 rounded-[8px] bg-accent/[0.08] px-4 py-3.5">
+          <Download size={20} className="shrink-0 text-accent" />
+          <div className="min-w-0 flex-1">
+            <div className="text-body font-semibold text-ink">
+              Version {version} is ready to install
+            </div>
+            <div className="text-caption text-subtle">
+              Downloaded and verified · restart to finish
+            </div>
           </div>
-          <Switch checked={auto} onToggle={onToggle} />
+          <button
+            onClick={() => void useUpdater.getState().restart()}
+            className="shrink-0 rounded-[6px] bg-accent px-3 py-1.5 text-caption font-semibold text-white hover:opacity-90"
+          >
+            Restart to update
+          </button>
         </div>
       )}
 
-      <UpdateStatus />
+      {phase === "downloading" && (
+        <p className="tabnum mt-4 text-caption text-subtle">
+          {progress != null
+            ? `Downloading ${version} — ${Math.round(progress * 100)}%`
+            : `Downloading ${version}…`}
+        </p>
+      )}
+      {phase === "checking" && (
+        <p className="mt-4 text-caption text-subtle">Checking for updates…</p>
+      )}
+      {phase === "installing" && (
+        <p className="mt-4 text-caption text-subtle">Installing update…</p>
+      )}
+      {phase === "error" && error && (
+        <p className="mt-4 text-caption text-red-500">{error}</p>
+      )}
+      {phase === "unsupported" && (
+        <p className="mt-4 text-caption text-subtle">
+          Updates are installed through your package manager.
+        </p>
+      )}
+
+      {phase !== "unsupported" && (
+        <div className="mt-4 flex items-center gap-2 text-caption text-subtle">
+          <span>
+            {lastChecked ? `Last checked ${lastChecked}` : "Checks automatically on launch"}
+          </span>
+          <span className="flex-1" />
+          <button onClick={checkNow} className={outlineBtn}>
+            Check now
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-/** The shared switch control (extracted from the auto-update toggle). */
-function Switch({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={onToggle}
-      className={cx(
-        "relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors",
-        checked ? "bg-accent" : "bg-ink/20",
-      )}
-    >
-      {/* left-[2px] anchors the knob; without it the browser's static-position
-          fallback puts the base X mid-track and the translate pushes the knob
-          outside (invisible white-on-white when checked). */}
-      <span
-        className={cx(
-          "absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full bg-white transition-transform",
-          checked ? "translate-x-[16px]" : "translate-x-0",
-        )}
-      />
-    </button>
-  );
+const FONT_DOT: Record<FontFamily["status"], string> = {
+  available: "var(--success)",
+  downloadable: "var(--warning)",
+  missing: "var(--danger)",
+};
+
+function fontStatusLabel(f: FontFamily): string {
+  if (f.embedded) return "Embedded";
+  if (f.status === "available") return "Available";
+  if (f.status === "downloadable") return "Downloadable";
+  return "Not installed";
 }
 
-/** Fonts: the families the indexed library names, each with an availability
- *  status. Missing families can be added (a licensed .ttf/.otf) or downloaded
- *  (curated, with per-download consent); app-provided fonts can be removed. All
- *  fonts live under <app_data>/fonts and are never installed system-wide. */
+/** Fonts: families the library references, each with an availability status.
+ *  All fonts live under <app_data>/fonts and are never installed system-wide. */
 function FontsSection() {
   const fonts = useFonts((s) => s.fonts);
   const loaded = useFonts((s) => s.loaded);
   const downloading = useFonts((s) => s.downloading);
-  const dir = useFonts((s) => s.dir);
 
-  // Refresh when the sheet opens so the list reflects the latest scan/harvest.
   useEffect(() => {
     void useFonts.getState().refresh();
   }, []);
@@ -294,6 +499,7 @@ function FontsSection() {
         source ? `:\n\n${source}` : ""
       }.\n\nIt's stored only for this app, never installed system-wide.`,
       confirmLabel: "Download",
+      confirmIcon: <Download size={13} />,
       onConfirm: () => void useFonts.getState().download(family),
     });
 
@@ -308,18 +514,19 @@ function FontsSection() {
 
   return (
     <div>
-      <SectionLabel>Fonts</SectionLabel>
+      <SectionHeading aside="App-local · never installed system-wide">Fonts</SectionHeading>
 
       {loaded && fonts.length === 0 ? (
         <p className="text-caption text-subtle">
           No fonts detected yet. Add a folder of decks and scan to build the list.
         </p>
       ) : (
-        <div className="space-y-0.5">
-          {fonts.map((f) => (
+        <div className="overflow-hidden rounded-[8px] border border-hairline/10">
+          {fonts.map((f, i) => (
             <FontRow
               key={f.family}
               font={f}
+              divider={i < fonts.length - 1}
               downloading={downloading === f.family}
               onDownload={() => confirmDownload(f.family, f.download_source)}
               onRemove={() => confirmRemove(f.family)}
@@ -328,74 +535,47 @@ function FontsSection() {
         </div>
       )}
 
-      <button
-        onClick={() => void useFonts.getState().addFonts()}
-        className="mt-2 flex items-center gap-2 rounded-[6px] px-2 py-1.5 text-body text-subtle hover:text-ink"
-      >
-        <FolderPlus size={15} /> Add font…
-      </button>
-
-      {dir && (
-        <div className="mt-2 flex items-center gap-2 px-2">
-          <div className="min-w-0 flex-1 truncate text-caption text-subtle" title={dir}>
-            {dir}
-          </div>
-          <button
-            onClick={() => void useFonts.getState().revealFolder()}
-            className="flex shrink-0 items-center gap-1 rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
-          >
-            <FolderOpen size={13} /> Reveal
-          </button>
-        </div>
-      )}
+      <div className="mt-4 flex gap-2">
+        <button onClick={() => void useFonts.getState().addFonts()} className={outlineBtn}>
+          <FolderPlus size={13} /> Add .ttf / .otf…
+        </button>
+        <button onClick={() => void useFonts.getState().revealFolder()} className={outlineBtn}>
+          <FolderOpen size={13} /> Reveal folder
+        </button>
+      </div>
     </div>
   );
 }
 
-/** One font row: a status dot + family + source, and the applicable action
- *  (Download / Add… / Remove). */
 function FontRow({
   font,
   downloading,
+  divider,
   onDownload,
   onRemove,
 }: {
   font: FontFamily;
   downloading: boolean;
+  divider: boolean;
   onDownload: () => void;
   onRemove: () => void;
 }) {
-  const statusLabel =
-    font.status === "available"
-      ? `Available${font.source ? ` · ${font.source}` : ""}`
-      : font.status === "downloadable"
-        ? "Downloadable"
-        : "Not installed";
-  const dotClass =
-    font.status === "available"
-      ? "bg-green-500"
-      : font.status === "downloadable"
-        ? "bg-accent"
-        : "bg-ink/30";
+  const dot = font.embedded ? "rgb(var(--accent-rgb))" : FONT_DOT[font.status];
 
   return (
-    <div className="flex items-center gap-2 rounded-[6px] px-2 py-1.5 hover:bg-ink/5">
-      <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)} />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-body text-ink">
-          {font.family}
-          {font.embedded && (
-            <span className="ml-1.5 align-middle text-caption text-subtle">embedded</span>
-          )}
-        </div>
-        <div className="truncate text-caption text-subtle">{statusLabel}</div>
-      </div>
+    <div className={cx("flex items-center gap-2.5 px-3 py-2.5", divider && "hairline-b")}>
+      <span
+        className="h-2 w-2 shrink-0 rounded-full"
+        style={{ background: dot }}
+      />
+      <div className="min-w-0 flex-1 truncate text-body text-ink">{font.family}</div>
+      <span className="shrink-0 text-caption text-subtle">{fontStatusLabel(font)}</span>
 
       {font.status === "downloadable" &&
         (downloading ? (
           <button
             onClick={() => void useFonts.getState().cancelDownload()}
-            className="rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
+            className="shrink-0 rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
           >
             Cancel
           </button>
@@ -403,16 +583,16 @@ function FontRow({
           <button
             onClick={onDownload}
             aria-label={`Download ${font.family}`}
-            className="flex shrink-0 items-center gap-1 rounded-[6px] px-2 py-1 text-caption font-medium text-accent hover:bg-accent/10"
+            className="shrink-0 text-caption font-semibold text-accent hover:underline"
           >
-            <Download size={13} /> Download
+            Download
           </button>
         ))}
 
       {font.status === "missing" && (
         <button
           onClick={() => void useFonts.getState().addFonts()}
-          className="shrink-0 rounded-[6px] px-2 py-1 text-caption text-subtle hover:text-ink"
+          className="shrink-0 text-caption text-subtle hover:text-ink"
         >
           Add…
         </button>
@@ -422,7 +602,7 @@ function FontRow({
         <button
           onClick={onRemove}
           aria-label={`Remove ${font.family}`}
-          className="shrink-0 rounded-[6px] p-1 text-subtle hover:text-ink"
+          className="flex shrink-0 rounded-[5px] p-1 text-subtle hover:text-ink"
         >
           <Trash2 size={14} />
         </button>
@@ -431,8 +611,8 @@ function FontRow({
   );
 }
 
-/** AI: the semantic-search toggle, model download (with explicit consent — a
- *  ~490 MB one-time download), indexing progress, and model management. */
+/** Semantic search: the on-device toggle, model download (with explicit
+ *  consent — a ~490 MB one-time download), indexing progress, and management. */
 function SemanticSection() {
   const status = useSemantic((s) => s.status);
   const downloadProgress = useSemantic((s) => s.downloadProgress);
@@ -445,12 +625,12 @@ function SemanticSection() {
     useApp.getState().requestConfirm({
       title: "Download semantic search model?",
       message:
-        "Slideflow will download the multilingual-e5-small model (a one-time download of about 490 MB) from huggingface.co. After that, semantic search and indexing run entirely on this Mac — your slides never leave it.",
-      confirmLabel: "Download model",
+        "This downloads a ≈490 MB multilingual model (multilingual-e5-small) from Hugging Face, sha256-pinned. It runs entirely on your Mac — nothing is ever uploaded.",
+      confirmLabel: "Download",
+      cancelLabel: "Not now",
+      confirmIcon: <Download size={13} />,
+      icon: <Sparkles size={18} />,
       onConfirm: () => void useSemantic.getState().download(),
-      // Consent semantics: "no" means OFF. Declining (cancel/backdrop/Escape)
-      // reverts the just-flipped toggle instead of leaving the feature enabled
-      // but undownloaded.
       onCancel: () => void useSemantic.getState().setEnabled(false),
     });
 
@@ -461,9 +641,6 @@ function SemanticSection() {
       return;
     }
     await sem.setEnabled(true);
-    // Enabling without the model on disk → ask before pulling ~490 MB. The
-    // consent dialog's onCancel reverts the toggle, so a declined consent
-    // leaves the feature exactly as it was: off.
     if (useSemantic.getState().status?.state === "not_downloaded") {
       confirmDownload();
     }
@@ -473,107 +650,124 @@ function SemanticSection() {
     useApp.getState().requestConfirm({
       title: "Delete semantic search model?",
       message:
-        "This removes the downloaded model files (about 490 MB) from disk and turns semantic search off. Your slides and search index are unaffected.",
+        "The ≈490 MB model and all slide embeddings will be removed. Lexical search keeps working. You can re-download anytime.",
       confirmLabel: "Delete model",
       destructive: true,
       onConfirm: () => void useSemantic.getState().deleteModel(),
     });
 
   const pct = downloadProgress != null ? Math.round(downloadProgress * 100) : null;
+  const downloadingOrIndexing = state === "downloading" || indexing != null;
 
   return (
     <div>
-      <SectionLabel>AI</SectionLabel>
+      <SectionHeading
+        aside={
+          <>
+            <Sparkles size={13} /> On-device
+          </>
+        }
+      >
+        Semantic search
+      </SectionHeading>
 
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-body text-ink">Semantic search</div>
-          <p className="text-caption text-subtle">
-            Find slides by meaning, across languages. Runs fully on this Mac.
-          </p>
-        </div>
-        <Switch checked={enabled} onToggle={() => void onToggle()} />
-      </div>
+      <Row
+        title="Search by meaning"
+        subtitle="Finds slides across languages · nothing leaves your Mac"
+        divider={false}
+        control={<Switch checked={enabled} onToggle={() => void onToggle()} />}
+      />
 
-      {state === "downloading" && (
-        <div className="mt-3">
-          <div className="flex items-center justify-between text-caption text-subtle">
-            <span>Downloading model{pct != null ? ` — ${pct}%` : "…"}</span>
-            <button
-              onClick={() => void useSemantic.getState().cancelDownload()}
-              className="rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
-            >
-              Cancel
-            </button>
+      {state === "disabled" || state === "not_downloaded" ? (
+        <p className="mt-4 text-body leading-relaxed text-subtle">
+          Turn on to download a ≈490 MB multilingual model (multilingual-e5-small) from
+          Hugging Face, sha256-pinned. German queries find English slides and vice-versa.
+        </p>
+      ) : null}
+
+      {downloadingOrIndexing && (
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center gap-1.5 text-caption text-subtle">
+            <Loader2 size={12} className="animate-spin" />
+            {state === "downloading" ? (
+              <span>Downloading model{pct != null ? ` — ${pct}%` : "…"}</span>
+            ) : (
+              <span>
+                Indexing slides… <span className="tabnum">{indexing?.done}</span> of{" "}
+                <span className="tabnum">{indexing?.total}</span>
+              </span>
+            )}
+            {state === "downloading" && (
+              <button
+                onClick={() => void useSemantic.getState().cancelDownload()}
+                className="ml-auto rounded-[6px] px-1.5 py-0.5 text-caption text-subtle hover:bg-ink/8 hover:text-ink"
+              >
+                Cancel
+              </button>
+            )}
           </div>
-          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10">
+          <div className="h-1 overflow-hidden rounded-full bg-ink/10">
             <div
               className="h-full rounded-full bg-accent transition-[width] duration-300"
-              style={{ width: pct != null ? `${pct}%` : "35%" }}
+              style={{
+                width:
+                  state === "downloading"
+                    ? pct != null
+                      ? `${pct}%`
+                      : "35%"
+                    : indexing && indexing.total
+                      ? `${Math.min(100, (indexing.done / indexing.total) * 100)}%`
+                      : "35%",
+              }}
             />
           </div>
+          <p className="mt-2.5 text-caption text-subtle">
+            Model downloaded · embeddings run locally in the background.
+          </p>
         </div>
-      )}
-
-      {state === "not_downloaded" && (
-        <button
-          onClick={confirmDownload}
-          className="mt-3 w-full rounded-[8px] border border-hairline/15 px-4 py-2 text-body font-medium text-accent hover:bg-accent/10"
-        >
-          Download model (≈490 MB)…
-        </button>
       )}
 
       {state === "error" && status?.error && (
-        <div className="mt-3">
+        <div className="mt-4">
           <p className="text-caption text-red-500">{status.error}</p>
           <button
             onClick={() => void useSemantic.getState().download()}
-            className="mt-2 w-full rounded-[8px] border border-hairline/15 px-4 py-2 text-body font-medium text-accent hover:bg-accent/10"
+            className={cx(outlineBtn, "mt-2")}
           >
             Retry download
           </button>
         </div>
       )}
 
-      {state === "ready" && status && (
-        <div className="mt-3">
-          <p className="tabnum text-caption text-subtle">
-            Model: {status.model_id} · {status.embedded_slides} of {status.total_slides} slides
-            indexed
-          </p>
-          {indexing && (
-            <div className="mt-1.5">
-              <div className="tabnum text-caption text-subtle">
-                Indexing slides… {indexing.done} of {indexing.total}
-              </div>
-              <div className="mt-1 h-1 overflow-hidden rounded-full bg-ink/10">
-                <div
-                  className="h-full rounded-full bg-accent transition-[width] duration-300"
-                  style={{
-                    width: indexing.total
-                      ? `${Math.min(100, (indexing.done / indexing.total) * 100)}%`
-                      : "35%",
-                  }}
-                />
-              </div>
-            </div>
-          )}
-          <div className="mt-2 flex gap-2">
-            <button
-              onClick={() => void useSemantic.getState().reindex()}
-              disabled={indexing != null}
-              className="flex-1 rounded-[8px] border border-hairline/15 px-3 py-1.5 text-body text-ink hover:bg-ink/5 disabled:opacity-40"
-            >
-              Re-run indexing
-            </button>
-            <button
-              onClick={confirmDelete}
-              className="flex-1 rounded-[8px] border border-hairline/15 px-3 py-1.5 text-body text-red-500 hover:bg-red-500/10"
-            >
-              Delete model…
-            </button>
+      {state === "ready" && status && !indexing && (
+        <div className="mt-4 rounded-[8px] border border-hairline/10 px-4 py-3.5">
+          <div className="flex items-center gap-1.5 text-body font-semibold text-ink">
+            <span
+              className="h-2 w-2 rounded-full"
+              style={{ background: "var(--success)" }}
+            />
+            Ready
           </div>
+          <div className="tabnum mt-1 text-caption text-subtle">
+            {status.model_id} · {status.embedded_slides} of {status.total_slides} slides
+            indexed
+          </div>
+        </div>
+      )}
+
+      {state === "ready" && (
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={() => void useSemantic.getState().reindex()}
+            disabled={indexing != null}
+            className={cx(outlineBtn, "disabled:opacity-40")}
+          >
+            <RefreshCw size={13} /> Re-run indexing
+          </button>
+          <span className="flex-1" />
+          <button onClick={confirmDelete} className={dangerGhost}>
+            Delete model
+          </button>
         </div>
       )}
     </div>

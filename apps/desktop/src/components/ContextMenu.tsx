@@ -6,6 +6,10 @@ import { useDismiss } from "../lib/useDismiss";
 export interface MenuItem {
   label: string;
   onClick: () => void;
+  /** Optional leading glyph (lucide icon element). */
+  icon?: React.ReactNode;
+  /** Optional right-aligned keyboard hint (e.g. "return", "space"). */
+  hint?: string;
   danger?: boolean;
   separatorBefore?: boolean;
   disabled?: boolean;
@@ -54,7 +58,7 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
             role="menuitem"
             disabled={item.disabled}
             className={cx(
-              "flex w-full items-center rounded-[5px] px-2.5 py-1.5 text-left",
+              "group/mi flex w-full items-center gap-2.5 rounded-[5px] px-2.5 py-1.5 text-left",
               item.disabled
                 ? "cursor-default text-subtle/50"
                 : "hover:bg-accent hover:text-white",
@@ -66,7 +70,15 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
               onClose();
             }}
           >
-            {item.label}
+            {item.icon != null && (
+              <span className="flex shrink-0 items-center">{item.icon}</span>
+            )}
+            <span className="flex-1">{item.label}</span>
+            {item.hint && (
+              <span className="tabnum shrink-0 text-caption text-subtle/60 group-hover/mi:text-white/70">
+                {item.hint}
+              </span>
+            )}
           </button>
         </div>
       ))}

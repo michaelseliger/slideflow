@@ -2,6 +2,7 @@
 // panel layout, theme, and live scan progress. The composition tray lives in
 // its own store (`useTray`) since it has independent persistence + undo.
 
+import type { ReactNode } from "react";
 import { create } from "zustand";
 import * as api from "../lib/api";
 import type {
@@ -48,6 +49,11 @@ export interface ConfirmConfig {
   confirmLabel: string;
   cancelLabel?: string;
   destructive?: boolean;
+  /** Optional leading glyph shown in a tinted badge above the title (used by
+   *  consent-style dialogs, e.g. the semantic-search download prompt). */
+  icon?: ReactNode;
+  /** Optional leading glyph for the confirm button, before its label. */
+  confirmIcon?: ReactNode;
   onConfirm: () => void | Promise<void>;
   /** Invoked when the user DECLINES (cancel button, backdrop, or Escape) —
    *  for consent flows where "no" must actively revert state (e.g. turning the
@@ -59,6 +65,8 @@ const THEME_KEY = "slideflow.theme";
 const COLS_KEY = "slideflow.gridCols";
 const SORT_KEY = "slideflow.sort.v1";
 const SEARCH_MODE_KEY = "slideflow.searchMode.v1";
+const APPROX_BADGE_KEY = "slideflow.showApproxBadge.v1";
+const REDUCE_MOTION_KEY = "slideflow.reduceMotion.v1";
 
 function loadTheme(): ThemeMode {
   const v = localStorage.getItem(THEME_KEY);
@@ -168,6 +176,14 @@ interface AppState {
   theme: ThemeMode;
   dark: boolean;
 
+  // --- appearance prefs ---
+  /** Show the "Approximate" badge on previews that skipped constructs. */
+  showApproxBadge: boolean;
+  /** Force reduced motion regardless of the OS setting. */
+  reduceMotion: boolean;
+  setShowApproxBadge: (v: boolean) => void;
+  setReduceMotion: (v: boolean) => void;
+
   // --- scan ---
   scan: ScanState;
 
@@ -219,6 +235,7 @@ interface AppState {
   setSettingsOpen: (v: boolean) => void;
   incCols: () => void;
   decCols: () => void;
+  setGridCols: (v: number) => void;
 
   // theme
   setTheme: (t: ThemeMode) => void;
@@ -309,6 +326,9 @@ export const useApp = create<AppState>((set, get) => ({
 
   theme: loadTheme(),
   dark: applyTheme(loadTheme()),
+
+  showApproxBadge: localStorage.getItem(APPROX_BADGE_KEY) !== "0",
+  reduceMotion: localStorage.getItem(REDUCE_MOTION_KEY) === "1",
 
   scan: { running: false, done: 0, total: 0, indexed: 0, lastPath: null, skipped: [] },
 
@@ -638,6 +658,11 @@ export const useApp = create<AppState>((set, get) => ({
     localStorage.setItem(COLS_KEY, String(n));
     set({ gridCols: n });
   },
+  setGridCols: (v) => {
+    const n = Math.max(3, Math.min(10, Math.round(v)));
+    localStorage.setItem(COLS_KEY, String(n));
+    set({ gridCols: n });
+  },
 
   // --- theme -------------------------------------------------------------
 
@@ -649,6 +674,14 @@ export const useApp = create<AppState>((set, get) => ({
     const order: ThemeMode[] = ["system", "light", "dark"];
     const next = order[(order.indexOf(get().theme) + 1) % order.length];
     get().setTheme(next);
+  },
+  setShowApproxBadge: (v) => {
+    localStorage.setItem(APPROX_BADGE_KEY, v ? "1" : "0");
+    set({ showApproxBadge: v });
+  },
+  setReduceMotion: (v) => {
+    localStorage.setItem(REDUCE_MOTION_KEY, v ? "1" : "0");
+    set({ reduceMotion: v });
   },
 
   // --- favorites -----------------------------------------------------------

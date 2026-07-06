@@ -13,6 +13,7 @@ import {
   HelpCircle,
   Bookmark,
   Sparkles,
+  SunMoon,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useSemantic } from "../stores/useSemantic";
@@ -42,6 +43,12 @@ export default function Header() {
   const searchMode = useApp((s) => s.searchMode);
   const setSearchMode = useApp((s) => s.setSearchMode);
   const semanticReady = useSemantic((s) => s.status?.state === "ready");
+  const sidebarCollapsed = useApp((s) => s.sidebarCollapsed);
+  const inspectorVisible = useApp((s) => s.inspectorVisible);
+
+  // The density / grouping / sort cluster only applies to a browsable slide
+  // grid — hide it on the stats and duplicates surfaces, which own their layout.
+  const showGridControls = nav.type !== "stats" && nav.type !== "duplicates";
 
   return (
     <header className="material hairline-b relative z-30 shrink-0">
@@ -145,13 +152,21 @@ export default function Header() {
             <CommandIcon size={15} />
           </ToolbarBtn>
           <ToolbarBtn
+            title="Theme (system / light / dark)"
+            onClick={() => useApp.getState().cycleTheme()}
+          >
+            <SunMoon size={15} />
+          </ToolbarBtn>
+          <ToolbarBtn
             title="Toggle sidebar (⌘⌃S)"
+            active={!sidebarCollapsed}
             onClick={() => useApp.getState().toggleSidebar()}
           >
             <PanelLeft size={15} />
           </ToolbarBtn>
           <ToolbarBtn
             title="Toggle inspector (⌘I)"
+            active={inspectorVisible}
             onClick={() => useApp.getState().toggleInspector()}
           >
             <PanelRight size={15} />
@@ -209,42 +224,46 @@ export default function Header() {
           )}
         </div>
 
-        {/* Density */}
-        <div className="flex items-center overflow-hidden rounded-[6px] border border-hairline/10">
-          <StripBtn
-            title="Larger thumbnails (⌘+)"
-            onClick={() => useApp.getState().decCols()}
-          >
-            <Plus size={12} />
-          </StripBtn>
-          <StripBtn
-            title="Smaller thumbnails (⌘−)"
-            onClick={() => useApp.getState().incCols()}
-          >
-            <Minus size={12} />
-          </StripBtn>
-        </div>
+        {showGridControls && (
+          <div className="flex items-center gap-2">
+            {/* Density */}
+            <div className="flex items-center overflow-hidden rounded-[6px] border border-hairline/10">
+              <StripBtn
+                title="Larger thumbnails (⌘+)"
+                onClick={() => useApp.getState().decCols()}
+              >
+                <Plus size={12} />
+              </StripBtn>
+              <StripBtn
+                title="Smaller thumbnails (⌘−)"
+                onClick={() => useApp.getState().incCols()}
+              >
+                <Minus size={12} />
+              </StripBtn>
+            </div>
 
-        {/* Sort */}
-        <SortMenu />
+            {/* Grouping toggle (1 / 2) */}
+            <div className="flex items-center overflow-hidden rounded-[6px] border border-hairline/10">
+              <StripBtn
+                title="Flat (1)"
+                active={grouping === "flat"}
+                onClick={() => setGrouping("flat")}
+              >
+                <LayoutGrid size={12} />
+              </StripBtn>
+              <StripBtn
+                title="Group by deck (2)"
+                active={grouping === "deck"}
+                onClick={() => setGrouping("deck")}
+              >
+                <Rows3 size={12} />
+              </StripBtn>
+            </div>
 
-        {/* Grouping toggle (1 / 2) */}
-        <div className="flex items-center overflow-hidden rounded-[6px] border border-hairline/10">
-          <StripBtn
-            title="Flat (1)"
-            active={grouping === "flat"}
-            onClick={() => setGrouping("flat")}
-          >
-            <LayoutGrid size={12} />
-          </StripBtn>
-          <StripBtn
-            title="Group by deck (2)"
-            active={grouping === "deck"}
-            onClick={() => setGrouping("deck")}
-          >
-            <Rows3 size={12} />
-          </StripBtn>
-        </div>
+            {/* Sort */}
+            <SortMenu />
+          </div>
+        )}
       </div>
     </header>
   );

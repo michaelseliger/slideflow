@@ -13,8 +13,13 @@ import {
   Settings,
   Trash2,
   ArrowDownUp,
+  Plus,
+  Layers,
+  BarChart3,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
+import { useTray } from "../stores/useTray";
+import { toast } from "../stores/useToast";
 import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
 
 interface Action {
@@ -46,6 +51,36 @@ export default function CommandPalette() {
     const app = useApp.getState();
     const base: Action[] = [
       {
+        id: "add-selection",
+        label: "Add selection to tray",
+        hint: "return",
+        icon: <Plus size={15} />,
+        run: () => {
+          const s = useApp.getState();
+          const picks = s.results
+            .filter((r) => s.selectedIds.has(r.slide.id))
+            .map((r) => ({ slide: r.slide, deck: r.deck }));
+          if (picks.length === 0) return;
+          const added = useTray.getState().add(picks);
+          if (added > 0) {
+            toast.success(added === 1 ? "Added to the tray" : `Added ${added} slides`);
+            if (useTray.getState().collapsed) useTray.getState().setCollapsed(false);
+          }
+        },
+      },
+      {
+        id: "new-tray",
+        label: "New tray",
+        icon: <Layers size={15} />,
+        run: () => useTray.getState().createTray(),
+      },
+      {
+        id: "stats",
+        label: "Show statistics",
+        icon: <BarChart3 size={15} />,
+        run: () => void app.setNav({ type: "stats" }),
+      },
+      {
         id: "add-folder",
         label: "Add folder…",
         icon: <FolderPlus size={15} />,
@@ -73,7 +108,7 @@ export default function CommandPalette() {
       },
       {
         id: "theme",
-        label: "Toggle theme (System / Light / Dark)",
+        label: "Toggle theme",
         icon: <SunMoon size={15} />,
         run: () => app.cycleTheme(),
       },
@@ -124,7 +159,7 @@ export default function CommandPalette() {
       },
       {
         id: "settings",
-        label: "Settings…",
+        label: "Open settings…",
         hint: "⌘,",
         icon: <Settings size={15} />,
         run: () => app.setSettingsOpen(true),
@@ -139,7 +174,7 @@ export default function CommandPalette() {
     const deckActions: Action[] = decks.map((d) => ({
       id: `deck-${d.id}`,
       label: `Jump to: ${deckDisplayName(d)}`,
-      hint: `${d.slide_count} slides`,
+      hint: "deck",
       icon: <Presentation size={15} />,
       run: () => void app.setNav({ type: "deck", id: d.id }),
     }));
@@ -205,16 +240,19 @@ export default function CommandPalette() {
             transition={{ type: "spring", stiffness: 340, damping: 30 }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center gap-2 px-3 hairline-b">
-              <SearchIcon size={16} className="text-subtle" />
+            <div className="flex items-center gap-2.5 px-4 hairline-b">
+              <SearchIcon size={16} className="shrink-0 text-subtle" />
               <input
                 ref={inputRef}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 onKeyDown={onKeyDown}
-                placeholder="Type a command or deck…"
-                className="selectable h-11 w-full bg-transparent text-body text-ink outline-none placeholder:text-subtle/70"
+                placeholder="Type a command or search…"
+                className="selectable h-11 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-subtle/70"
               />
+              <span className="tabnum shrink-0 rounded-[4px] border border-hairline/15 px-1.5 py-px text-[11px] text-subtle">
+                esc
+              </span>
             </div>
             <div className="max-h-80 overflow-y-auto p-1.5">
               {filtered.length === 0 ? (

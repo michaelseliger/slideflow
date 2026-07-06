@@ -88,7 +88,10 @@ export default function TraySwitcher() {
           {list.map((t) => (
             <div
               key={t.id}
-              className="group/tray flex items-center gap-0.5 rounded-[6px] pr-1 hover:bg-ink/8"
+              className={cx(
+                "group/tray flex items-center gap-0.5 rounded-[6px] pr-1",
+                t.id === activeId ? "bg-accent/[0.14]" : "hover:bg-ink/8",
+              )}
             >
               {editingId === t.id ? (
                 <input
@@ -116,7 +119,10 @@ export default function TraySwitcher() {
                       setOpen(false);
                     }}
                     onDoubleClick={() => startRename(t.id, t.name)}
-                    className="flex flex-1 items-center gap-2 overflow-hidden rounded-[6px] px-2 py-1.5 text-left text-body text-ink"
+                    className={cx(
+                      "flex flex-1 items-center gap-2 overflow-hidden rounded-[6px] px-2 py-1.5 text-left text-body",
+                      t.id === activeId ? "text-accent" : "text-ink",
+                    )}
                   >
                     <Check
                       size={13}
@@ -126,7 +132,14 @@ export default function TraySwitcher() {
                       )}
                     />
                     <span className="flex-1 truncate">{t.name}</span>
-                    <span className="tabnum shrink-0 text-caption text-subtle">{t.count}</span>
+                    <span
+                      className={cx(
+                        "tabnum shrink-0 text-caption",
+                        t.id === activeId ? "text-accent/80" : "text-subtle",
+                      )}
+                    >
+                      {t.count}
+                    </span>
                   </button>
                   <button
                     onClick={() => startRename(t.id, t.name)}

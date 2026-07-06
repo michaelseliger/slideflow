@@ -6,9 +6,8 @@ import {
   FolderOpen,
   ExternalLink,
   Loader2,
-  CheckCircle2,
-  ShieldCheck,
-  Info,
+  Check,
+  Download,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
@@ -265,12 +264,20 @@ export default function ExportSheet() {
     })();
   }, [phase, reduce]);
 
-  const locationLabel = format === "png" ? "Choose folder…" : "Choose location…";
+  // Footer preview of what will be written: a filename for pptx/pdf, a file
+  // count for the PNG folder export.
+  const safeName = (title.trim() || "Slideflow Deck").replace(/[^\w.-]+/g, "-");
+  const previewFilename =
+    format === "png"
+      ? `${items.length} file${items.length === 1 ? "" : "s"} · ${pngWidth}px`
+      : `${safeName}.${format}`;
 
   return (
     <OverlaySheet open={open} onClose={close} cardClassName="max-w-md">
-      <div className="flex items-center justify-between px-5 py-3 hairline-b">
-              <h2 className="text-title font-semibold text-ink">Export deck</h2>
+      <div className="flex items-center justify-between px-5 py-4 hairline-b">
+              <h2 className="text-title font-semibold text-ink">
+                Export {items.length} slide{items.length === 1 ? "" : "s"}
+              </h2>
               {phase.step !== "working" && (
                 <button
                   onClick={close}
@@ -281,165 +288,138 @@ export default function ExportSheet() {
               )}
             </div>
 
-            <div className="p-5">
-              {phase.step === "form" && (
-                <>
-                  {/* Format picker */}
-                  <span className="mb-1 block text-caption font-medium text-subtle">
-                    Format
-                  </span>
-                  <div className="mb-3 flex gap-1 rounded-[8px] bg-ink/5 p-1">
-                    {(["pptx", "pdf", "png"] as ExportFormat[]).map((f) => (
-                      <button
-                        key={f}
-                        onClick={() => setFormat(f)}
-                        aria-pressed={format === f}
-                        className={`flex-1 rounded-[6px] px-2 py-1.5 text-caption font-medium transition-colors ${
-                          format === f
-                            ? "bg-surface text-ink shadow-sm"
-                            : "text-subtle hover:text-ink"
-                        }`}
-                      >
-                        {FORMAT_LABELS[f]}
-                      </button>
-                    ))}
-                  </div>
+            {phase.step === "form" && (
+              <>
+                {/* Format tabs (underline). */}
+                <div className="flex gap-5 px-5 hairline-b">
+                  {(["pptx", "pdf", "png"] as ExportFormat[]).map((f) => (
+                    <button
+                      key={f}
+                      onClick={() => setFormat(f)}
+                      aria-pressed={format === f}
+                      className={`py-3.5 text-body transition-colors ${
+                        format === f
+                          ? "font-semibold text-accent shadow-[inset_0_-2px_0_rgb(var(--accent-rgb))]"
+                          : "font-medium text-subtle hover:text-ink"
+                      }`}
+                    >
+                      {FORMAT_LABELS[f]}
+                    </button>
+                  ))}
+                </div>
 
-                  <label className="mb-3 block">
+                <div className="p-5">
+                  {/* Fidelity note — honest about what each format preserves. */}
+                  {format === "pptx" ? (
+                    <p className="text-body leading-relaxed text-subtle">
+                      Fidelity-preserving — each slide keeps its layout, master and
+                      theme. Shared parts are deduplicated automatically.
+                    </p>
+                  ) : format === "pdf" ? (
+                    <p className="text-body leading-relaxed text-subtle">
+                      One PDF, rendered by Slideflow&rsquo;s preview engine. Text stays
+                      selectable and searchable.
+                    </p>
+                  ) : (
+                    <p className="text-body leading-relaxed text-subtle">
+                      One PNG per slide, exported to a folder.
+                    </p>
+                  )}
+
+                  <label className="mt-4 block">
                     <span className="mb-1 block text-caption font-medium text-subtle">
                       Deck title
                     </span>
                     <input
-                      autoFocus
                       value={title}
                       onChange={(e) => setTitle(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && void runExport()}
-                      className="selectable w-full rounded-[6px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
+                      className="selectable w-full rounded-[7px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
                     />
                   </label>
-
-                  {presetApplied && (
-                    <p className="mb-3 -mt-1 text-caption text-subtle">
-                      Starting from your last export.
-                    </p>
-                  )}
-
-                  {/* Include notes — PowerPoint only (rendered exports have no
-                      notes surface). */}
-                  {format === "pptx" && (
-                    <label className="mb-4 flex items-center gap-2 text-body text-ink">
-                      <input
-                        type="checkbox"
-                        checked={includeNotes}
-                        onChange={(e) => setIncludeNotes(e.target.checked)}
-                        className="h-4 w-4 accent-[rgb(var(--accent-rgb))]"
-                      />
-                      Include speaker notes
-                    </label>
-                  )}
 
                   {/* Mixed-aspect fit choice — only affects PowerPoint composition
                       (PDF/PNG render each slide at its own size). */}
                   {format === "pptx" && hasAspectMismatch && (
-                    <fieldset className="mb-4">
-                      <legend className="mb-1.5 text-caption font-medium text-subtle">
-                        Mixed slide sizes
-                      </legend>
-                      <label className="mb-1.5 flex items-start gap-2 text-body text-ink">
-                        <input
-                          type="radio"
-                          name="fit-mode"
-                          checked={fitMode === "ensure_fit"}
-                          onChange={() => setFitMode("ensure_fit")}
-                          className="mt-1 h-3.5 w-3.5 accent-[rgb(var(--accent-rgb))]"
-                        />
-                        <span>
-                          Ensure fit
-                          <span className="text-subtle"> — scale to fit, letterbox</span>
-                        </span>
-                      </label>
-                      <label className="flex items-start gap-2 text-body text-ink">
-                        <input
-                          type="radio"
-                          name="fit-mode"
-                          checked={fitMode === "maximize"}
-                          onChange={() => setFitMode("maximize")}
-                          className="mt-1 h-3.5 w-3.5 accent-[rgb(var(--accent-rgb))]"
-                        />
-                        <span>
-                          Maximize
-                          <span className="text-subtle"> — fill the slide, may crop</span>
-                        </span>
-                      </label>
-                    </fieldset>
+                    <OptionRow
+                      title="Fit mode"
+                      sublabel="Your picks mix 4:3 and 16:9 slides"
+                    >
+                      <Segmented
+                        options={[
+                          { value: "ensure_fit", label: "Ensure fit" },
+                          { value: "maximize", label: "Maximize" },
+                        ]}
+                        value={fitMode}
+                        onChange={(v) => setFitMode(v as FitMode)}
+                      />
+                    </OptionRow>
                   )}
 
-                  {/* PNG width preset */}
+                  {/* PDF page size — informational (Slideflow fits each page to its
+                      slide; no reflow). */}
+                  {format === "pdf" && (
+                    <OptionRow title="Page size">
+                      <span className="text-body text-subtle">Fit to slide</span>
+                    </OptionRow>
+                  )}
+
+                  {/* PNG width preset. */}
                   {format === "png" && (
-                    <label className="mb-4 block">
-                      <span className="mb-1 block text-caption font-medium text-subtle">
-                        Image width
-                      </span>
-                      <select
-                        value={pngWidth}
-                        onChange={(e) => setPngWidth(Number(e.target.value))}
-                        className="w-full rounded-[6px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
-                      >
-                        {PNG_WIDTHS.map((w) => (
-                          <option key={w} value={w}>
-                            {w} px wide
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <OptionRow title="Width" sublabel="pixels · aspect preserved">
+                      <Segmented
+                        options={PNG_WIDTHS.map((w) => ({
+                          value: String(w),
+                          label: String(w),
+                        }))}
+                        value={String(pngWidth)}
+                        onChange={(v) => setPngWidth(Number(v))}
+                      />
+                    </OptionRow>
                   )}
 
-                  {/* Fidelity note — honest about what each format preserves. */}
-                  {format === "pptx" ? (
-                    <div className="mb-4 flex items-start gap-2 rounded-[6px] bg-accent/[0.08] p-2.5 text-caption text-subtle">
-                      <ShieldCheck size={15} className="mt-0.5 shrink-0 text-accent" />
-                      <span>
-                        Every slide keeps its <b className="text-ink">original theme,
-                        master, and formatting</b>. Slideflow never re-themes or
-                        reflows your slides on export.
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="mb-4 flex items-start gap-2 rounded-[6px] bg-ink/[0.04] p-2.5 text-caption text-subtle">
-                      <Info size={15} className="mt-0.5 shrink-0 text-subtle" />
-                      <span>
-                        {format === "pdf" ? "PDF" : "Image"} export is{" "}
-                        <b className="text-ink">rendered by Slideflow&rsquo;s preview
-                        engine</b> — great for sharing or printing. For fully
-                        editable slides with exact original formatting, choose
-                        PowerPoint.
-                      </span>
+                  {/* Include notes — PowerPoint only (rendered exports have no notes
+                      surface). */}
+                  {format === "pptx" && (
+                    <div className="mt-4 flex items-center hairline-t pt-3.5">
+                      <div className="flex-1 text-body font-medium text-ink">
+                        Include speaker notes
+                      </div>
+                      <Toggle on={includeNotes} onClick={() => setIncludeNotes((v) => !v)} />
                     </div>
                   )}
 
-                  <div className="flex items-center justify-between">
-                    <span className="tabnum text-caption text-subtle">
-                      {items.length} slide{items.length === 1 ? "" : "s"}
-                    </span>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={close}
-                        className="rounded-[6px] px-3 py-2 text-body text-subtle hover:bg-ink/5"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={() => void runExport()}
-                        disabled={items.length === 0}
-                        className="rounded-[6px] bg-accent px-4 py-2 text-body font-semibold text-white hover:opacity-90 disabled:opacity-40"
-                      >
-                        {locationLabel}
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
+                  {presetApplied && (
+                    <p className="mt-3 text-caption text-subtle">
+                      Starting from your last export.
+                    </p>
+                  )}
+                </div>
 
+                <div className="flex items-center gap-2.5 px-5 py-3.5 hairline-t">
+                  <span className="tabnum min-w-0 truncate text-caption text-subtle">
+                    {previewFilename}
+                  </span>
+                  <span className="flex-1" />
+                  <button
+                    onClick={close}
+                    className="rounded-[8px] px-3.5 py-1.5 text-body font-medium text-ink hover:bg-ink/5"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void runExport()}
+                    disabled={items.length === 0}
+                    className="flex items-center gap-1.5 rounded-[8px] bg-accent px-3.5 py-1.5 text-body font-semibold text-white hover:opacity-90 disabled:opacity-40"
+                  >
+                    <Download size={13} /> Export…
+                  </button>
+                </div>
+              </>
+            )}
+
+            {phase.step !== "form" && (
+              <div className="p-5">
               {phase.step === "working" && (
                 <div className="py-2">
                   <div className="flex items-center gap-2 text-body text-ink">
@@ -470,16 +450,17 @@ export default function ExportSheet() {
                     initial={reduce ? false : { scale: 0.5, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     transition={{ type: "spring", stiffness: 300, damping: 18 }}
-                    className="mx-auto mb-2 w-fit"
+                    className="mx-auto mb-4 flex h-[58px] w-[58px] items-center justify-center rounded-full"
+                    style={{ background: "rgb(34 197 94 / 0.14)", color: "var(--success)" }}
                   >
-                    <CheckCircle2 size={44} className="text-green-500" />
+                    <Check size={30} />
                   </motion.div>
-                  <div className="text-title font-semibold text-ink">
+                  <div className="text-heading font-semibold text-ink">
                     {phase.result.format === "png"
                       ? "Your images are ready"
                       : "Your deck is ready"}
                   </div>
-                  <div className="tabnum mt-1 text-caption text-subtle">
+                  <div className="tabnum mt-1.5 text-caption text-subtle">
                     {phase.result.summary}
                   </div>
                   {phase.result.warnings.length > 0 && (
@@ -496,21 +477,27 @@ export default function ExportSheet() {
                       ))}
                     </div>
                   )}
-                  <div className="mt-4 flex justify-center gap-2">
+                  <div className="mt-5 flex flex-wrap justify-center gap-2">
                     <button
                       onClick={() => void api.revealInFinder(phase.result.revealPath)}
-                      className="flex items-center gap-1.5 rounded-[6px] border border-hairline/10 px-3 py-2 text-body text-ink hover:bg-ink/5"
+                      className="flex items-center gap-1.5 rounded-[8px] border border-hairline/10 px-3.5 py-1.5 text-body text-ink hover:bg-ink/5"
                     >
-                      <FolderOpen size={15} /> Reveal in Finder
+                      <FolderOpen size={13} /> Reveal in Finder
                     </button>
                     {phase.result.openPath && (
                       <button
                         onClick={() => void api.openFile(phase.result.openPath!)}
-                        className="flex items-center gap-1.5 rounded-[6px] bg-accent px-3 py-2 text-body font-medium text-white hover:opacity-90"
+                        className="flex items-center gap-1.5 rounded-[8px] border border-hairline/10 px-3.5 py-1.5 text-body text-ink hover:bg-ink/5"
                       >
-                        <ExternalLink size={15} /> Open
+                        <ExternalLink size={13} /> Open
                       </button>
                     )}
+                    <button
+                      onClick={close}
+                      className="rounded-[8px] bg-accent px-3.5 py-1.5 text-body font-medium text-white hover:opacity-90"
+                    >
+                      Done
+                    </button>
                   </div>
                 </div>
               )}
@@ -539,7 +526,77 @@ export default function ExportSheet() {
                   </div>
                 </div>
               )}
-            </div>
+              </div>
+            )}
     </OverlaySheet>
+  );
+}
+
+/** A settings-style row: title + optional sublabel on the left, a control on the
+ *  right. Used for the export sheet's fit-mode / width / page-size options. */
+function OptionRow({
+  title,
+  sublabel,
+  children,
+}: {
+  title: string;
+  sublabel?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mt-4 flex items-start gap-3">
+      <div className="flex-1">
+        <div className="text-body font-medium text-ink">{title}</div>
+        {sublabel && <div className="mt-0.5 text-caption text-subtle">{sublabel}</div>}
+      </div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** A compact segmented control (bordered, accent-filled active segment). */
+function Segmented({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: string; label: string }[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-[6px] border border-hairline/[0.12]">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          onClick={() => onChange(o.value)}
+          className={`px-3 py-1.5 text-caption transition-colors ${
+            o.value === value
+              ? "bg-accent font-semibold text-white"
+              : "font-medium text-subtle hover:bg-ink/5"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** An iOS-style toggle switch. */
+function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      onClick={onClick}
+      className="relative inline-block h-[22px] w-[38px] shrink-0 rounded-full transition-colors"
+      style={{ background: on ? "rgb(var(--accent-rgb))" : "rgb(var(--ink-rgb) / 0.18)" }}
+    >
+      <span
+        className="absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow transition-[left]"
+        style={{ left: on ? 18 : 2 }}
+      />
+    </button>
   );
 }

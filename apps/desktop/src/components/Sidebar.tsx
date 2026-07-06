@@ -121,9 +121,37 @@ export default function Sidebar() {
           />
         ))}
 
+        {decks.length > 0 && (
+          <>
+            {!collapsed && <SectionLabel>Decks</SectionLabel>}
+            {decks.map((d) => (
+              <Row
+                key={d.id}
+                icon={
+                  d.favorite ? (
+                    <Star size={15} className="text-amber-400" />
+                  ) : (
+                    <Presentation size={15} />
+                  )
+                }
+                label={deckDisplayName(d)}
+                tooltip={d.path}
+                count={d.slide_count}
+                active={isActive("deck", d.id)}
+                collapsed={collapsed}
+                onClick={() => void setNav({ type: "deck", id: d.id })}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setDeckMenu({ x: e.clientX, y: e.clientY, deckId: d.id });
+                }}
+              />
+            ))}
+          </>
+        )}
+
         {savedSearches.length > 0 && (
           <>
-            {!collapsed && <SectionLabel>Saved Searches</SectionLabel>}
+            {!collapsed && <SectionLabel>Saved searches</SectionLabel>}
             {savedSearches.map((s) =>
               renaming && renaming.id === s.id && !collapsed ? (
                 <div key={s.id} className="mb-0.5 px-2 py-0.5">
@@ -162,34 +190,6 @@ export default function Sidebar() {
                 />
               ),
             )}
-          </>
-        )}
-
-        {decks.length > 0 && (
-          <>
-            {!collapsed && <SectionLabel>Decks</SectionLabel>}
-            {decks.map((d) => (
-              <Row
-                key={d.id}
-                icon={
-                  d.favorite ? (
-                    <Star size={15} className="fill-current text-amber-400" />
-                  ) : (
-                    <Presentation size={15} />
-                  )
-                }
-                label={deckDisplayName(d)}
-                tooltip={d.path}
-                count={d.slide_count}
-                active={isActive("deck", d.id)}
-                collapsed={collapsed}
-                onClick={() => void setNav({ type: "deck", id: d.id })}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setDeckMenu({ x: e.clientX, y: e.clientY, deckId: d.id });
-                }}
-              />
-            ))}
           </>
         )}
 
