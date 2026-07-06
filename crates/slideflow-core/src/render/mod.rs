@@ -60,7 +60,7 @@ mod text;
 
 use color::Theme;
 use fill::{bg_blip_embed, collect_background, Fill};
-use geometry::{parse_xfrm, Transform, Xfrm};
+use geometry::{parse_xfrm, rot_flip_transform, Transform, Xfrm};
 use placeholder::{collect_placeholders, match_placeholder, shape_placeholder, Placeholder};
 use style::LstStyle;
 
@@ -788,32 +788,7 @@ impl Ctx<'_> {
         let group_tf = if x.rot != 0 || x.flip_h || x.flip_v {
             let cx = (abs_off_x + abs_ext_cx / 2.0) / EMU_PER_PT;
             let cy = (abs_off_y + abs_ext_cy / 2.0) / EMU_PER_PT;
-            let mut t = String::new();
-            if x.rot != 0 {
-                t.push_str(&format!(
-                    "rotate({} {} {})",
-                    fnum(x.rot as f64 / 60000.0),
-                    fnum(cx),
-                    fnum(cy)
-                ));
-            }
-            if x.flip_h || x.flip_v {
-                let sx = if x.flip_h { -1.0 } else { 1.0 };
-                let sy = if x.flip_v { -1.0 } else { 1.0 };
-                if !t.is_empty() {
-                    t.push(' ');
-                }
-                t.push_str(&format!(
-                    "translate({} {}) scale({} {}) translate({} {})",
-                    fnum(cx),
-                    fnum(cy),
-                    fnum(sx),
-                    fnum(sy),
-                    fnum(-cx),
-                    fnum(-cy)
-                ));
-            }
-            Some(t)
+            Some(rot_flip_transform(x.rot, x.flip_h, x.flip_v, cx, cy))
         } else {
             None
         };
@@ -991,6 +966,13 @@ fn a<'a>(n: Node<'a, '_>, name: &str) -> Option<&'a str> {
     n.attributes().find(|at| at.name() == name).map(|at| at.value())
 }
 
+/// Whether an OOXML `xsd:boolean` attribute is truthy. Producers spell it both
+/// `"1"` and `"true"` (and `"0"`/`"false"` for falsy); an absent attribute is
+/// false. Mirrors [`is_hidden`]'s acceptance of both spellings.
+fn truthy(n: Node, name: &str) -> bool {
+    matches!(a(n, name), Some("1") | Some("true"))
+}
+
 /// Numeric attribute (defaults to 0.0).
 fn f_attr(n: Option<Node>, name: &str) -> f64 {
     n.and_then(|n| a(n, name))
@@ -1060,6 +1042,76 @@ mod tests {
         img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    /// Opaque JPEG bytes at `w`×`h` (no alpha), for the mislabeled-part test.
+    fn jpeg_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([12, 140, 60]));
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+            .encode_image(&image::DynamicImage::ImageRgb8(img))
+            .unwrap();
+        out
+    }
+
+    /// Regression: a media part whose bytes are JPEG but whose deck declares it
+    /// `image/png` (a real, common mislabel — e.g. dotSource slide 26's photo
+    /// background) must be embedded with the MIME its bytes actually are. The
+    /// `<img>` preview survives because browsers sniff, but usvg — the PNG/PDF
+    /// export rasterizer — trusts the data-URI MIME verbatim and feeds JPEG
+    /// bytes to the PNG decoder, silently dropping the image from every export.
+    /// Under `max_image_px = None` (the preview/full-res path, where the
+    /// downscaler doesn't re-encode and mask the bug) the emitted URI must be
+    /// `data:image/jpeg`, and usvg must decode it as JPEG rather than PNG.
+    #[test]
+    fn mislabeled_jpeg_part_embeds_with_real_mime() {
+        // `.image()` ships `ppt/media/image1.png` (content-type image/png,
+        // referenced by the slide's <p:pic> via rId2). Swap its bytes for JPEG,
+        // keeping the .png part name / content-type — exactly the mislabel.
+        let deck = DeckSpec::new("Deck").slide(SlideSpec::new("Pic").image());
+        let mut pkg = Package::from_bytes(&deck.build()).unwrap();
+        pkg.insert_part("ppt/media/image1.png", jpeg_bytes(64, 48));
+        let pf = PresentationFile::from_package(pkg).unwrap();
+
+        // Preview/full-res path: no downscale, so the pass-through emit runs.
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains("data:image/jpeg;base64,"),
+            "mislabeled JPEG must be emitted as image/jpeg, not the declared image/png"
+        );
+        assert!(!svg.contains("data:image/png;base64,"), "no PNG-mislabeled URI should remain");
+
+        // The real breakage was downstream in usvg: with `data:image/png` it
+        // wraps the bytes as ImageKind::PNG and the JPEG never decodes. After
+        // the fix usvg sees the corrected MIME and holds a JPEG image.
+        let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+        fn find_image_kind(group: &usvg::Group) -> Option<&'static str> {
+            for node in group.children() {
+                match node {
+                    usvg::Node::Image(img) => {
+                        return Some(match img.kind() {
+                            usvg::ImageKind::JPEG(_) => "jpeg",
+                            usvg::ImageKind::PNG(_) => "png",
+                            usvg::ImageKind::GIF(_) => "gif",
+                            usvg::ImageKind::WEBP(_) => "webp",
+                            usvg::ImageKind::SVG(_) => "svg",
+                        });
+                    }
+                    usvg::Node::Group(g) => {
+                        if let Some(k) = find_image_kind(g) {
+                            return Some(k);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_image_kind(tree.root()),
+            Some("jpeg"),
+            "usvg must decode the embedded raster as JPEG (the bug: it saw PNG and dropped it)"
+        );
     }
 
     #[test]
@@ -1258,6 +1310,19 @@ mod tests {
         let pf = PresentationFile::from_package(pkg).unwrap();
         let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
         assert!(svg.contains("scale(-1 1)"), "expected flip scale: {svg}");
+    }
+
+    #[test]
+    fn flip_accepts_xsd_boolean_true_spelling() {
+        // Producers (Apache POI, several converters) emit flipH="true", the other
+        // valid xsd:boolean spelling — it must mirror just like flipH="1".
+        let shapes = r#"<p:pic><p:nvPicPr><p:cNvPr id="4" name="P"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm flipH="true"><a:off x="0" y="0"/><a:ext cx="1828800" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+        let bytes = DeckSpec::new("Deck").slide(SlideSpec::new("x").image()).build();
+        let mut pkg = Package::from_bytes(&bytes).unwrap();
+        pkg.insert_part("ppt/slides/slide1.xml", wrap_slide(shapes).into_bytes());
+        let pf = PresentationFile::from_package(pkg).unwrap();
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("scale(-1 1)"), "flipH=\"true\" must mirror: {svg}");
     }
 
     #[test]
@@ -1626,6 +1691,40 @@ mod tests {
         assert!(svg.contains("<linearGradient"), "bgRef gradient template emitted: {svg}");
         assert!(svg.contains(r##"stop-color="#123456""##), "phClr substituted into stops: {svg}");
         assert!(svg.contains(r#"fill="url(#grad0)""#), "bg rect uses the gradient: {svg}");
+    }
+
+    #[test]
+    fn style_fillref_bg_index_matches_style_matrix() {
+        // Custom theme: bgFillStyleLst[0] is a gradient, [1..] are solids;
+        // fillStyleLst is all solids. Per ECMA-376 ST_StyleMatrixColumnIndex a
+        // shape fillRef idx=1001 → bgFillStyleLst[0] (the gradient), and idx=1000
+        // → no fill (NOT bgFillStyleLst[0]).
+        let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"><a:themeElements><a:clrScheme name="c"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme><a:fmtScheme name="s"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:alpha val="0"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="2700000"/></a:gradFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+        let shape = |idx: &str| {
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:fillRef idx="{idx}"><a:srgbClr val="123456"/></a:fillRef></p:style></p:sp>"#
+            )
+        };
+
+        // idx=1001 → bgFillStyleLst[0] (the gradient), phClr = #123456.
+        let pf = pf_with_slide_and_theme(
+            DeckSpec::new("Deck").slide(SlideSpec::new("x")),
+            &wrap_slide(&shape("1001")),
+            Some(theme),
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("<linearGradient"), "idx=1001 → bgFillStyleLst[0] gradient: {svg}");
+        assert!(svg.contains(r##"stop-color="#123456""##), "phClr substituted into gradient: {svg}");
+
+        // idx=1000 is the style-matrix 'no fill' sentinel, not bgFillStyleLst[0].
+        let pf = pf_with_slide_and_theme(
+            DeckSpec::new("Deck").slide(SlideSpec::new("x")),
+            &wrap_slide(&shape("1000")),
+            Some(theme),
+        );
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert!(!svg.contains("<linearGradient"), "idx=1000 must not resolve to a bg template: {svg}");
+        assert!(svg.contains(r#"fill="none""#), "idx=1000 → no fill: {svg}");
     }
 
     // --- Feature R2: layout/master static shapes ---------------------------
@@ -2285,6 +2384,17 @@ mod tests {
         assert_eq!(svg.matches(r##"fill="#BB0001""##).count(), 1, "one spanning fill: {svg}");
         assert!(svg.contains(r##"<rect x="0" y="0" width="200" height="50" fill="#BB0001""##), "spans both columns: {svg}");
         assert!(svg.contains("Wide"), "cell text: {svg}");
+    }
+
+    #[test]
+    fn table_hmerge_accepts_xsd_boolean_true_spelling() {
+        // hMerge="true" is as valid as hMerge="1"; the continuation cell must be
+        // skipped (no duplicate fill drawn over the merged master cell).
+        let tbl = r#"<a:tbl><a:tblGrid><a:gridCol w="1270000"/><a:gridCol w="1270000"/></a:tblGrid><a:tr h="635000"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Wide</a:t></a:r></a:p></a:txBody><a:tcPr><a:solidFill><a:srgbClr val="BB0001"/></a:solidFill></a:tcPr></a:tc><a:tc hMerge="true"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl>"#;
+        let shapes = table_frame(r#"<a:ext cx="2540000" cy="635000"/>"#, tbl);
+        let pf = deck_with_slide1(DeckSpec::new("Deck").slide(SlideSpec::new("x")), &shapes);
+        let svg = render_slide_svg(&pf, 1, &RenderOptions::default()).unwrap();
+        assert_eq!(svg.matches(r##"fill="#BB0001""##).count(), 1, "continuation cell skipped: {svg}");
     }
 
     #[test]

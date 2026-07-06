@@ -13,7 +13,7 @@
 //!   for a slide ([`slide_embed_text`]). Embeddings are keyed by it, so identical
 //!   text across decks embeds once and survives the delete+reinsert of a rescan.
 //!
-//! The `"sfch1:"` version prefix on the content hash lets the canonicalization
+//! The `"sfch2:"` version prefix on the content hash lets the canonicalization
 //! evolve later without a schema change (a new prefix restales every stored hash).
 
 use std::collections::BTreeSet;
@@ -28,7 +28,7 @@ use crate::opc::{local_name, rel_type, resolve_target, Package, Relationship};
 
 /// Canonicalization version prefix. Bump to force every content hash to restale
 /// when the canonicalization rules below change.
-const CONTENT_HASH_VERSION: &[u8] = b"sfch1:";
+const CONTENT_HASH_VERSION: &[u8] = b"sfch2:";
 
 /// Lowercase hex sha256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -82,10 +82,12 @@ pub fn slide_embed_text(title: Option<&str>, body: &str, notes: Option<&str>) ->
     }
 }
 
-/// Content hash of a slide part: `sha256("sfch1:" + canonical_xml + media_digest)`.
+/// Content hash of a slide part: `sha256("sfch2:" + canonical_xml + media_digest)`.
 ///
 /// `canonical_xml` is the slide part re-serialized through quick-xml events, with:
-/// - every `r:id`/`r:embed`/`r:link` attribute rewritten — dropped for layout
+/// - every relationship-namespace (`r:`-prefixed) attribute rewritten — this
+///   covers `r:id`/`r:embed`/`r:link` on media/OLE/chart refs and
+///   `r:dm`/`r:lo`/`r:qs`/`r:cs` on SmartArt `<dgm:relIds>` — dropped for layout
 ///   refs (relationship ids are package-arbitrary), replaced by the sha256 of the
 ///   referenced part's bytes for internal media/OLE/chart targets, and replaced
 ///   by the target URI for external targets;
@@ -202,7 +204,12 @@ fn rewrite_element(
             .map_err(|_| Error::InvalidPackage(format!("non-utf8 attribute name in {slide_part}")))?;
         let value = attr.unescape_value().map_err(|e| Error::xml(slide_part, e))?;
 
-        if matches!(key, b"r:id" | b"r:embed" | b"r:link") {
+        // Every attribute in the relationships namespace (prefix `r:`) is an
+        // ST_RelationshipId: r:id/r:embed/r:link on media/OLE/chart refs *and*
+        // r:dm/r:lo/r:qs/r:cs on SmartArt `<dgm:relIds>`. Route them all through
+        // classify_rel so diagram/OLE targets are both rid-normalized and folded
+        // into the media digest.
+        if key.starts_with(b"r:") {
             match classify_rel(&value, rels, pkg, slide_part) {
                 RelToken::Drop => continue,
                 RelToken::Token(token, media) => {
@@ -305,6 +312,101 @@ mod tests {
         let ha = slide_content_hash(&a, "ppt/slides/slide1.xml").unwrap();
         let hb = slide_content_hash(&b, "ppt/slides/slide1.xml").unwrap();
         assert_eq!(ha, hb, "rId renumbering + media rename must not change the hash");
+    }
+
+    /// A SmartArt diagram relationship (`r:dm`/`r:lo`/`r:qs`/`r:cs` on
+    /// `<dgm:relIds>`). rel_type is never SLIDE_LAYOUT and the target is a real
+    /// part, so classify_rel folds its bytes into the media digest.
+    fn diagram_rel(id: &str, target: &str) -> Relationship {
+        Relationship {
+            id: id.into(),
+            rel_type:
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData"
+                    .into(),
+            target: target.into(),
+            external: false,
+        }
+    }
+
+    #[test]
+    fn smartart_stable_across_rid_renumbering() {
+        // Deck A: SmartArt refs rId4/5/6/7 → four diagram parts.
+        let a = pkg_with_slide(
+            r#"<p:sld xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:graphicFrame><a:graphic><a:graphicData><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId4" r:lo="rId5" r:qs="rId6" r:cs="rId7"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            &[
+                layout_rel("rId1"),
+                diagram_rel("rId4", "../diagrams/data1.xml"),
+                diagram_rel("rId5", "../diagrams/layout1.xml"),
+                diagram_rel("rId6", "../diagrams/quickStyle1.xml"),
+                diagram_rel("rId7", "../diagrams/colors1.xml"),
+            ],
+            &[
+                ("ppt/diagrams/data1.xml", b"DATA"),
+                ("ppt/diagrams/layout1.xml", b"LAYOUT"),
+                ("ppt/diagrams/quickStyle1.xml", b"QSTYLE"),
+                ("ppt/diagrams/colors1.xml", b"COLORS"),
+            ],
+        );
+        // Deck B: SAME authored SmartArt, but renumbered ids + renamed parts.
+        let b = pkg_with_slide(
+            r#"<p:sld xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:graphicFrame><a:graphic><a:graphicData><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId14" r:lo="rId15" r:qs="rId16" r:cs="rId17"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            &[
+                layout_rel("rId9"),
+                diagram_rel("rId14", "../diagrams/data9.xml"),
+                diagram_rel("rId15", "../diagrams/layout9.xml"),
+                diagram_rel("rId16", "../diagrams/quickStyle9.xml"),
+                diagram_rel("rId17", "../diagrams/colors9.xml"),
+            ],
+            &[
+                ("ppt/diagrams/data9.xml", b"DATA"),
+                ("ppt/diagrams/layout9.xml", b"LAYOUT"),
+                ("ppt/diagrams/quickStyle9.xml", b"QSTYLE"),
+                ("ppt/diagrams/colors9.xml", b"COLORS"),
+            ],
+        );
+        assert_eq!(
+            slide_content_hash(&a, "ppt/slides/slide1.xml").unwrap(),
+            slide_content_hash(&b, "ppt/slides/slide1.xml").unwrap(),
+            "SmartArt rId renumbering + diagram-part rename must not change the hash"
+        );
+    }
+
+    #[test]
+    fn smartart_changes_when_diagram_bytes_change() {
+        // Identical slide XML and identical rIds, but the diagram *data* differs;
+        // the two slides must not collapse into one exact-duplicate cluster.
+        let slide = r#"<p:sld xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId4" r:lo="rId5" r:qs="rId6" r:cs="rId7"/></p:sld>"#;
+        let rels = &[
+            diagram_rel("rId4", "../diagrams/data1.xml"),
+            diagram_rel("rId5", "../diagrams/layout1.xml"),
+            diagram_rel("rId6", "../diagrams/quickStyle1.xml"),
+            diagram_rel("rId7", "../diagrams/colors1.xml"),
+        ];
+        let a = pkg_with_slide(
+            slide,
+            rels,
+            &[
+                ("ppt/diagrams/data1.xml", b"AAAA"),
+                ("ppt/diagrams/layout1.xml", b"LAYOUT"),
+                ("ppt/diagrams/quickStyle1.xml", b"QSTYLE"),
+                ("ppt/diagrams/colors1.xml", b"COLORS"),
+            ],
+        );
+        let b = pkg_with_slide(
+            slide,
+            rels,
+            &[
+                ("ppt/diagrams/data1.xml", b"BBBB"),
+                ("ppt/diagrams/layout1.xml", b"LAYOUT"),
+                ("ppt/diagrams/quickStyle1.xml", b"QSTYLE"),
+                ("ppt/diagrams/colors1.xml", b"COLORS"),
+            ],
+        );
+        assert_ne!(
+            slide_content_hash(&a, "ppt/slides/slide1.xml").unwrap(),
+            slide_content_hash(&b, "ppt/slides/slide1.xml").unwrap(),
+            "different SmartArt diagram bytes must change the hash"
+        );
     }
 
     #[test]

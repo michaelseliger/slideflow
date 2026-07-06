@@ -63,8 +63,25 @@ export interface PersistedModel {
   collapsed: boolean;
 }
 
-export function uidFor(slide: Pick<SlideRecord, "deck_id" | "slide_index">): string {
-  return `${slide.deck_id}:${slide.slide_index}`;
+/** A tray item's durable identity: the source deck's path plus the slide index.
+ *  Keyed on `path` (never the SQLite rowid, which is recycled across reindexes)
+ *  so tray membership survives Clear & Rebuild / root removal — mirroring the
+ *  repo-wide "favorites are keyed by path" convention. */
+export function uidFor(
+  deck: Pick<DeckRecord, "path">,
+  slide: Pick<SlideRecord, "slide_index">,
+): string {
+  return `${deck.path}:${slide.slide_index}`;
+}
+
+/** Recompute every item's uid from its durable `deck.path`, so trays persisted
+ *  before the path-based uid change (uids were `${deck_id}:${slide_index}`)
+ *  keep working for dedupe/reconcile after load. Malformed items are dropped. */
+function reuidItems(items: unknown): TrayItem[] {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((it): it is TrayItem => !!it && !!it.deck && !!it.slide)
+    .map((it) => ({ ...it, uid: uidFor(it.deck, it.slide) }));
 }
 
 function newTray(id: string, name: string, items: TrayItem[] = []): Tray {
@@ -122,7 +139,7 @@ function fromPersisted(p: PersistedModel): TrayModel | null {
   const trays: Record<string, Tray> = {};
   for (const t of p.trays) {
     if (!t || typeof t.id !== "string") continue;
-    trays[t.id] = newTray(t.id, t.name || "Tray", Array.isArray(t.items) ? t.items : []);
+    trays[t.id] = newTray(t.id, t.name || "Tray", reuidItems(t.items));
   }
   const order = p.order.filter((id) => trays[id]);
   // Defensively include any trays missing from `order`.
@@ -161,7 +178,7 @@ export function migrate(
   const v1Items = parseV1(v1Raw);
   const id = freshId();
   const model = emptyModel(id);
-  model.trays[id] = newTray(id, "Tray 1", v1Items);
+  model.trays[id] = newTray(id, "Tray 1", reuidItems(v1Items));
   return model;
 }
 
@@ -254,7 +271,11 @@ export function reconcile(
   model: TrayModel,
   decks: Pick<DeckRecord, "id" | "path">[],
 ): TrayModel {
-  const byId = new Set(decks.map((d) => d.id));
+  // Presence is judged by the durable identity (path) only — never the SQLite
+  // rowid, which is recycled after DELETE (Clear & Rebuild / root removal), so a
+  // stale item's `deck.id` can collide with an unrelated freshly-indexed deck
+  // and wrongly mask the "moved" flag. This mirrors the repo-wide "favorites are
+  // keyed by path" convention.
   const byPath = new Set(decks.map((d) => d.path));
   let changed = false;
   const trays: Record<string, Tray> = { ...model.trays };
@@ -263,7 +284,7 @@ export function reconcile(
     if (!t) continue;
     let trayChanged = false;
     const items = t.items.map((it) => {
-      const present = byId.has(it.deck.id) || byPath.has(it.deck.path);
+      const present = byPath.has(it.deck.path);
       const moved = !present;
       if (moved !== !!it.moved) {
         trayChanged = true;

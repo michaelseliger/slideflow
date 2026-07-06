@@ -242,7 +242,8 @@ export default function Sidebar() {
           <div className="flex items-center gap-1.5 text-caption text-subtle">
             <Loader2 size={12} className="animate-spin" />
             <span className="truncate">
-              Indexing… <span className="tabnum">{scan.indexed}</span> slides
+              Scanning… <span className="tabnum">{scan.done}</span> of{" "}
+              <span className="tabnum">{scan.total}</span> files
             </span>
           </div>
           <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10">
@@ -406,7 +407,10 @@ export default function Sidebar() {
           items={
             [
               {
-                label: "Re-index this folder",
+                // The backend scan (start_scan) has no per-root scope, so this
+                // re-indexes every folder. Label it honestly rather than
+                // promise scoped behavior the engine can't deliver.
+                label: "Re-index all folders",
                 onClick: () => void useApp.getState().startScan(),
               },
               {

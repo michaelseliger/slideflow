@@ -21,7 +21,7 @@
 //! emits `fonts:changed` so the UI re-renders.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -562,6 +562,16 @@ pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<AddFon
         }
         match std::fs::read(&src) {
             Ok(bytes) if is_sfnt(&bytes) => {
+                // Parse BEFORE writing: the sfnt magic check above is only 4 bytes,
+                // so a truncated/corrupt face can pass it yet fail fontdb parsing.
+                // Installing such a file would count it as added and wipe the
+                // preview cache, but scan_dir skips it (face_identity == None), so
+                // it never enters the installed map — an orphan the Settings panel
+                // never lists and remove_app_font can never delete. Reject it here.
+                let Some((fam, _, _)) = face_identity(&bytes) else {
+                    errors.push(format!("{p}: not a parseable font"));
+                    continue;
+                };
                 let name = src
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -571,9 +581,7 @@ pub async fn add_user_fonts(app: AppHandle, paths: Vec<String>) -> Result<AddFon
                     errors.push(format!("{p}: {e}"));
                 } else {
                     added += 1;
-                    if let Some((fam, _, _)) = face_identity(&bytes) {
-                        added_families.push(fam);
-                    }
+                    added_families.push(fam);
                 }
             }
             Ok(_) => errors.push(format!("{p}: not a valid TrueType/OpenType font")),
@@ -818,7 +826,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.seek(SeekFrom::Start(0))?;
+        // Flush to stable storage BEFORE the rename so a crash can't leave the
+        // renamed destination as an empty/truncated file under a valid .ttf name
+        // (which the next scan_dir would silently reject, dropping the face). The
+        // previous seek(Start(0)) here flushed nothing.
+        f.sync_all()?;
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -975,4 +987,45 @@ pub fn invalidate_and_notify(app: &AppHandle) {
     let _ = std::fs::remove_dir_all(&state.dragout_dir);
     let _ = std::fs::create_dir_all(&state.dragout_dir);
     let _ = app.emit("fonts:changed", ());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{face_identity, is_sfnt, write_atomic};
+
+    /// A unique scratch path under the OS temp dir (no tempfile dep in this crate).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!("slideflow-fonts-test-{pid}-{tag}-{n}"))
+    }
+
+    #[test]
+    fn write_atomic_persists_bytes_and_leaves_no_part() {
+        // Guards the seek→sync_all fix: the durable write must still land the exact
+        // bytes at the destination and clean up its temp sibling.
+        let dest = scratch("atomic").with_extension("ttf");
+        let part = dest.with_extension("part");
+        let payload = b"\x00\x01\x00\x00 not a real font but exact bytes";
+        write_atomic(&dest, payload).expect("atomic write");
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!part.exists(), "temp .part must not survive a successful write");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn sfnt_magic_but_unparseable_is_rejected_by_face_identity() {
+        // The exact class add_user_fonts now rejects BEFORE writing: a file that
+        // passes the 4-byte sfnt magic check but that fontdb cannot parse. If this
+        // ever returned Some, an unparseable orphan could be installed again.
+        let mut bytes = vec![0x00, 0x01, 0x00, 0x00];
+        bytes.extend_from_slice(b"truncated garbage, no valid tables");
+        assert!(is_sfnt(&bytes), "precondition: passes the sfnt magic gate");
+        assert!(
+            face_identity(&bytes).is_none(),
+            "unparseable font must yield None so add_user_fonts rejects it"
+        );
+    }
 }

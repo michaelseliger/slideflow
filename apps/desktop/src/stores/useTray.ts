@@ -79,7 +79,7 @@ interface TrayState {
   reconcile: (decks: DeckRecord[]) => void;
 
   picks: () => SlidePick[];
-  has: (slide: SlideRecord) => boolean;
+  has: (deck: DeckRecord, slide: SlideRecord) => boolean;
 
   // --- multiple named trays ------------------------------------------------
   /** Create a new (auto-named unless `name` given) tray and switch to it.
@@ -129,7 +129,7 @@ export const useTray = create<TrayState>((set, get) => {
       const existing = new Set(cur.map((i) => i.uid));
       const fresh: TrayItem[] = [];
       for (const { slide, deck } of entries) {
-        const uid = uidFor(slide);
+        const uid = uidFor(deck, slide);
         if (existing.has(uid)) continue;
         existing.add(uid);
         fresh.push({ uid, slide, deck });
@@ -148,15 +148,23 @@ export const useTray = create<TrayState>((set, get) => {
 
     remove: (uid) => {
       const model = modelOf();
+      // Pin the tray the removal happened on so the toast's Undo restores THIS
+      // slide even if the user has since switched trays (undo history is
+      // per-tray; get().undo() would pop whatever tray is active at click time).
+      const trayId = model.activeId;
       const cur = tm.activeItems(model);
       const removed = cur.find((i) => i.uid === uid);
       const next = cur.filter((i) => i.uid !== uid);
       if (next.length === cur.length) return;
-      applyModel(tm.commitItems(model, model.activeId, next));
+      applyModel(tm.commitItems(model, trayId, next));
       if (removed) {
         toast.info("Removed from tray", {
           label: "Undo",
-          run: () => get().undo(),
+          run: () => {
+            const m = modelOf();
+            const undone = tm.undo(m, trayId);
+            if (undone !== m) applyModel(undone);
+          },
         });
       }
     },
@@ -202,8 +210,8 @@ export const useTray = create<TrayState>((set, get) => {
 
     picks: () => tm.picksOf(get().items),
 
-    has: (slide) => {
-      const uid = uidFor(slide);
+    has: (deck, slide) => {
+      const uid = uidFor(deck, slide);
       return get().items.some((i) => i.uid === uid);
     },
 

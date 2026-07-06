@@ -40,7 +40,6 @@ use std::path::Path;
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::fixtures::xml_escape;
@@ -215,7 +214,12 @@ impl Composer {
             master_order: Vec::new(),
             notes_masters: Vec::new(),
             slides_out: Vec::new(),
-            next_big_id: 2_147_483_648,
+            // Layout ids are finalized before master ids, so the first id issued
+            // is a sldLayoutId — whose ECMA-376 minimum (2147483649) is one
+            // higher than sldMasterId's (2147483648). Start at the layout minimum
+            // so both are satisfied and the module contract (>= 2147483649 for
+            // fresh layout ids) holds.
+            next_big_id: 2_147_483_649,
             warnings: Vec::new(),
             notes: Vec::new(),
             notes_dropped_warned: false,
@@ -393,15 +397,27 @@ impl Composer {
         Ok(extra)
     }
 
-    /// Copy a part under a fixed output name, following its relationships like
-    /// [`Composer::copy_generic`] does.
-    fn copy_fixed_name(&mut self, deck: usize, orig: &str, out_name: &str) -> Result<()> {
-        let bytes = self
-            .part_bytes(deck, orig)
-            .ok_or_else(|| Error::MissingPart(orig.to_string()))?;
-        let rels = self.deck_rels(deck, orig)?;
+    /// The plain relationship-copy skeleton: clone external rels verbatim,
+    /// resolve internal ones, warn+skip missing targets, recursively copy the
+    /// rest via [`Composer::copy_target`], and rewrite each into an output
+    /// relationship rooted at `out_name`.
+    ///
+    /// This is the shared body for copiers with **no** per-rel-type special case
+    /// (`copy_fixed_name`, `copy_generic`, `copy_notes_master`). The copiers that
+    /// *do* special-case a rel type mid-loop (slide, layout, master, notes-slide)
+    /// open-code their own loop, because their divergences — pruning layouts
+    /// before resolution, routing rels into `self.masters` instead of the output
+    /// package, slide-jump/back-reference handling, `mo.layouts` bookkeeping —
+    /// don't fold cleanly into one callback.
+    fn copy_plain_rels(
+        &mut self,
+        deck: usize,
+        orig: &str,
+        out_name: &str,
+        rels: &[Relationship],
+    ) -> Result<Vec<Relationship>> {
         let mut new_rels = Vec::new();
-        for rel in &rels {
+        for rel in rels {
             if rel.external {
                 new_rels.push(rel.clone());
                 continue;
@@ -414,6 +430,17 @@ impl Composer {
             let child = self.copy_target(deck, &resolved)?;
             new_rels.push(rewritten_rel(rel, out_name, &child));
         }
+        Ok(new_rels)
+    }
+
+    /// Copy a part under a fixed output name, following its relationships like
+    /// [`Composer::copy_generic`] does.
+    fn copy_fixed_name(&mut self, deck: usize, orig: &str, out_name: &str) -> Result<()> {
+        let bytes = self
+            .part_bytes(deck, orig)
+            .ok_or_else(|| Error::MissingPart(orig.to_string()))?;
+        let rels = self.deck_rels(deck, orig)?;
+        let new_rels = self.copy_plain_rels(deck, orig, out_name, &rels)?;
         self.out_pkg.insert_part(out_name.to_string(), bytes);
         if !new_rels.is_empty() {
             self.out_pkg.set_rels(out_name, &new_rels);
@@ -547,6 +574,17 @@ impl Composer {
         let bytes = self
             .part_bytes(deck, orig)
             .ok_or_else(|| Error::MissingPart(orig.to_string()))?;
+        // A slide-jump target reaches copy_generic (it is not a layout/master/
+        // notesMaster). Its layout/master closure IS rescaled, so its own
+        // geometry must be too, or a mixed-size composition emits an internally
+        // inconsistent package. Notes slides (ppt/notesSlides/) are deliberately
+        // NOT scaled — they use the separate notesSz canvas. scale_bytes is a
+        // no-op when this deck has no scale, so same-size decks stay identical.
+        let bytes = if orig.starts_with("ppt/slides/") {
+            self.scale_bytes(deck, bytes)?
+        } else {
+            bytes
+        };
         let rels = self.deck_rels(deck, orig)?;
         let has_internal = rels.iter().any(|r| !r.external);
 
@@ -554,7 +592,7 @@ impl Composer {
         // every master with its own theme part, and sharing one part between
         // masters is a structural deviation some consumers handle badly.
         if !has_internal && !orig.contains("/theme/") {
-            let hash = hash_hex(&bytes);
+            let hash = crate::hash::sha256_hex(&bytes);
             if let Some(existing) = self.leaf_by_hash.get(&hash).cloned() {
                 self.decks[deck].copied.insert(orig.to_string(), existing.clone());
                 return Ok(existing);
@@ -574,20 +612,7 @@ impl Composer {
 
         let name = self.alloc(orig);
         self.decks[deck].copied.insert(orig.to_string(), name.clone());
-        let mut new_rels = Vec::new();
-        for rel in &rels {
-            if rel.external {
-                new_rels.push(rel.clone());
-                continue;
-            }
-            let resolved = resolve_target(orig, &rel.target);
-            if !self.decks[deck].pf.package.has_part(&resolved) {
-                self.warn_missing(orig, &resolved);
-                continue;
-            }
-            let child = self.copy_target(deck, &resolved)?;
-            new_rels.push(rewritten_rel(rel, &name, &child));
-        }
+        let new_rels = self.copy_plain_rels(deck, orig, &name, &rels)?;
         self.out_pkg.insert_part(name.clone(), bytes);
         if !new_rels.is_empty() {
             self.out_pkg.set_rels(&name, &new_rels);
@@ -689,21 +714,7 @@ impl Composer {
             .part_bytes(deck, orig)
             .ok_or_else(|| Error::MissingPart(orig.to_string()))?;
         let rels = self.deck_rels(deck, orig)?;
-
-        let mut new_rels = Vec::new();
-        for rel in &rels {
-            if rel.external {
-                new_rels.push(rel.clone());
-                continue;
-            }
-            let resolved = resolve_target(orig, &rel.target);
-            if !self.decks[deck].pf.package.has_part(&resolved) {
-                self.warn_missing(orig, &resolved);
-                continue;
-            }
-            let child = self.copy_target(deck, &resolved)?;
-            new_rels.push(rewritten_rel(rel, &name, &child));
-        }
+        let new_rels = self.copy_plain_rels(deck, orig, &name, &rels)?;
         self.out_pkg.insert_part(name.clone(), bytes);
         self.out_pkg.set_rels(&name, &new_rels);
         self.carry_ct(deck, orig, &name);
@@ -931,15 +942,6 @@ fn rewritten_rel(orig: &Relationship, from_part: &str, to_part: &str) -> Relatio
         target: relative_target(from_part, to_part),
         external: false,
     }
-}
-
-fn hash_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 fn max_rid_num(rels: &[Relationship]) -> u32 {

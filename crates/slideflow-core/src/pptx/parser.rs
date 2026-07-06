@@ -268,6 +268,23 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                 b"p" if shape_depth > 0 && !current_text.is_empty() => {
                     pending_newline = true;
                 }
+                // DOM serializers expand empty elements, and CT_Placeholder may
+                // legally carry an extLst child, so p:ph / a:br also arrive as
+                // Start events. Both actions are idempotent, so handling both
+                // forms is safe.
+                b"ph" if shape_depth > 0 => {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"type" {
+                            let v = attr.unescape_value().map_err(|e| Error::xml(part, e))?;
+                            if v.as_ref() == "title" || v.as_ref() == "ctrTitle" {
+                                current_is_title = true;
+                            }
+                        }
+                    }
+                }
+                b"br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
+                    pending_newline = true;
+                }
                 _ => {}
             },
             Event::Empty(ref e) => match local_name(e.name().as_ref()) {
@@ -413,6 +430,32 @@ mod tests {
         for term in ["Quartal", "Umsatz", "Q1", "120 T€"] {
             assert!(table_text.contains(term), "missing {term} in {table_text:?}");
         }
+    }
+
+    #[test]
+    fn expanded_ph_and_br_forms_are_handled() {
+        // DOM serializers expand empty elements: <p:ph type="title"></p:ph> and
+        // <a:br></a:br> arrive as Start+End, not Empty. PowerPoint also emits
+        // <a:br> with an <a:rPr> child when the break carries formatting. Title
+        // detection and the break newline must survive both.
+        let xml = r#"<?xml version="1.0"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"><a:extLst/></p:ph></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>Line one</a:t></a:r><a:br><a:rPr lang="en-US"/></a:br><a:r><a:t>Line two</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+        let content = extract_texts(xml.as_bytes(), "test").unwrap();
+        assert_eq!(
+            content.title.as_deref(),
+            Some("Line one\nLine two"),
+            "expanded <p:ph> must still set the title flag"
+        );
+        assert!(
+            content.texts.iter().any(|t| t == "Line one\nLine two"),
+            "expanded <a:br> must insert a newline, not glue words: {:?}",
+            content.texts
+        );
     }
 
     #[test]

@@ -1,22 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+import { useDismiss } from "../lib/useDismiss";
 
 /** Compact reference for the search box's advanced syntax. Purely informational
  *  — the engine owns all parsing; this popover never touches the query. */
 export default function SearchHelpPopover({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   return (
     <div

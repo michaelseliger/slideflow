@@ -3,6 +3,7 @@ import { Check, ChevronDown, Layers, Pencil, Plus, Trash2 } from "lucide-react";
 import { useTray } from "../stores/useTray";
 import { useApp } from "../stores/useApp";
 import { cx } from "../lib/utils";
+import { useDismiss } from "../lib/useDismiss";
 
 /** Tray switcher for the composition header: a compact dropdown listing every
  *  named tray with its slide count, plus create / inline-rename / delete. Opens
@@ -18,19 +19,7 @@ export default function TraySwitcher() {
   const [draft, setDraft] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
+  useDismiss(ref, () => setOpen(false), { enabled: open });
 
   // Reset any in-progress rename when the menu closes.
   useEffect(() => {

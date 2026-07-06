@@ -364,6 +364,12 @@ pub fn export_pngs(
         progress(i + 1, total);
     }
 
+    if report.files_written.is_empty() {
+        return Err(Error::Compose(
+            "no slides could be exported to PNG (all picks failed)".into(),
+        ));
+    }
+
     Ok(report)
 }
 
@@ -540,7 +546,7 @@ fn sanitize_pdf_images(svg: &str) -> (String, usize) {
 const MAX_NAME_STEM: usize = 120;
 
 /// The deck's file stem (name without extension) for use in messages/names.
-fn deck_stem(pptx_path: &str) -> String {
+pub fn deck_stem(pptx_path: &str) -> String {
     Path::new(pptx_path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -549,7 +555,7 @@ fn deck_stem(pptx_path: &str) -> String {
 
 /// Replace path separators / colons and drop control characters, so a stem is
 /// safe as a single path component on macOS/Windows/Linux.
-fn sanitize(s: &str) -> String {
+pub fn sanitize_component(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| match c {
@@ -566,7 +572,7 @@ fn sanitize(s: &str) -> String {
 fn png_name(seq: usize, pptx_path: &str, slide_index: usize) -> String {
     let prefix = format!("{seq:03} — ");
     let suffix = format!(" — slide {slide_index}");
-    let stem = sanitize(&deck_stem(pptx_path));
+    let stem = sanitize_component(&deck_stem(pptx_path));
     let budget = MAX_NAME_STEM.saturating_sub(prefix.chars().count() + suffix.chars().count());
     let stem: String = stem.chars().take(budget.max(1)).collect();
     format!("{prefix}{stem}{suffix}.png")

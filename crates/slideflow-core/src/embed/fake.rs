@@ -6,19 +6,22 @@
 //! assert that only missing texts are embedded and that lexical search never
 //! embeds a query.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
 
 use super::store::l2_normalize;
 use super::Embedder;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 pub struct FakeEmbedder {
     id: String,
     dims: usize,
     passages: AtomicUsize,
     queries: AtomicUsize,
+    /// When set, `embed_passages` returns an error instead of vectors — used to
+    /// exercise the "embedding failure never aborts the scan" contract.
+    fail_passages: AtomicBool,
 }
 
 impl FakeEmbedder {
@@ -28,11 +31,19 @@ impl FakeEmbedder {
             dims,
             passages: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
+            fail_passages: AtomicBool::new(false),
         }
     }
 
     pub fn with_id(id: impl Into<String>, dims: usize) -> Self {
         FakeEmbedder { id: id.into(), ..Self::new(dims) }
+    }
+
+    /// Make every subsequent `embed_passages` call fail (simulates a
+    /// model/tokenizer error mid-scan). Toggleable so a test can fail the inline
+    /// scan embed and then let the backfill succeed.
+    pub fn set_fail_passages(&self, fail: bool) {
+        self.fail_passages.store(fail, Ordering::Relaxed);
     }
 
     /// Total number of passage texts embedded across all `embed_passages` calls.
@@ -54,6 +65,9 @@ impl Embedder for FakeEmbedder {
         self.dims
     }
     fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if self.fail_passages.load(Ordering::Relaxed) {
+            return Err(Error::Embedding("fake embedder: forced passage failure".into()));
+        }
         self.passages.fetch_add(texts.len(), Ordering::Relaxed);
         Ok(texts.iter().map(|t| fake_vec(t, self.dims)).collect())
     }

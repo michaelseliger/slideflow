@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { X, ChevronLeft, ChevronRight, Plus, FolderOpen, Check } from "lucide-react";
 import { useApp } from "../stores/useApp";
-import { useTray } from "../stores/useTray";
+import { useTray, uidFor } from "../stores/useTray";
 import { toast } from "../stores/useToast";
 import { useSlidePreview } from "../lib/useSlideSvg";
 import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
@@ -17,7 +17,7 @@ export default function PeekModal() {
   const hit = peekIndex != null ? results[peekIndex] : null;
   const { src: previewSrc, dropped } = useSlidePreview(hit?.slide.id ?? null, "full");
   const inTray = useTray((s) =>
-    hit ? s.items.some((i) => i.uid === `${hit.slide.deck_id}:${hit.slide.slide_index}`) : false,
+    hit ? s.items.some((i) => i.uid === uidFor(hit.deck, hit.slide)) : false,
   );
 
   return (

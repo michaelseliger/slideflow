@@ -789,26 +789,45 @@ fn span_text_width(s: &str, span: &Span) -> f64 {
 /// advances differ notably. Narrow/condensed cuts run ~18% tighter; the modern
 /// Microsoft UI grotesques (Aptos, Segoe) ~5%; Calibri/Candara ~9%.
 fn family_width_factor(family: &str) -> f64 {
-    let f = family.to_ascii_lowercase();
-    if is_condensed(&f) {
+    // Order is load-bearing: condensed is checked before the Calibri/Aptos
+    // branches. Matching is case-insensitive without allocating (this runs once
+    // per word inside the wrap loop).
+    if is_condensed(family) {
         0.82
-    } else if f.contains("calibri") || f.contains("carlito") || f.contains("candara") {
+    } else if contains_ci(family, "calibri")
+        || contains_ci(family, "carlito")
+        || contains_ci(family, "candara")
+    {
         // Carlito is the bundled Calibri clone (identical metrics), so a run
         // that literally names Carlito must wrap like Calibri. Cambria/Caladea
         // keep the neutral 1.0 tail below — no calibrated serif factor exists,
         // and matching prior Cambria behavior avoids a wrap regression.
         0.91
-    } else if f.contains("aptos") || f.contains("segoe") {
+    } else if contains_ci(family, "aptos") || contains_ci(family, "segoe") {
         0.95
     } else {
         1.0
     }
 }
 
-/// Narrow/condensed typeface family (Aptos Narrow, Arial Narrow, …).
+/// Narrow/condensed typeface family (Aptos Narrow, Arial Narrow, …). Accepts a
+/// raw (possibly mixed-case) family name — callers pass the authored font name.
 fn is_condensed(family: &str) -> bool {
-    let f = family.to_ascii_lowercase();
-    f.contains("narrow") || f.contains("condensed")
+    contains_ci(family, "narrow") || contains_ci(family, "condensed")
+}
+
+/// ASCII case-insensitive substring test, allocation-free. `needle` must be
+/// lowercase ASCII (all call sites pass lowercase literals).
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let (hb, nb) = (haystack.as_bytes(), needle.as_bytes());
+    if nb.is_empty() {
+        return true;
+    }
+    if hb.len() < nb.len() {
+        return false;
+    }
+    hb.windows(nb.len())
+        .any(|w| w.iter().zip(nb).all(|(h, n)| h.to_ascii_lowercase() == *n))
 }
 
 /// Approximate glyph advance in em units (Helvetica metrics / 1000). Non-ASCII

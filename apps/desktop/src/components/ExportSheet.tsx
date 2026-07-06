@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import confetti from "canvas-confetti";
 import {
   X,
@@ -14,6 +14,7 @@ import { useApp } from "../stores/useApp";
 import { useTray } from "../stores/useTray";
 import { toast } from "../stores/useToast";
 import { dirname, prefersReducedMotion } from "../lib/utils";
+import OverlaySheet from "./OverlaySheet";
 import {
   readExportPreset,
   writeExportPreset,
@@ -91,6 +92,27 @@ export default function ExportSheet() {
     if (phase.step === "working") return; // don't cancel mid-export
     useApp.getState().setExportOpen(false);
   };
+
+  // WKWebView leaves focus on <body> after a button click, so the card's own
+  // onKeyDown can't be relied on to catch Escape. Register a capture-phase
+  // window listener that closes on Escape (guarded so it never cancels a running
+  // export) and stops the event before it reaches App.tsx's global handler —
+  // otherwise Escape would clear the search query behind the sheet.
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (phaseRef.current.step !== "working") {
+        useApp.getState().setExportOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
 
   // --- PowerPoint: style-preserving composition (optimistic progress) --------
   const runPptx = async (safe: string, outputPath: string) => {
@@ -246,25 +268,8 @@ export default function ExportSheet() {
   const locationLabel = format === "png" ? "Choose folder…" : "Choose location…";
 
   return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-8 backdrop-blur-sm"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: reduce ? 0 : 0.14 }}
-          onClick={close}
-        >
-          <motion.div
-            className="w-full max-w-md overflow-hidden rounded-[12px] bg-surface shadow-peek"
-            initial={reduce ? false : { scale: 0.95, opacity: 0, y: 8 }}
-            animate={{ scale: 1, opacity: 1, y: 0 }}
-            exit={reduce ? { opacity: 0 } : { scale: 0.97, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 320, damping: 30 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-5 py-3 hairline-b">
+    <OverlaySheet open={open} onClose={close} cardClassName="max-w-md">
+      <div className="flex items-center justify-between px-5 py-3 hairline-b">
               <h2 className="text-title font-semibold text-ink">Export deck</h2>
               {phase.step !== "working" && (
                 <button
@@ -535,9 +540,6 @@ export default function ExportSheet() {
                 </div>
               )}
             </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+    </OverlaySheet>
   );
 }

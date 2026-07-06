@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowDownUp, Check } from "lucide-react";
 import { useApp, type SortMode } from "../stores/useApp";
 import { cx } from "../lib/utils";
+import { useDismiss } from "../lib/useDismiss";
 
 const OPTIONS: { mode: SortMode; label: string; hint?: string }[] = [
   { mode: "name", label: "Name" },
@@ -29,19 +30,7 @@ export default function SortMenu() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
+  useDismiss(ref, () => setOpen(false), { enabled: open });
 
   return (
     <div ref={ref} className="relative">

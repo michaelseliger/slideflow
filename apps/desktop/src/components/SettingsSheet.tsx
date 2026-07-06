@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import {
   X,
   Monitor,
@@ -18,10 +17,12 @@ import { useUpdater } from "../stores/useUpdater";
 import { useSemantic } from "../stores/useSemantic";
 import { useFonts } from "../stores/useFonts";
 import type { FontFamily } from "../lib/types";
-import { prefersReducedMotion, basename, cx } from "../lib/utils";
+import { basename, cx } from "../lib/utils";
 import * as api from "../lib/api";
+import { toast } from "../stores/useToast";
 import { UpdateStatus } from "./AboutSheet";
 import RootExcludesEditor from "./RootExcludesEditor";
+import OverlaySheet from "./OverlaySheet";
 
 const AUTO_UPDATE_KEY = "slideflow.autoUpdate.v1";
 
@@ -30,40 +31,22 @@ const AUTO_UPDATE_KEY = "slideflow.autoUpdate.v1";
  *  Opened by ⌘, or the command palette; closes via backdrop / X only. */
 export default function SettingsSheet() {
   const open = useApp((s) => s.settingsOpen);
-  const reduce = prefersReducedMotion();
   const close = () => useApp.getState().setSettingsOpen(false);
 
   return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-8 backdrop-blur-sm"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: reduce ? 0 : 0.14 }}
-          onClick={close}
-        >
-          <motion.div
-            className="w-full max-w-md overflow-hidden rounded-[12px] bg-surface shadow-peek"
-            initial={reduce ? false : { scale: 0.95, opacity: 0, y: 8 }}
-            animate={{ scale: 1, opacity: 1, y: 0 }}
-            exit={reduce ? { opacity: 0 } : { scale: 0.97, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 320, damping: 30 }}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              // Trap keys inside the sheet so grid shortcuts and Escape don't
-              // leak to App.tsx's window listener behind the modal (mirrors
-              // ConfirmDialog). Escape closes the sheet unless a field has focus
-              // (there, let the field keep the key — don't nuke an in-progress
-              // exclude-glob edit).
-              e.stopPropagation();
-              const tag = (e.target as HTMLElement).tagName;
-              const editing = tag === "INPUT" || tag === "TEXTAREA";
-              if (e.key === "Escape" && !editing) close();
-            }}
-          >
-            <div className="flex items-center justify-between px-5 py-3 hairline-b">
+    <OverlaySheet
+      open={open}
+      onClose={close}
+      cardClassName="max-w-md"
+      onCardKeyDown={(e) => {
+        // Escape closes the sheet unless a field has focus (there, let the
+        // field keep the key — don't nuke an in-progress exclude-glob edit).
+        const tag = (e.target as HTMLElement).tagName;
+        const editing = tag === "INPUT" || tag === "TEXTAREA";
+        if (e.key === "Escape" && !editing) close();
+      }}
+    >
+      <div className="flex items-center justify-between px-5 py-3 hairline-b">
               <div className="text-title font-semibold text-ink">Settings</div>
               <button
                 onClick={close}
@@ -81,10 +64,7 @@ export default function SettingsSheet() {
               <UpdatesSection />
               <SemanticSection />
             </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+    </OverlaySheet>
   );
 }
 
@@ -240,7 +220,10 @@ function UpdatesSection() {
     api
       .setAutoUpdateEnabled(next)
       .then(() => localStorage.setItem(AUTO_UPDATE_KEY, next ? "1" : "0"))
-      .catch(() => setAuto(auto));
+      .catch((err) => {
+        setAuto(auto);
+        toast.error("Couldn't change automatic updates: " + String(err));
+      });
   };
 
   return (

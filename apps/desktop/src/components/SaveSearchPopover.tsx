@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useApp } from "../stores/useApp";
+import { useDismiss } from "../lib/useDismiss";
 
 /** Names and persists the current query + active filters as a saved search. */
 export default function SaveSearchPopover({ onClose }: { onClose: () => void }) {
@@ -8,18 +9,7 @@ export default function SaveSearchPopover({ onClose }: { onClose: () => void }) 
   const [name, setName] = useState(() => suggestName(query));
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const submit = () => {
     const trimmed = name.trim();

@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cx } from "../lib/utils";
+import { useDismiss } from "../lib/useDismiss";
 
 export interface MenuItem {
   label: string;
@@ -34,22 +35,7 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
     setPos({ x: Math.max(8, nx), y: Math.max(8, ny) });
   }, [x, y]);
 
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("scroll", onClose, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("scroll", onClose, true);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose, { onScroll: true });
 
   return createPortal(
     <div

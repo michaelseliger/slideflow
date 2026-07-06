@@ -204,7 +204,15 @@ impl Ctx<'_> {
                 return Some(format!("data:{};base64,{}", new_ct, B64.encode(&new_bytes)));
             }
         }
-        Some(format!("data:{};base64,{}", ct, B64.encode(bytes)))
+        // The declared content-type can lie: real decks ship JPEG bytes under a
+        // `.png` part / `image/png` override (and vice-versa). Browsers sniff the
+        // bytes, so the `<img>` preview renders fine — but usvg (the PNG/PDF
+        // export rasterizer) trusts the data-URI's MIME verbatim (`data:image/png`
+        // → PNG decoder) and silently drops the image when the bytes are actually
+        // a different format. Emit the MIME the bytes really are so both paths
+        // agree with the preview.
+        let mime = sniff_raster_mime(bytes).unwrap_or(ct.as_str());
+        Some(format!("data:{};base64,{}", mime, B64.encode(bytes)))
     }
 
     /// Extract the embedded bitmap from an EMF and encode it as a data URI,
@@ -400,6 +408,21 @@ fn svg_is_safe(bytes: &[u8]) -> bool {
         "url(http",
     ];
     !BAD.iter().any(|p| lower.contains(p))
+}
+
+/// Sniff the true image MIME (`image/png` / `image/jpeg` / `image/gif`) from a
+/// raster's magic bytes, ignoring whatever the deck's content-type / extension
+/// claims. Returns `None` for anything that isn't one of those three (the
+/// caller then keeps the declared type). This corrects mislabeled parts — a
+/// JPEG shipped as `.png` is common in real decks — so the emitted data-URI's
+/// MIME matches its bytes; usvg's data resolver trusts that MIME verbatim.
+fn sniff_raster_mime(bytes: &[u8]) -> Option<&'static str> {
+    match imagesize::image_type(bytes).ok()? {
+        imagesize::ImageType::Png => Some("image/png"),
+        imagesize::ImageType::Jpeg => Some("image/jpeg"),
+        imagesize::ImageType::Gif => Some("image/gif"),
+        _ => None,
+    }
 }
 
 fn mime_from_ext(part: &str) -> Option<String> {

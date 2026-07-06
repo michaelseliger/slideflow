@@ -270,6 +270,12 @@ const mockRoots: RootRecord[] = (() => {
   });
 })();
 
+// Monotonic root-id sequence, seeded past the highest seeded id. Deriving the
+// id from `mockRoots.length` collides after any removal (add 1,2 -> remove 1 ->
+// add would reuse 2), which then makes removeRoot/setRootExcludes/path-prefix
+// nav match the wrong root.
+let mockRootSeq = mockRoots.reduce((max, r) => Math.max(max, r.id), 0);
+
 function highlight(text: string, query: string): string {
   const esc = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -320,7 +326,7 @@ export const mock = {
 
   addRoot: async (path: string): Promise<RootRecord> => {
     const rec: RootRecord = {
-      id: mockRoots.length + 1,
+      id: ++mockRootSeq,
       path,
       deck_count: 0,
       slide_count: 0,

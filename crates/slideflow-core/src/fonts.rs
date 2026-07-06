@@ -216,13 +216,11 @@ pub fn subset_to_chars(bytes: &[u8], chars: &std::collections::BTreeSet<char>) -
     // "embed the full bytes", never take down the whole slide render, so the
     // call is fenced against panics as well as errors. The inputs are
     // read-only, so unwinding cannot leave them inconsistent.
-    let chars = chars.clone();
-    let bytes_owned = bytes.to_vec();
-    let out = std::panic::catch_unwind(move || -> Option<Vec<u8>> {
-        let font = FontRef::new(&bytes_owned).ok()?;
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<Vec<u8>> {
+        let font = FontRef::new(bytes).ok()?;
 
         let mut unicodes = IntSet::<u32>::empty();
-        for c in &chars {
+        for c in chars {
             unicodes.insert(*c as u32);
         }
 
@@ -272,7 +270,7 @@ pub fn subset_to_chars(bytes: &[u8], chars: &std::collections::BTreeSet<char>) -
             &name_languages,
         );
         skera::subset_font(&font, &plan).ok()
-    })
+    }))
     .ok()
     .flatten()?;
 

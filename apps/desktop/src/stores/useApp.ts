@@ -237,6 +237,10 @@ interface AppState {
   // scan
   startScan: () => Promise<void>;
   handleScanEvent: (ev: ScanEvent) => void;
+  /** Terminal handler for a scan that aborted on the host (emitted on
+   *  `scan:error`, never a `finished` event): clear the running state so the
+   *  progress bar stops and rescans work again, and surface the failure. */
+  handleScanError: (message: string) => void;
 
   // folders
   addFolder: () => Promise<void>;
@@ -253,6 +257,18 @@ interface AppState {
 let searchToken = 0;
 let debounceTimer: number | undefined;
 let recordTimer: number | undefined;
+
+// Subscribe once (app-lifetime singleton) to the host's terminal `scan:error`
+// channel. Wired here rather than in App.tsx alongside `onScanEvent` because the
+// terminal error handling is store-owned; the guard keeps a dev/HMR re-init from
+// stacking duplicate listeners. Inert in browser mode (the mock scan never
+// fails), so `pnpm dev` is unaffected.
+let scanErrorSubscribed = false;
+function subscribeScanErrors(): void {
+  if (scanErrorSubscribed) return;
+  scanErrorSubscribed = true;
+  void api.onScanError((message) => useApp.getState().handleScanError(message));
+}
 
 export const useApp = create<AppState>((set, get) => ({
   roots: [],
@@ -301,6 +317,7 @@ export const useApp = create<AppState>((set, get) => ({
   // -------------------------------------------------------------------------
 
   init: async () => {
+    subscribeScanErrors();
     await get().reloadLibrary();
     set({ ready: true });
     await get().refresh();
@@ -753,7 +770,6 @@ export const useApp = create<AppState>((set, get) => ({
       case "deck":
         scan.done = ev.done;
         scan.total = ev.total;
-        scan.indexed = ev.done;
         scan.lastPath = ev.path;
         break;
       case "skipped":
@@ -778,6 +794,14 @@ export const useApp = create<AppState>((set, get) => ({
         break;
     }
     set({ scan });
+  },
+
+  handleScanError: (message) => {
+    // A scan can fail after `started` was emitted, so fully reset progress
+    // state (not just `running`) back to idle — otherwise the sidebar keeps a
+    // stale count and the startScan() guard stays armed.
+    set({ scan: { running: false, done: 0, total: 0, indexed: 0, lastPath: null, skipped: [] } });
+    toast.error(`Scan failed: ${message}`);
   },
 
   // --- folders -----------------------------------------------------------

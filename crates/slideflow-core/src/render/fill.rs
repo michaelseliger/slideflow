@@ -61,11 +61,6 @@ pub(crate) struct Stroke {
 }
 
 impl Stroke {
-    /// A plain solid stroke with no dash/cap/end decorations.
-    pub(crate) fn solid(color: Rgba, width_pt: f64) -> Stroke {
-        Stroke { color, width_pt, dash: None, cap: None, head_oval: false, tail_oval: false }
-    }
-
     /// The dash/linecap attribute tail shared by every stroked element.
     pub(crate) fn deco_attrs(&self) -> String {
         let mut s = String::new();
@@ -77,6 +72,36 @@ impl Stroke {
         }
         s
     }
+}
+
+/// Parse an `a:ln`-shaped element (a shape outline, an `lnStyleLst` template, or
+/// a table cell border) into a [`Stroke`]. An explicit child `a:noFill` → `None`.
+///
+/// `ph` supplies the `phClr` placeholder color for `fmtScheme` templates (pass
+/// `None` for a direct fill). `width_override` forces the width in points — the
+/// `lnStyleLst` path, whose width is pre-parsed onto `theme.line_styles`, must
+/// ignore the template's own `w`; otherwise the width comes from the element's
+/// `a:ln@w` (EMU), defaulting to 1.0pt.
+pub(crate) fn parse_ln(
+    ln: Node,
+    theme: &Theme,
+    ph: Option<Rgba>,
+    width_override: Option<f64>,
+) -> Option<Stroke> {
+    if ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill") {
+        return None;
+    }
+    let color = ch(ln, "solidFill")
+        .and_then(|f| f.children().find(|n| n.is_element()))
+        .and_then(|cn| theme.parse_color_ph(cn, ph))?;
+    let width_pt = width_override.unwrap_or_else(|| {
+        a(ln, "w")
+            .and_then(|w| w.parse::<f64>().ok())
+            .map(|w| w / EMU_PER_PT)
+            .unwrap_or(1.0)
+    });
+    let (dash, cap, head_oval, tail_oval) = parse_ln_deco(ln, width_pt);
+    Some(Stroke { color, width_pt, dash, cap, head_oval, tail_oval })
 }
 
 /// Dash/cap/line-end properties of an `a:ln` element. The dash pattern is in
@@ -209,14 +234,9 @@ fn resolve_template_stroke(
     let wrapped = format!(r#"<sf xmlns:a="{A_NS}">{template}</sf>"#);
     let doc = Document::parse(&wrapped).ok()?;
     let ln = doc.root_element().children().find(|n| n.is_element())?;
-    if ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill") {
-        return None;
-    }
-    let color = ch(ln, "solidFill")
-        .and_then(|f| f.children().find(|n| n.is_element()))
-        .and_then(|cn| theme.parse_color_ph(cn, Some(ph)))?;
-    let (dash, cap, head_oval, tail_oval) = parse_ln_deco(ln, width_pt);
-    Some(Stroke { color, width_pt, dash, cap, head_oval, tail_oval })
+    // Width is pre-parsed from the theme's lnStyleLst; the template's own `w`
+    // (if any) must be ignored, hence the override.
+    parse_ln(ln, theme, Some(ph), Some(width_pt))
 }
 
 /// The `r:embed` of a `<p:bg>`'s `bgPr/blipFill/blip` picture background, if any.
@@ -321,36 +341,26 @@ impl Ctx<'_> {
 
     pub(crate) fn resolve_stroke(&self, sp_pr: Node) -> Option<Stroke> {
         let ln = ch(sp_pr, "ln")?;
-        // Explicit noFill outline → no stroke.
-        if ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill") {
-            return None;
-        }
-        let color = ch(ln, "solidFill")
-            .and_then(|f| f.children().find(|n| n.is_element()))
-            .and_then(|cn| self.theme.parse_color(cn))?;
-        let width_pt = a(ln, "w")
-            .and_then(|w| w.parse::<f64>().ok())
-            .map(|w| w / EMU_PER_PT)
-            .unwrap_or(1.0);
-        let (dash, cap, head_oval, tail_oval) = parse_ln_deco(ln, width_pt);
-        Some(Stroke { color, width_pt, dash, cap, head_oval, tail_oval })
+        parse_ln(ln, &self.theme, None, None)
     }
 
     /// Resolve a shape's `p:style/a:fillRef` into a `Fill` (used when `spPr`
-    /// carries no explicit fill). idx 0 → no fill; 1..=999 → `fillStyleLst`;
-    /// >=1000 → `bgFillStyleLst`. The `fillRef`'s color child is the `phClr`.
+    /// carries no explicit fill). Per ECMA-376 `ST_StyleMatrixColumnIndex`:
+    /// idx 0 and 1000 → no fill; 1..=999 → `fillStyleLst[idx-1]`; >=1001 →
+    /// `bgFillStyleLst[idx-1001]`. The `fillRef`'s color child is the `phClr`.
     pub(crate) fn resolve_style_fill(&self, sp: Node) -> Option<Fill> {
         let fill_ref = ch(ch(sp, "style")?, "fillRef")?;
         let idx = a(fill_ref, "idx").and_then(|v| v.parse::<usize>().ok())?;
-        if idx == 0 {
+        // 0 and 1000 both mean "no fill" in the style matrix.
+        if idx == 0 || idx == 1000 {
             return Some(Fill::None);
         }
         let ph = fill_ref
             .children()
             .find(|n| n.is_element())
             .and_then(|cn| self.theme.parse_color(cn));
-        let template = if idx >= 1000 {
-            self.theme.bg_fill_styles.get(idx - 1000)?
+        let template = if idx >= 1001 {
+            self.theme.bg_fill_styles.get(idx - 1001)?
         } else {
             self.theme.fill_styles.get(idx - 1)?
         };

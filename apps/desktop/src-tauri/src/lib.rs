@@ -113,7 +113,12 @@ pub fn run() {
                     // auto-updates skips the silent check while the daily loop
                     // keeps ticking (honored on the next cycle).
                     if updates::auto_update_enabled(&handle) {
-                        tauri::async_runtime::block_on(updates::run_update_flow(handle.clone()));
+                        // Silent (is_manual=false): a download that finishes
+                        // after the user opts out mid-flight is discarded.
+                        tauri::async_runtime::block_on(updates::run_update_flow(
+                            handle.clone(),
+                            false,
+                        ));
                     }
                     std::thread::sleep(std::time::Duration::from_secs(60 * 60 * 24 - 5));
                 });

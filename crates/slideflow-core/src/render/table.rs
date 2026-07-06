@@ -9,7 +9,7 @@ use roxmltree::Node;
 
 use super::fill::{Fill, Stroke};
 use super::geometry::{parse_xfrm, Rect, Transform};
-use super::{a, ch, fnum, Ctx, EMU_PER_PT};
+use super::{a, ch, fnum, truthy, Ctx};
 
 const DEFAULT_BORDER: &str = "#D0D0D0";
 const DEFAULT_BORDER_W: f64 = 0.75;
@@ -101,7 +101,7 @@ impl Ctx<'_> {
                 if ci >= cols.len() {
                     break;
                 }
-                if a(tc, "hMerge") == Some("1") || a(tc, "vMerge") == Some("1") {
+                if truthy(tc, "hMerge") || truthy(tc, "vMerge") {
                     ci += 1;
                     continue;
                 }
@@ -203,21 +203,10 @@ impl Ctx<'_> {
 
     /// Parse one cell-border element (`a:lnL`/`lnR`/`lnT`/`lnB`) — shaped like an
     /// `a:ln` — into a `Stroke`. An explicit `a:noFill` means "no line".
+    /// `render_cell_borders` only reads `color`/`width_pt`, so the shared
+    /// parser's extra dash/cap/end fields are inert here.
     fn cell_border(&self, ln: Node) -> Option<Stroke> {
-        if ln
-            .children()
-            .any(|n| n.is_element() && n.tag_name().name() == "noFill")
-        {
-            return None;
-        }
-        let color = ch(ln, "solidFill")
-            .and_then(|f| f.children().find(|n| n.is_element()))
-            .and_then(|cn| self.theme.parse_color(cn))?;
-        let width_pt = a(ln, "w")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|w| w / EMU_PER_PT)
-            .unwrap_or(1.0);
-        Some(Stroke::solid(color, width_pt))
+        super::fill::parse_ln(ln, &self.theme, None, None)
     }
 }
 

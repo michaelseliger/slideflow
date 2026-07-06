@@ -3,7 +3,7 @@ import { Eye, Plus, FolderOpen, Check, Star } from "lucide-react";
 import type { SearchHit, SlideDragPaths, SlidePick } from "../lib/types";
 import { cx, deckDisplayName, prefersReducedMotion } from "../lib/utils";
 import { useApp } from "../stores/useApp";
-import { useTray } from "../stores/useTray";
+import { useTray, uidFor } from "../stores/useTray";
 import { useSemantic } from "../stores/useSemantic";
 import { toast } from "../stores/useToast";
 import * as api from "../lib/api";
@@ -27,7 +27,7 @@ let nativeDragOff = false;
 function SlideCardImpl({ hit, index }: SlideCardProps) {
   const { slide, deck, snippet } = hit;
   const selected = useApp((s) => s.selectedIds.has(slide.id));
-  const inTray = useTray((s) => s.items.some((i) => i.uid === `${slide.deck_id}:${slide.slide_index}`));
+  const inTray = useTray((s) => s.items.some((i) => i.uid === uidFor(deck, slide)));
   const semanticReady = useSemantic((s) => s.status?.state === "ready");
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Shares Thumbnail's (slide, "thumb") cache key, so no extra backend call.

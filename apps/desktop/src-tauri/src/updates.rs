@@ -77,7 +77,9 @@ pub fn updates_supported() -> bool {
 /// as `update:event`s, so the command returns immediately.
 #[tauri::command]
 pub fn check_for_updates(app: AppHandle) {
-    tauri::async_runtime::spawn(run_update_flow(app));
+    // Manual: always park + announce a finished download so restart_to_update
+    // works, regardless of the auto-update preference.
+    tauri::async_runtime::spawn(run_update_flow(app, true));
 }
 
 fn auto_update_pref_path(app: &AppHandle) -> Option<PathBuf> {
@@ -124,8 +126,10 @@ pub fn set_auto_update_enabled(app: AppHandle, enabled: bool) -> Result<(), Stri
     std::fs::write(&path, if enabled { "1" } else { "0" }).map_err(|e| e.to_string())?;
     // Turning auto-update OFF also drops any already-downloaded update parked in
     // PendingUpdate, so install-on-quit can't apply a version the user just
-    // opted out of. (An in-flight download still finishes but won't be parked/
-    // installed while disabled — the next scheduler cycle is gated too.)
+    // opted out of. A silent (scheduler-initiated) download still in flight
+    // finishes its bytes but is discarded — not parked and no Ready emit —
+    // because check_and_download re-checks this preference before parking; the
+    // next scheduler cycle is gated too.
     if !enabled {
         if let Some(state) = app.try_state::<PendingUpdate>() {
             if let Ok(mut guard) = state.update.lock() {
@@ -167,7 +171,11 @@ pub async fn restart_to_update(app: AppHandle) -> Result<(), String> {
 /// exists download it in the background, park it in [`PendingUpdate`], and
 /// tell the frontend it's ready. Never fatal — failures surface as an
 /// [`UpdateEvent::Error`] and the next pass starts fresh.
-pub async fn run_update_flow(app: AppHandle) {
+///
+/// `is_manual` distinguishes a user-triggered "Check for Updates…" (always
+/// parks + announces a finished download) from a silent scheduler pass (drops
+/// the download if auto-update was turned off while it was in flight).
+pub async fn run_update_flow(app: AppHandle, is_manual: bool) {
     let state = app.state::<PendingUpdate>();
 
     // An update is already downloaded and waiting: re-announce instead of
@@ -183,7 +191,7 @@ pub async fn run_update_flow(app: AppHandle) {
     if state.in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
-    let result = check_and_download(&app).await;
+    let result = check_and_download(&app, is_manual).await;
     app.state::<PendingUpdate>()
         .in_flight
         .store(false, Ordering::SeqCst);
@@ -192,7 +200,10 @@ pub async fn run_update_flow(app: AppHandle) {
     }
 }
 
-async fn check_and_download(app: &AppHandle) -> Result<(), tauri_plugin_updater::Error> {
+async fn check_and_download(
+    app: &AppHandle,
+    is_manual: bool,
+) -> Result<(), tauri_plugin_updater::Error> {
     emit(app, &UpdateEvent::Checking);
     let Some(update) = app.updater()?.check().await? else {
         emit(app, &UpdateEvent::UpToDate);
@@ -226,6 +237,15 @@ async fn check_and_download(app: &AppHandle) -> Result<(), tauri_plugin_updater:
         .await?;
 
     let version = update.version.clone();
+    // A silent scheduler download that finished *after* the user turned
+    // auto-update OFF must be discarded — honoring set_auto_update_enabled's
+    // guarantee that an in-flight silent download "won't be parked/installed
+    // while disabled". Manual checks always park so restart_to_update works.
+    // (A tiny TOCTOU remains if the toggle flips between this check and the
+    // park; install_pending_on_exit re-checks the preference and still gates.)
+    if !is_manual && !auto_update_enabled(app) {
+        return Ok(());
+    }
     if let Ok(mut guard) = app.state::<PendingUpdate>().update.lock() {
         *guard = Some((update, bytes));
     }

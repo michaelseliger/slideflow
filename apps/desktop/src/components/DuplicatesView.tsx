@@ -12,14 +12,18 @@ import Thumbnail from "./Thumbnail";
  *  Self-fetching like StatsView; the slide grid stays empty behind it. */
 export default function DuplicatesView() {
   const [groups, setGroups] = useState<DuplicateGroup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const semanticReady = useSemantic((s) => s.status?.state === "ready");
 
   const load = useCallback(() => {
     setGroups(null);
+    setError(null);
     api
       .listDuplicateGroups()
       .then(setGroups)
-      .catch(() => setGroups([]));
+      // A failed command must not masquerade as the empty-success state
+      // ("No duplicates found"); surface it so Refresh is an obvious retry.
+      .catch((err) => setError(String(err)));
   }, []);
 
   // Reload when the model comes up (near groups appear) and on rescans.
@@ -56,7 +60,13 @@ export default function DuplicatesView() {
           </p>
         )}
 
-        {groups == null ? (
+        {error != null ? (
+          <div className="flex flex-col items-center py-20 text-center">
+            <Copy size={28} className="mb-3 text-subtle/40" />
+            <div className="text-body font-medium text-ink">Couldn't scan for duplicates</div>
+            <p className="mt-1 max-w-sm text-caption text-subtle">{error}</p>
+          </div>
+        ) : groups == null ? (
           <div className="py-16 text-center text-caption text-subtle">Scanning for duplicates…</div>
         ) : groups.length === 0 ? (
           <div className="flex flex-col items-center py-20 text-center">

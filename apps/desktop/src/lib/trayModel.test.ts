@@ -18,6 +18,7 @@ import {
   deleteTray,
   emptyModel,
   migrate,
+  reconcile,
   renameTray,
   switchTray,
   toPersisted,
@@ -73,8 +74,9 @@ function slide(deckId: number, idx: number): SlideRecord {
   };
 }
 function item(deckId: number, idx: number): TrayItem {
+  const d = deck(deckId);
   const s = slide(deckId, idx);
-  return { uid: uidFor(s), slide: s, deck: deck(deckId) };
+  return { uid: uidFor(d, s), slide: s, deck: d };
 }
 
 let idc = 0;
@@ -199,6 +201,61 @@ function freshId(): string {
     restored.trays["A"].past.length === 0 && restored.trays["B"].future.length === 0,
     "round-trip -> history not persisted",
   );
+})();
+
+// --- 4. reconcile flags moved by durable path, not recycled rowid ----------
+
+(function reconcileByPath() {
+  // Tray holds slide 1 of deck 3 (path /decks/d3.pptx, rowid 3).
+  let m = emptyModel("A");
+  m = commitItems(m, "A", [item(3, 1)]);
+
+  // Same deck present (same path) -> not moved, even if its rowid changed.
+  const movedId = { ...deck(3), id: 99 };
+  m = reconcile(m, [movedId]);
+  check(!activeItems(m)[0].moved, "reconcile -> same path keeps item unmoved despite new rowid");
+
+  // A DIFFERENT deck recycled the old rowid 3 (different path). The trayed
+  // deck's path is gone, so it MUST flag as moved (the recycled-id must not
+  // mask it).
+  const recycled = { ...deck(7), id: 3 }; // path /decks/d7.pptx, rowid 3
+  m = reconcile(m, [recycled]);
+  check(activeItems(m)[0].moved === true, "reconcile -> recycled rowid on a new path flags item moved");
+
+  // The real deck comes back at its original path -> moved clears.
+  m = reconcile(m, [deck(3)]);
+  check(!activeItems(m)[0].moved, "reconcile -> path returning clears moved");
+})();
+
+// --- 5. persisted-uid migration: recompute path-based uid on load ----------
+
+(function uidMigrationOnLoad() {
+  // A v2 blob written before the path-based uid change: items carry the OLD
+  // `${deck_id}:${slide_index}` uid. On load the uid must be recomputed from
+  // the durable deck.path, so dedupe/reconcile/remove keep matching.
+  const d = deck(3); // path /decks/d3.pptx, rowid 3
+  const s = slide(3, 5);
+  const stale = {
+    version: 2,
+    trays: [{ id: "A", name: "Tray 1", items: [{ uid: "3:5", slide: s, deck: d }] }],
+    order: ["A"],
+    activeId: "A",
+    collapsed: false,
+  };
+  const m = migrate(null, JSON.stringify(stale), freshId);
+  const loaded = m.trays["A"].items[0];
+  check(loaded.uid === "/decks/d3.pptx:5", "load -> stale deck_id uid recomputed to path-based");
+  check(loaded.uid === uidFor(d, s), "load -> recomputed uid matches uidFor(deck, slide)");
+})();
+
+(function v1UidMigrationOnLoad() {
+  // The v1 single-tray payload is likewise pre-migration: recompute there too.
+  const d = deck(4);
+  const s = slide(4, 2);
+  const v1Raw = JSON.stringify([{ uid: "4:2", slide: s, deck: d }]);
+  const m = migrate(v1Raw, null, freshId);
+  const loaded = m.trays[m.activeId].items[0];
+  check(loaded.uid === uidFor(d, s), "v1 load -> stale uid recomputed to path-based");
 })();
 
 if (failures > 0) {

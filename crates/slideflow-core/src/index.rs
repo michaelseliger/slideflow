@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::types::Value;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
@@ -330,21 +330,7 @@ impl Library {
     /// Remove a root and all decks/slides under it.
     pub fn remove_root(&mut self, root_id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "SELECT s.id FROM slides s JOIN decks d ON d.id = s.deck_id WHERE d.root_id = ?1",
-            )?;
-            let ids: Vec<i64> = stmt
-                .query_map(params![root_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            for id in ids {
-                tx.execute("DELETE FROM slides_fts WHERE rowid=?1", params![id])?;
-            }
-        }
-        tx.execute(
-            "DELETE FROM slides WHERE deck_id IN (SELECT id FROM decks WHERE root_id=?1)",
-            params![root_id],
-        )?;
+        purge_root_slides(&tx, root_id)?;
         tx.execute("DELETE FROM decks WHERE root_id=?1", params![root_id])?;
         tx.execute("DELETE FROM roots WHERE id=?1", params![root_id])?;
         tx.commit()?;
@@ -461,9 +447,28 @@ impl Library {
         };
 
         // Enumerate candidate .pptx files across all roots.
+        //
+        // A root that cannot be read (unmounted external/network volume, revoked
+        // permission) is UNAVAILABLE, not empty: enumerating it yields zero
+        // candidates, and if we then ran the vanished-file removal pass over its
+        // decks we would wipe the entire corpus under it (and its embeddings),
+        // forcing a full re-parse/re-embed on remount. Probe each root up front;
+        // an unreadable one is recorded and its decks are preserved (removal is
+        // skipped by root_id below). An existing-but-empty root reads as
+        // available, so genuinely-deleted files under it are still pruned.
         let mut candidates: Vec<(i64, PathBuf)> = Vec::new();
+        let mut unavailable_roots: HashSet<i64> = HashSet::new();
+        let mut skipped_roots: Vec<(String, String)> = Vec::new();
         for (root_id, root_path, raw_set, prune_set) in &roots {
             let root = Path::new(root_path);
+            if std::fs::read_dir(root).is_err() {
+                unavailable_roots.insert(*root_id);
+                let reason = "root unavailable (offline or unreadable); \
+                              its indexed decks were preserved"
+                    .to_string();
+                skipped_roots.push((root_path.clone(), reason));
+                continue;
+            }
             for entry in WalkDir::new(root_path)
                 .into_iter()
                 .filter_entry(|e| {
@@ -501,6 +506,13 @@ impl Library {
         let mut removed = 0usize;
         let mut skipped: Vec<(String, String)> = Vec::new();
 
+        // Report each unavailable root as a scan issue so the UI can surface why
+        // its decks weren't refreshed (they are deliberately preserved below).
+        for (path, reason) in skipped_roots {
+            progress(ScanEvent::Skipped { path: path.clone(), reason: reason.clone() });
+            skipped.push((path, reason));
+        }
+
         for (i, (root_id, path)) in candidates.into_iter().enumerate() {
             let done = i + 1;
             let path_str = path.to_string_lossy().to_string();
@@ -533,9 +545,15 @@ impl Library {
                 continue;
             }
 
-            match extract_deck(&path) {
-                Ok(deck) => {
-                    self.index_deck(root_id, &path_str, &deck, mtime, size, &hash)?;
+            // Per-file failures NEVER abort the scan (module contract). Both the
+            // parse (`extract_deck`) and the DB write (`index_deck`, whose
+            // transaction is not committed on error) are caught: the file is
+            // recorded as skipped and the scan continues. `index_deck`'s inline
+            // embed step is best-effort and cannot reach here (see index_deck).
+            let outcome = extract_deck(&path)
+                .and_then(|deck| self.index_deck(root_id, &path_str, &deck, mtime, size, &hash));
+            match outcome {
+                Ok(()) => {
                     indexed += 1;
                     progress(ScanEvent::Deck { path: path_str, done, total });
                 }
@@ -547,15 +565,20 @@ impl Library {
             }
         }
 
-        // Remove decks whose files vanished.
-        let stored: Vec<(i64, String)> = {
-            let mut stmt = self.conn.prepare("SELECT id, path FROM decks")?;
+        // Remove decks whose files vanished — but never prune decks under a root
+        // that was unavailable this scan: it contributed no candidates, so all its
+        // decks look vanished when the volume is merely offline.
+        let stored: Vec<(i64, i64, String)> = {
+            let mut stmt = self.conn.prepare("SELECT id, root_id, path FROM decks")?;
             let v = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             v
         };
-        for (deck_id, deck_path) in stored {
+        for (deck_id, deck_root_id, deck_path) in stored {
+            if unavailable_roots.contains(&deck_root_id) {
+                continue;
+            }
             if !seen.contains(&deck_path) {
                 self.delete_deck(deck_id)?;
                 removed += 1;
@@ -563,7 +586,20 @@ impl Library {
         }
 
         let now = now_unix();
-        self.conn.execute("UPDATE roots SET last_scan_unix=?1", params![now])?;
+        if unavailable_roots.is_empty() {
+            self.conn.execute("UPDATE roots SET last_scan_unix=?1", params![now])?;
+        } else {
+            // Don't advance last_scan_unix for roots we couldn't read this run —
+            // their timestamp should keep reflecting their last successful scan.
+            let mut vals: Vec<Value> = Vec::with_capacity(unavailable_roots.len() + 1);
+            vals.push(Value::Integer(now));
+            for id in &unavailable_roots {
+                vals.push(Value::Integer(*id));
+            }
+            let ph = vec!["?"; unavailable_roots.len()].join(",");
+            let sql = format!("UPDATE roots SET last_scan_unix=? WHERE id NOT IN ({ph})");
+            self.conn.execute(&sql, params_from_iter(vals))?;
+        }
 
         // Record the run for the stats view (best-effort). Insert history first so
         // we can attach one scan_issues row per buffered skip via its rowid.
@@ -654,17 +690,7 @@ impl Library {
         let deck_id = match existing {
             Some(id) => {
                 // Purge old slides + their FTS rows before rewriting.
-                let old_ids: Vec<i64> = {
-                    let mut stmt = tx.prepare("SELECT id FROM slides WHERE deck_id=?1")?;
-                    let v = stmt
-                        .query_map(params![id], |r| r.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    v
-                };
-                for sid in old_ids {
-                    tx.execute("DELETE FROM slides_fts WHERE rowid=?1", params![sid])?;
-                }
-                tx.execute("DELETE FROM slides WHERE deck_id=?1", params![id])?;
+                purge_deck_slides(&tx, id)?;
                 tx.execute(
                     "UPDATE decks SET root_id=?2, file_name=?3, title=?4, author=?5, \
                      slide_count=?6, modified_unix=?7, size_bytes=?8, slide_width_emu=?9, \
@@ -751,6 +777,14 @@ impl Library {
         // With a model attached, embed any of this deck's slide texts not already
         // vectorized (keyed by text_hash, so unchanged text and cross-deck reuse
         // are skipped). Runs after the slide rows are committed.
+        //
+        // This step is BEST-EFFORT and must never propagate: the deck's rows and
+        // content_hash are already committed, so a failure here (embedder /
+        // tokenizer error, model files deleted mid-scan) must not abort the whole
+        // scan or mark the deck as skipped — a skipped deck would be treated as
+        // unchanged on the next rescan and never get embeddings. The post-scan
+        // backfill (`spawn_backfill_if_enabled`) re-embeds anything missing,
+        // keyed by text_hash, so the vectors self-heal.
         if self.embedder.is_some() {
             let pairs: Vec<(String, String)> = deck
                 .slides
@@ -760,23 +794,14 @@ impl Library {
                     _ => None,
                 })
                 .collect();
-            self.embed_and_store_missing(&pairs, None)?;
+            let _ = self.embed_and_store_missing(&pairs, None);
         }
         Ok(())
     }
 
     fn delete_deck(&mut self, deck_id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        {
-            let mut stmt = tx.prepare("SELECT id FROM slides WHERE deck_id=?1")?;
-            let ids: Vec<i64> = stmt
-                .query_map(params![deck_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            for sid in ids {
-                tx.execute("DELETE FROM slides_fts WHERE rowid=?1", params![sid])?;
-            }
-        }
-        tx.execute("DELETE FROM slides WHERE deck_id=?1", params![deck_id])?;
+        purge_deck_slides(&tx, deck_id)?;
         tx.execute("DELETE FROM decks WHERE id=?1", params![deck_id])?;
         tx.commit()?;
         // This deck's slide rowids are freed and may be recycled by a later
@@ -2241,20 +2266,57 @@ fn row_to_slide(r: &Row, base: usize) -> rusqlite::Result<SlideRecord> {
     })
 }
 
+/// Delete a deck's slides and their contentless-FTS rows in the given
+/// transaction. The FTS purge MUST run before the `slides` delete — it reads the
+/// slide ids from the `slides` table via the `IN` subquery, so deleting the rows
+/// first would orphan the FTS entries.
+fn purge_deck_slides(tx: &Transaction, deck_id: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM slides_fts WHERE rowid IN (SELECT id FROM slides WHERE deck_id=?1)",
+        params![deck_id],
+    )?;
+    tx.execute("DELETE FROM slides WHERE deck_id=?1", params![deck_id])?;
+    Ok(())
+}
+
+/// Delete every slide (and its FTS row) under all decks belonging to `root_id`.
+/// Same ordering invariant as [`purge_deck_slides`]: FTS rows first.
+fn purge_root_slides(tx: &Transaction, root_id: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM slides_fts WHERE rowid IN \
+         (SELECT id FROM slides WHERE deck_id IN (SELECT id FROM decks WHERE root_id=?1))",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM slides WHERE deck_id IN (SELECT id FROM decks WHERE root_id=?1)",
+        params![root_id],
+    )?;
+    Ok(())
+}
+
+/// Escape LIKE metacharacters (`\`, `%`, `_`) so a user filter value is matched
+/// literally under an `ESCAPE '\'` clause. The backslash MUST be escaped first,
+/// otherwise the escapes added for `%`/`_` would themselves be double-escaped.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 /// Append `SearchFilters` clauses (over table alias `d`) and their bound params.
 fn push_filters(filters: &SearchFilters, clauses: &mut Vec<String>, params: &mut Vec<Value>) {
     if let Some(q) = &filters.deck_query {
         if !q.is_empty() {
-            clauses.push("(LOWER(d.file_name) LIKE ? OR LOWER(d.title) LIKE ?)".into());
-            let like = format!("%{}%", q.to_lowercase());
+            clauses.push(
+                "(LOWER(d.file_name) LIKE ? ESCAPE '\\' OR LOWER(d.title) LIKE ? ESCAPE '\\')".into(),
+            );
+            let like = format!("%{}%", escape_like(&q.to_lowercase()));
             params.push(Value::Text(like.clone()));
             params.push(Value::Text(like));
         }
     }
     if let Some(p) = &filters.path_prefix {
         if !p.is_empty() {
-            clauses.push("d.path LIKE ?".into());
-            params.push(Value::Text(format!("{p}%")));
+            clauses.push("d.path LIKE ? ESCAPE '\\'".into());
+            params.push(Value::Text(format!("{}%", escape_like(p))));
         }
     }
     if let Some(from) = filters.modified_from {
@@ -2771,15 +2833,32 @@ pub fn watch_roots(
     Ok(LibraryWatcher { watcher })
 }
 
-/// A watch event path we care about: a `.pptx` that is not a `~$` lockfile.
+/// A watch event path we care about. This is `.pptx` files (not `~$` lockfiles)
+/// PLUS directory-shaped paths, because deleting/renaming/moving a folder of
+/// decks (e.g. dragging a subfolder to the Trash) surfaces on FSEvents as a
+/// single event for the *directory* path — no per-`.pptx` events — and would
+/// otherwise never trigger a rescan, leaving the index serving decks whose files
+/// are gone. A vanished path can't be `stat`'d, so directory-shaped is
+/// approximated as "has no file extension"; the debounced, incremental rescan
+/// then decides what actually changed. Consumers of `on_change` must therefore
+/// NOT assume every reported path is an existing `.pptx`.
+///
+/// Hidden entries (leading `.`, e.g. `.DS_Store`) and extension-bearing non-pptx
+/// files (`.tmp`, thumbnails, `~$` lockfiles) are ignored so routine filesystem
+/// churn under a root doesn't provoke constant rescans.
 fn watch_relevant(p: &Path) -> bool {
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if name.starts_with("~$") {
+    // Office lockfiles and hidden files (incl. .DS_Store) are never relevant.
+    if name.starts_with("~$") || name.starts_with('.') {
         return false;
     }
-    name.to_ascii_lowercase().ends_with(".pptx")
+    if name.to_ascii_lowercase().ends_with(".pptx") {
+        return true;
+    }
+    // No extension → treat as a directory-shaped path (folder move/delete).
+    p.extension().is_none()
 }
 
 #[cfg(test)]
@@ -3612,6 +3691,140 @@ mod tests {
     }
 
     #[test]
+    fn filter_deck_query_escapes_like_metacharacters() {
+        // `_` and `%` in a deck filter must match literally, not as LIKE
+        // wildcards — otherwise `q_1` would also match `q31.pptx`.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Underscore")
+            .slide(SlideSpec::new("T").bullets(&["shared"]))
+            .write_to(&dir.path().join("q_1.pptx"))
+            .unwrap();
+        DeckSpec::new("Digits")
+            .slide(SlideSpec::new("T").bullets(&["shared"]))
+            .write_to(&dir.path().join("q31.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let filters = SearchFilters { deck_query: Some("q_1".into()), ..Default::default() };
+        let hits = lib.search("", &filters).unwrap();
+        assert!(!hits.is_empty(), "the literal q_1.pptx must still match");
+        assert!(
+            hits.iter().all(|h| h.deck.file_name.contains("q_1")),
+            "underscore is literal: q31.pptx must not match q_1"
+        );
+    }
+
+    #[test]
+    fn filter_path_prefix_escapes_like_metacharacters() {
+        // The same escaping applies to path_prefix so an `_` in a folder name
+        // isn't a wildcard (and a Windows `\` in a path stays inert under ESCAPE).
+        let dir = tempfile::tempdir().unwrap();
+        let sub_us = dir.path().join("a_x");
+        let sub_dg = dir.path().join("a1x");
+        std::fs::create_dir_all(&sub_us).unwrap();
+        std::fs::create_dir_all(&sub_dg).unwrap();
+        DeckSpec::new("Us")
+            .slide(SlideSpec::new("T").bullets(&["shared"]))
+            .write_to(&sub_us.join("d.pptx"))
+            .unwrap();
+        DeckSpec::new("Dg")
+            .slide(SlideSpec::new("T").bullets(&["shared"]))
+            .write_to(&sub_dg.join("d.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let sep = std::path::MAIN_SEPARATOR;
+        // Prefix ends at `.../a_` — with `_` treated literally this excludes a1x.
+        let prefix = format!("{}{sep}a_", dir.path().to_string_lossy());
+        let filters = SearchFilters { path_prefix: Some(prefix), ..Default::default() };
+        let hits = lib.search("shared", &filters).unwrap();
+        assert!(!hits.is_empty());
+        let us_dir = format!("{sep}a_x{sep}");
+        assert!(
+            hits.iter().all(|h| h.deck.path.contains(&us_dir)),
+            "underscore is literal: a1x must not match the a_ prefix"
+        );
+    }
+
+    #[test]
+    fn scan_preserves_decks_when_root_unavailable() {
+        // A root that cannot be read (offline volume / revoked permission) must
+        // NOT have its decks pruned as vanished — that would wipe the corpus and
+        // its embeddings, forcing a full re-parse+re-embed on remount.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vol");
+        std::fs::create_dir_all(&root).unwrap();
+        DeckSpec::new("Finance")
+            .slide(SlideSpec::new("Revenue").bullets(&["quarterly"]))
+            .write_to(&root.join("finance.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(&root).unwrap();
+        let first = scan_silent(&mut lib);
+        assert!(matches!(first, ScanEvent::Finished { indexed: 1, .. }));
+        assert_eq!(lib.stats().unwrap().0, 1);
+
+        // Simulate the volume going offline: the root path becomes unreadable.
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let second = scan_silent(&mut lib);
+        let ScanEvent::Finished { indexed, removed, unchanged, skipped } = second else {
+            panic!("expected Finished");
+        };
+        assert_eq!(indexed, 0);
+        assert_eq!(unchanged, 0);
+        assert_eq!(removed, 0, "an offline root must not prune its decks");
+        assert_eq!(skipped, 1, "the unavailable root is reported as a scan issue");
+        assert_eq!(lib.stats().unwrap().0, 1, "deck survives an offline rescan");
+        assert!(!lib.search("quarterly", &SearchFilters::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn embedding_failure_does_not_abort_scan() {
+        // The module contract: per-file failures never abort the scan. An inline
+        // embedding failure (model/tokenizer error) must not propagate — the deck
+        // rows commit, the scan finishes, and the post-scan backfill re-embeds.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("A")
+            .slide(SlideSpec::new("Alpha").bullets(&["aaa"]))
+            .write_to(&dir.path().join("a.pptx"))
+            .unwrap();
+        DeckSpec::new("B")
+            .slide(SlideSpec::new("Beta").bullets(&["bbb"]))
+            .write_to(&dir.path().join("b.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        let fake = Arc::new(FakeEmbedder::new(16));
+        fake.set_fail_passages(true);
+        lib.set_embedder(Some(fake.clone()));
+        lib.add_root(dir.path()).unwrap();
+
+        // Inline embedding fails for every deck, yet the scan completes cleanly.
+        let finished = scan_silent(&mut lib);
+        let ScanEvent::Finished { indexed, skipped, .. } = finished else {
+            panic!("expected Finished");
+        };
+        assert_eq!(indexed, 2, "decks are indexed despite the embed failure");
+        assert_eq!(skipped, 0, "an embed failure must not mark a deck skipped");
+        assert_eq!(embedding_rows(&lib), 0, "no vectors written while the embedder fails");
+        // Deck rows and FTS are intact — lexical search still works.
+        assert!(!lib.search("alpha", &SearchFilters::default()).unwrap().is_empty());
+
+        // The backfill self-heals once the embedder recovers.
+        fake.set_fail_passages(false);
+        let pending = lib.pending_embedding_texts().unwrap();
+        assert_eq!(pending.len(), 2);
+        for chunk in pending.chunks(1) {
+            lib.embed_and_store(chunk).unwrap();
+        }
+        assert_eq!(embedding_rows(&lib), 2, "missing vectors are backfilled");
+    }
+
+    #[test]
     fn filter_modified_from_excludes_older() {
         let dir = tempfile::tempdir().unwrap();
         let old_path = dir.path().join("old.pptx");
@@ -4275,6 +4488,25 @@ mod tests {
             .expect("on_change should fire for the new .pptx");
         assert!(received.iter().any(|p| p.ends_with("watched.pptx")));
         drop(watcher);
+    }
+
+    #[test]
+    fn watch_relevant_forwards_pptx_and_directories() {
+        // .pptx files are relevant (any case)...
+        assert!(watch_relevant(Path::new("/decks/report.pptx")));
+        assert!(watch_relevant(Path::new("/decks/REPORT.PPTX")));
+        // ...as are directory-shaped (extensionless) paths, so a folder
+        // move/delete (which FSEvents reports as one directory event) triggers a
+        // rescan instead of silently leaving the index stale.
+        assert!(watch_relevant(Path::new("/decks/Q3 Decks")));
+        assert!(watch_relevant(Path::new("/decks/archived")));
+        // Office lockfiles, hidden entries, and non-pptx files are ignored so
+        // routine filesystem churn under a root doesn't provoke constant rescans.
+        assert!(!watch_relevant(Path::new("/decks/~$report.pptx")));
+        assert!(!watch_relevant(Path::new("/decks/.DS_Store")));
+        assert!(!watch_relevant(Path::new("/decks/.hidden")));
+        assert!(!watch_relevant(Path::new("/decks/thumb.png")));
+        assert!(!watch_relevant(Path::new("/decks/scratch.tmp")));
     }
 
     #[test]

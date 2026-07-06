@@ -5,7 +5,7 @@ use roxmltree::Node;
 
 use super::color::Rgba;
 use super::fill::{Fill, Stroke};
-use super::{a, ch, f_attr, fnum, Ctx, EMU_PER_PT};
+use super::{a, ch, f_attr, fnum, truthy, Ctx, EMU_PER_PT};
 
 /// Stroke-only straight/bent connector presets: legitimately zero-extent
 /// along one axis (a purely horizontal/vertical line has `cx`/`cy` = 0).
@@ -41,8 +41,8 @@ pub(crate) fn parse_xfrm(node: Node) -> Xfrm {
         cx: f_attr(ext, "cx"),
         cy: f_attr(ext, "cy"),
         rot: a(node, "rot").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
-        flip_h: a(node, "flipH") == Some("1"),
-        flip_v: a(node, "flipV") == Some("1"),
+        flip_h: truthy(node, "flipH"),
+        flip_v: truthy(node, "flipV"),
     }
 }
 
@@ -84,33 +84,41 @@ pub(crate) struct Rect {
     pub(crate) h: f64,
 }
 
+/// Build an SVG transform string for a rotation (`rot` in 60000ths of a degree)
+/// and optional H/V flip about the center `(cx, cy)`. Returns `""` for the
+/// identity case (no rotation, no flip). Shared by [`Rect::svg_transform`] and
+/// group rendering so the shape path and the group path emit identical markup.
+pub(crate) fn rot_flip_transform(rot: i64, flip_h: bool, flip_v: bool, cx: f64, cy: f64) -> String {
+    let mut parts = String::new();
+    if rot != 0 {
+        let deg = rot as f64 / 60000.0;
+        parts.push_str(&format!("rotate({} {} {})", fnum(deg), fnum(cx), fnum(cy)));
+    }
+    if flip_h || flip_v {
+        let sx = if flip_h { -1.0 } else { 1.0 };
+        let sy = if flip_v { -1.0 } else { 1.0 };
+        if !parts.is_empty() {
+            parts.push(' ');
+        }
+        parts.push_str(&format!(
+            "translate({} {}) scale({} {}) translate({} {})",
+            fnum(cx),
+            fnum(cy),
+            fnum(sx),
+            fnum(sy),
+            fnum(-cx),
+            fnum(-cy)
+        ));
+    }
+    parts
+}
+
 impl Rect {
     /// Build an SVG transform string for rotation/flip about the rect's center.
     pub(crate) fn svg_transform(&self, x: &Xfrm) -> String {
         let cx = self.x + self.w / 2.0;
         let cy = self.y + self.h / 2.0;
-        let mut parts = String::new();
-        if x.rot != 0 {
-            let deg = x.rot as f64 / 60000.0;
-            parts.push_str(&format!("rotate({} {} {})", fnum(deg), fnum(cx), fnum(cy)));
-        }
-        if x.flip_h || x.flip_v {
-            let sx = if x.flip_h { -1.0 } else { 1.0 };
-            let sy = if x.flip_v { -1.0 } else { 1.0 };
-            if !parts.is_empty() {
-                parts.push(' ');
-            }
-            parts.push_str(&format!(
-                "translate({} {}) scale({} {}) translate({} {})",
-                fnum(cx),
-                fnum(cy),
-                fnum(sx),
-                fnum(sy),
-                fnum(-cx),
-                fnum(-cy)
-            ));
-        }
-        parts
+        rot_flip_transform(x.rot, x.flip_h, x.flip_v, cx, cy)
     }
 }
 

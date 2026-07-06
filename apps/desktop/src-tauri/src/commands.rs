@@ -19,7 +19,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use slideflow_core::dragout::cache_key;
 use slideflow_core::export::{
-    export_pdf, export_pngs, render_slide_png_from, PdfOptions, PngOptions,
+    deck_stem, export_pdf, export_pngs, render_slide_png_from, sanitize_component, PdfOptions,
+    PngOptions,
 };
 use slideflow_core::index::Library;
 use slideflow_core::model::{
@@ -49,8 +50,10 @@ pub struct AppState {
     /// PNG icon written when a slide is dragged out or saved (see
     /// [`prepare_slide_drag`]). Wiped on every launch (lib.rs setup).
     pub dragout_dir: PathBuf,
-    /// Guards against two concurrent scans stepping on each other.
-    pub scanning: AtomicBool,
+    /// Guards against two concurrent scans stepping on each other. An `Arc` so
+    /// the background scan thread can hold a `'static` handle in an RAII guard
+    /// that releases the flag even on a panic-unwind (see [`ScanFlagGuard`]).
+    pub scanning: Arc<AtomicBool>,
     /// Bounds how many slide renders run at once. Rendering fully inflates a
     /// deck's zip and is CPU-bound, so a scroll burst of ~20 tile requests must
     /// not spawn 20 parallel 100 MB decompressions. Two keeps the pipeline fed
@@ -87,7 +90,7 @@ impl AppState {
             scan_library: Mutex::new(scan_library),
             thumbs_dir,
             dragout_dir,
-            scanning: AtomicBool::new(false),
+            scanning: Arc::new(AtomicBool::new(false)),
             render_permits: Semaphore::new(RENDER_CONCURRENCY),
             deck_cache: Mutex::new(Vec::new()),
             dragout_inflight: Mutex::new(HashSet::new()),
@@ -162,6 +165,20 @@ pub async fn set_root_excludes(
 // Scanning (background thread, event-driven)
 // ---------------------------------------------------------------------------
 
+/// RAII release of the `scanning` flag. Constructed at the top of the scan
+/// thread so the flag clears on *every* exit path — normal return, an early
+/// `return` on a poisoned lock, or a panic-unwind out of `Library::scan`.
+/// Without this a panic would leave `scanning` wedged `true` forever: every
+/// later `start_scan` would silently no-op and `clear_index` would fail until
+/// the app restarts.
+struct ScanFlagGuard(Arc<AtomicBool>);
+
+impl Drop for ScanFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Kick off an incremental rescan of all roots on a background thread.
 ///
 /// Progress is streamed to the frontend as `scan:event` events carrying a
@@ -180,13 +197,18 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
     }
 
     let app_for_thread = app.clone();
+    let scanning_flag = Arc::clone(&state.scanning);
     std::thread::spawn(move || {
+        // Release the flag on any exit path, panics included. Dropped
+        // explicitly once the thumb sweep is done (below) so the sweep stays
+        // inside the scan's mutual-exclusion window — a following scan can't
+        // index a new deck whose fresh thumb this sweep would then delete.
+        let flag_guard = ScanFlagGuard(scanning_flag);
         let state = app_for_thread.state::<AppState>();
         let (result, valid) = {
             let mut lib = match state.scan_library.lock() {
                 Ok(lib) => lib,
                 Err(_) => {
-                    state.scanning.store(false, Ordering::SeqCst);
                     let _ = app_for_thread.emit("scan:error", "library lock poisoned");
                     return;
                 }
@@ -200,12 +222,17 @@ pub async fn start_scan(app: AppHandle) -> Result<bool, String> {
             let valid = result.as_ref().ok().and_then(|_| lib.all_deck_hashes().ok());
             (result, valid)
         };
-        state.scanning.store(false, Ordering::SeqCst);
         // Reclaim orphaned cache files: decks that vanished or changed hash this
         // scan, plus any legacy `<id>.svg` files from before content-addressing.
+        // Still under the scanning flag so it can't race a following scan's
+        // freshly-written thumbnails.
         if let Some(valid) = valid {
             sweep_thumbs(&state.thumbs_dir, &valid);
         }
+        // Sweep complete — release the flag before the (non-exclusive) post-scan
+        // cache refresh + backfill/font-harvest spawns so a rescan or clear_index
+        // is only ever blocked through the sweep.
+        drop(flag_guard);
         match result {
             Err(err) => {
                 // A failed scan still deletes+reinserts deck/slide rows on the
@@ -642,29 +669,6 @@ pub struct SlideDragPaths {
     pub icon: String,
 }
 
-/// Deck file stem (name without extension) for user-facing names/titles.
-/// Local mirror of `export.rs`'s private helper.
-fn deck_stem(pptx_path: &str) -> String {
-    Path::new(pptx_path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "deck".to_string())
-}
-
-/// Replace path separators / colons and drop control characters so a stem is
-/// safe as a single path component. Local mirror of `export.rs`'s private
-/// `sanitize` (deliberately not re-exported from that module).
-fn sanitize_component(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' => '-',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect();
-    cleaned.trim().to_string()
-}
 
 /// The pristine, user-visible file name for one slide's drag-out `.pptx` —
 /// exactly what lands wherever the user drops it, so no cache tail here. The
@@ -1136,5 +1140,29 @@ mod tests {
         let b = tmp_sibling(final_path);
         assert_ne!(a, b, "the monotonic sequence makes each temp name unique");
         assert_eq!(a.parent(), final_path.parent(), "temp sits beside its target (same FS)");
+    }
+
+    #[test]
+    fn scan_flag_guard_releases_on_normal_drop() {
+        let flag = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = ScanFlagGuard(Arc::clone(&flag));
+            assert!(flag.load(Ordering::SeqCst), "flag stays set while the guard lives");
+        }
+        assert!(!flag.load(Ordering::SeqCst), "dropping the guard clears the flag");
+    }
+
+    #[test]
+    fn scan_flag_guard_releases_on_panic_unwind() {
+        // The whole point of the guard: a panic inside the scan thread must
+        // still release `scanning`, or every later scan silently no-ops.
+        let flag = Arc::new(AtomicBool::new(true));
+        let flag_for_thread = Arc::clone(&flag);
+        let result = std::panic::catch_unwind(move || {
+            let _guard = ScanFlagGuard(flag_for_thread);
+            panic!("simulated Library::scan panic");
+        });
+        assert!(result.is_err(), "the closure panicked");
+        assert!(!flag.load(Ordering::SeqCst), "an unwind past the guard still clears the flag");
     }
 }

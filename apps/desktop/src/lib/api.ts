@@ -50,6 +50,42 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args);
 }
 
+/**
+ * A Tauri event channel with a browser-mode in-memory fallback bus.
+ *
+ * `on(handler)` subscribes and resolves to an unlisten function: in the native
+ * shell it lazily imports `listen` (kept per-subscription so browser bundles
+ * split it out); in a plain browser it registers on an in-memory Set. `emit(ev)`
+ * drives that fallback bus so the `mock*` flows below can stream events in
+ * `pnpm dev` — it's inert in the native shell (nothing subscribes to the bus).
+ *
+ * This collapses the ~10-line subscribe/unlisten/mock-Set boilerplate that was
+ * copy-pasted across every event stream into one definition per channel.
+ */
+interface Channel<T> {
+  on(handler: (payload: T) => void): Promise<() => void>;
+  emit(ev: T): void;
+}
+
+function channel<T>(event: string): Channel<T> {
+  const bus = new Set<(ev: T) => void>();
+  return {
+    async on(handler) {
+      if (isTauri()) {
+        const { listen } = await import("@tauri-apps/api/event");
+        return listen<T>(event, (e) => handler(e.payload));
+      }
+      bus.add(handler);
+      return () => {
+        bus.delete(handler);
+      };
+    },
+    emit(ev) {
+      for (const l of bus) l(ev);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Roots / folders
 // ---------------------------------------------------------------------------
@@ -103,21 +139,28 @@ export function clearIndex(): Promise<void> {
  * In browser mode this wires up an in-memory event bus that `mockStartScan`
  * drives.
  */
-export async function onScanEvent(
+export function onScanEvent(
   handler: (ev: ScanEvent) => void,
 ): Promise<() => void> {
-  if (isTauri()) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<ScanEvent>("scan:event", (e) => handler(e.payload));
-    return un;
-  }
-  mockScanListeners.add(handler);
-  return () => mockScanListeners.delete(handler);
+  return scanChannel.on(handler);
 }
 
-const mockScanListeners = new Set<(ev: ScanEvent) => void>();
+/**
+ * Subscribe to `scan:error` — the terminal channel the host emits when a scan
+ * aborts (lock poisoned, `lib.scan()` returned `Err`) instead of a `finished`
+ * event. Without this the UI would stay wedged in "scanning" forever. Returns an
+ * unlisten function; inert in browser mode (the mock scan never fails).
+ */
+export function onScanError(
+  handler: (message: string) => void,
+): Promise<() => void> {
+  return scanErrorChannel.on(handler);
+}
+
+const scanChannel = channel<ScanEvent>("scan:event");
+const scanErrorChannel = channel<string>("scan:error");
 function emitMockScan(ev: ScanEvent) {
-  for (const l of mockScanListeners) l(ev);
+  scanChannel.emit(ev);
 }
 async function mockStartScan(): Promise<boolean> {
   // Re-seed the mock library first so a rebuild after clearIndex() repopulates.
@@ -355,21 +398,15 @@ export function exportTrayPngs(
  * Subscribe to `export:event` progress while a PDF/PNG export runs. Returns an
  * unlisten function. In browser mode `mockExport` drives an in-memory bus.
  */
-export async function onExportEvent(
+export function onExportEvent(
   handler: (ev: ExportEvent) => void,
 ): Promise<() => void> {
-  if (isTauri()) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<ExportEvent>("export:event", (e) => handler(e.payload));
-    return un;
-  }
-  mockExportListeners.add(handler);
-  return () => mockExportListeners.delete(handler);
+  return exportChannel.on(handler);
 }
 
-const mockExportListeners = new Set<(ev: ExportEvent) => void>();
+const exportChannel = channel<ExportEvent>("export:event");
 function emitMockExport(ev: ExportEvent) {
-  for (const l of mockExportListeners) l(ev);
+  exportChannel.emit(ev);
 }
 /** Browser-mode fake export: streams short per-slide progress, then hands off to
  *  the mock library for a plausible report (and "Most exported" bump). The
@@ -481,16 +518,10 @@ export function updatesSupported(): Promise<boolean> {
 }
 
 /** Subscribe to `update:event` lifecycle events. Returns an unlisten fn. */
-export async function onUpdateEvent(
+export function onUpdateEvent(
   handler: (ev: UpdateEvent) => void,
 ): Promise<() => void> {
-  if (isTauri()) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<UpdateEvent>("update:event", (e) => handler(e.payload));
-    return un;
-  }
-  mockUpdateListeners.add(handler);
-  return () => mockUpdateListeners.delete(handler);
+  return updateChannel.on(handler);
 }
 
 /** Kick off a check (and, if an update exists, a background download).
@@ -523,9 +554,9 @@ export function getAutoUpdateEnabled(): Promise<boolean> {
 
 // Browser-mode fake update flow, opt-in so `pnpm dev` isn't nagged:
 //   localStorage.setItem("slideflow:mockUpdate", "1")
-const mockUpdateListeners = new Set<(ev: UpdateEvent) => void>();
+const updateChannel = channel<UpdateEvent>("update:event");
 function emitMockUpdate(ev: UpdateEvent) {
-  for (const l of mockUpdateListeners) l(ev);
+  updateChannel.emit(ev);
 }
 function mockUpdateEnabled(): boolean {
   return localStorage.getItem("slideflow:mockUpdate") === "1";
@@ -613,41 +644,29 @@ export function listDuplicateGroups(): Promise<DuplicateGroup[]> {
 }
 
 /** Subscribe to `model:download` progress events. Returns an unlisten fn. */
-export async function onModelDownloadEvent(
+export function onModelDownloadEvent(
   handler: (ev: ModelDownloadEvent) => void,
 ): Promise<() => void> {
-  if (isTauri()) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<ModelDownloadEvent>("model:download", (e) => handler(e.payload));
-    return un;
-  }
-  mockModelListeners.add(handler);
-  return () => mockModelListeners.delete(handler);
+  return modelChannel.on(handler);
 }
 
 /** Subscribe to `embed:event` backfill events. Returns an unlisten fn. */
-export async function onEmbedEvent(
+export function onEmbedEvent(
   handler: (ev: EmbedEvent) => void,
 ): Promise<() => void> {
-  if (isTauri()) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<EmbedEvent>("embed:event", (e) => handler(e.payload));
-    return un;
-  }
-  mockEmbedListeners.add(handler);
-  return () => mockEmbedListeners.delete(handler);
+  return embedChannel.on(handler);
 }
 
 // Browser-mode fake model download + backfill, so `pnpm dev` demos the whole
 // consent → download → indexing → ready flow without a native shell.
-const mockModelListeners = new Set<(ev: ModelDownloadEvent) => void>();
-const mockEmbedListeners = new Set<(ev: EmbedEvent) => void>();
+const modelChannel = channel<ModelDownloadEvent>("model:download");
+const embedChannel = channel<EmbedEvent>("embed:event");
 let mockDownloadCanceled = false;
 function emitMockModel(ev: ModelDownloadEvent) {
-  for (const l of mockModelListeners) l(ev);
+  modelChannel.emit(ev);
 }
 function emitMockEmbed(ev: EmbedEvent) {
-  for (const l of mockEmbedListeners) l(ev);
+  embedChannel.emit(ev);
 }
 async function mockDownloadModel(): Promise<boolean> {
   mockDownloadCanceled = false;

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useApp, applyTheme } from "./stores/useApp";
-import { useTray } from "./stores/useTray";
+import { useTray, uidFor } from "./stores/useTray";
 import { useUpdater } from "./stores/useUpdater";
 import { useSemantic } from "./stores/useSemantic";
 import { useFonts } from "./stores/useFonts";
@@ -148,6 +148,9 @@ export default function App() {
             void app.startScan();
             return;
           case "z":
+            // ⌘Z / ⌘⇧Z are native text undo/redo while a field is focused —
+            // don't hijack them (and don't preventDefault) to mutate the tray.
+            if (editing) return;
             e.preventDefault();
             if (e.shiftKey) tray.redo();
             else tray.undo();
@@ -168,6 +171,9 @@ export default function App() {
             }
             return;
           case "backspace":
+            // ⌘⌫ is delete-to-line-start while a field is focused; leave it to
+            // the text editor instead of removing tray items.
+            if (editing) return;
             e.preventDefault();
             removeSelectedFromTray();
             return;
@@ -180,12 +186,15 @@ export default function App() {
       // they can't leak to the hidden grid behind the sheet. These sheets have
       // no focus trap, so with focus on <body> (WKWebView doesn't focus buttons
       // on click) their keydowns reach this window listener directly, bypassing
-      // the sheet's own onKeyDown. Escape closes the overlay. ---
-      if (app.settingsOpen || app.aboutOpen) {
+      // the sheet's own onKeyDown. Escape closes the overlay — except the export
+      // sheet, whose own capture-phase listener owns Escape (it must guard a
+      // running export before closing), so here we only swallow the rest. ---
+      if (app.settingsOpen || app.aboutOpen || app.exportOpen) {
         if (key === "Escape") {
           e.preventDefault();
           if (app.settingsOpen) app.setSettingsOpen(false);
-          else app.setAboutOpen(false);
+          else if (app.aboutOpen) app.setAboutOpen(false);
+          // exportOpen: handled by ExportSheet's own listener.
         }
         return;
       }
@@ -300,7 +309,7 @@ function removeSelectedFromTray() {
   const selectedUids = new Set(
     app.results
       .filter((r) => app.selectedIds.has(r.slide.id))
-      .map((r) => `${r.slide.deck_id}:${r.slide.slide_index}`),
+      .map((r) => uidFor(r.deck, r.slide)),
   );
   const toRemove = tray.items.filter((i) => selectedUids.has(i.uid));
   if (toRemove.length > 0) {

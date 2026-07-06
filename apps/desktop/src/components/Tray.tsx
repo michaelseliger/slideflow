@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
 import { X, ChevronDown, Download, AlertTriangle, Trash2, Ratio, Copy } from "lucide-react";
 import { useTray, type TrayItem } from "../stores/useTray";
@@ -22,10 +22,28 @@ export default function Tray() {
   const reorder = useTray((s) => s.reorder);
   const [dragOver, setDragOver] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  // dragenter/dragleave fire per child element and bubble to the section, so a
+  // plain currentTarget===target check misses the real exit when the pointer
+  // leaves the tray over a child (header/filmstrip/EmptyTray). Balance every
+  // bubbled enter against its leave; dragOver clears only at depth 0.
+  const dragDepth = useRef(0);
   const reduce = prefersReducedMotion();
+
+  // A drag that ends anywhere (dropped elsewhere or cancelled) never fires the
+  // tray's onDrop, which would otherwise leave dragOver stuck true. dragend
+  // bubbles from the drag source to window, so reset there as a backstop.
+  useEffect(() => {
+    const reset = () => {
+      dragDepth.current = 0;
+      setDragOver(false);
+    };
+    window.addEventListener("dragend", reset);
+    return () => window.removeEventListener("dragend", reset);
+  }, []);
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    dragDepth.current = 0;
     setDragOver(false);
     const entries = parseDropEntries(e.dataTransfer);
     if (entries.length === 0) return;
@@ -76,6 +94,11 @@ export default function Tray() {
       initial={false}
       animate={{ height }}
       transition={reduce ? { duration: 0 } : spring}
+      onDragEnter={(e) => {
+        if (!e.dataTransfer.types.includes("application/x-slideflow-slides")) return;
+        dragDepth.current += 1;
+        if (!dragOver) setDragOver(true);
+      }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-slideflow-slides")) {
           e.preventDefault();
@@ -84,7 +107,12 @@ export default function Tray() {
         }
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false);
+        if (!e.dataTransfer.types.includes("application/x-slideflow-slides")) return;
+        dragDepth.current -= 1;
+        if (dragDepth.current <= 0) {
+          dragDepth.current = 0;
+          setDragOver(false);
+        }
       }}
       onDrop={onDrop}
     >

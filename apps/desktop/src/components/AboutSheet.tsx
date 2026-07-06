@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { X, Coffee, Globe, Layers } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { useUpdater } from "../stores/useUpdater";
-import { prefersReducedMotion } from "../lib/utils";
 import * as api from "../lib/api";
+import OverlaySheet from "./OverlaySheet";
 
 const WEBSITE_URL = "https://slideflow.app";
 const COFFEE_URL = "https://www.buymeacoffee.com/michaelseliger";
@@ -103,7 +102,6 @@ export function UpdateStatus() {
  *  aware). Links open in the default browser via the opener plugin. */
 export default function AboutSheet() {
   const open = useApp((s) => s.aboutOpen);
-  const reduce = prefersReducedMotion();
   const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
@@ -113,32 +111,8 @@ export default function AboutSheet() {
   const close = () => useApp.getState().setAboutOpen(false);
 
   return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-8 backdrop-blur-sm"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: reduce ? 0 : 0.14 }}
-          onClick={close}
-        >
-          <motion.div
-            className="w-full max-w-sm overflow-hidden rounded-[12px] bg-surface shadow-peek"
-            initial={reduce ? false : { scale: 0.95, opacity: 0, y: 8 }}
-            animate={{ scale: 1, opacity: 1, y: 0 }}
-            exit={reduce ? { opacity: 0 } : { scale: 0.97, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 320, damping: 30 }}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              // Trap keys so grid shortcuts and Escape don't leak to App.tsx's
-              // window listener behind the modal (mirrors ConfirmDialog);
-              // Escape closes.
-              e.stopPropagation();
-              if (e.key === "Escape") close();
-            }}
-          >
-            <div className="flex items-center justify-end px-3 py-2">
+    <OverlaySheet open={open} onClose={close} cardClassName="max-w-sm">
+      <div className="flex items-center justify-end px-3 py-2">
               <button
                 onClick={close}
                 className="rounded-full p-1 text-subtle hover:bg-ink/10"
@@ -178,9 +152,6 @@ export default function AboutSheet() {
                 </button>
               </div>
             </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+    </OverlaySheet>
   );
 }

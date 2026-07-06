@@ -15,7 +15,7 @@ import {
   ArrowDownUp,
 } from "lucide-react";
 import { useApp } from "../stores/useApp";
-import { prefersReducedMotion } from "../lib/utils";
+import { deckDisplayName, prefersReducedMotion } from "../lib/utils";
 
 interface Action {
   id: string;
@@ -138,7 +138,7 @@ export default function CommandPalette() {
     ];
     const deckActions: Action[] = decks.map((d) => ({
       id: `deck-${d.id}`,
-      label: `Jump to: ${d.title || d.file_name}`,
+      label: `Jump to: ${deckDisplayName(d)}`,
       hint: `${d.slide_count} slides`,
       icon: <Presentation size={15} />,
       run: () => void app.setNav({ type: "deck", id: d.id }),
@@ -159,14 +159,21 @@ export default function CommandPalette() {
   const close = () => useApp.getState().setCommandOpen(false);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Only swallow keys the palette actually consumes — cmd shortcuts (⌘K to
+    // toggle closed, etc.) must still reach App.tsx's window listener. Without
+    // stopPropagation, Escape here would bubble on to App and wipe the search
+    // query behind the palette.
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      e.stopPropagation();
       setActive((a) => Math.min(filtered.length - 1, a + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      e.stopPropagation();
       setActive((a) => Math.max(0, a - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       const action = filtered[active];
       if (action) {
         close();
@@ -174,6 +181,7 @@ export default function CommandPalette() {
       }
     } else if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       close();
     }
   };

@@ -76,6 +76,12 @@ pub struct SemanticState {
     /// Re-entrancy guard for the backfill thread.
     backfilling: AtomicBool,
     backfill_cancel: AtomicBool,
+    /// Set when a spawn attempt loses the `backfilling` CAS (a run is already in
+    /// flight, e.g. a disable→enable that raced it). The running backfill honors
+    /// it by respawning once on completion. A user-initiated
+    /// `cancel_embed_backfill` never sets it, so cancel can actually stop the run
+    /// instead of restarting it.
+    backfill_respawn: AtomicBool,
     /// True while E5 weights are being loaded into memory.
     loading: AtomicBool,
     /// True once an embedder is attached to both library connections.
@@ -92,6 +98,7 @@ impl SemanticState {
             download_cancel: AtomicBool::new(false),
             backfilling: AtomicBool::new(false),
             backfill_cancel: AtomicBool::new(false),
+            backfill_respawn: AtomicBool::new(false),
             loading: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             last_error: Mutex::new(None),
@@ -350,6 +357,20 @@ pub fn spawn_embedder_bootstrap(app: AppHandle) {
                 semantic.ready.store(true, Ordering::SeqCst);
                 semantic.set_error(None);
                 semantic.loading.store(false, Ordering::SeqCst);
+                // TOCTOU guard: a disable may have landed between the pref re-check
+                // above and the attach we just did. Its detach_embedder ran while
+                // nothing was attached yet (a no-op that left no deferred repair,
+                // since the scan connection was free), so without this the embedder
+                // would stay attached with ready=true while the pref reads
+                // "disabled" — every scan would inline-embed against the opt-out.
+                // Re-check now that we're attached: any disable whose pref-write
+                // beat this read is torn down here; any that lands after will run
+                // its own detach against the now-attached embedder. detach_embedder
+                // resets ready=false, so a later re-enable bootstraps cleanly.
+                if !semantic_enabled(&app) {
+                    detach_embedder(&app);
+                    return;
+                }
                 spawn_backfill_if_enabled(&app);
             }
             Err(err) => {
@@ -668,34 +689,43 @@ fn spawn_backfill(app: &AppHandle) -> bool {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        // A run is already in flight. Record that a fresh backfill was requested
+        // so the running one respawns once it finishes — this is the disable→enable
+        // race the old code approximated (too broadly) with the plain `canceled`
+        // flag. A user cancel takes a different path and never lands here, so it no
+        // longer masquerades as a respawn request.
+        semantic.backfill_respawn.store(true, Ordering::SeqCst);
         return false;
     }
+    // We own the run now: clear any stale respawn request (a spawner that lost the
+    // CAS to us is already covered by this run) and reset the cancel flag.
+    semantic.backfill_respawn.store(false, Ordering::SeqCst);
     semantic.backfill_cancel.store(false, Ordering::SeqCst);
 
     let app_for_thread = app.clone();
     std::thread::spawn(move || {
         let semantic = app_for_thread.state::<SemanticState>();
         let result = run_backfill(&app_for_thread, &semantic);
-        // Did THIS run stop early on a cancel? run_backfill returns Ok on both a
-        // clean finish and a cancel (it breaks the loop, then runs its tail), so
-        // distinguish via the flag. Read it BEFORE releasing `backfilling`, so a
-        // racing respawn (which resets the flag at spawn) can't clear it first.
-        let canceled = semantic.backfill_cancel.load(Ordering::SeqCst);
+        // Was a fresh backfill requested while this run held `backfilling`? A
+        // spawner that lost the CAS (a disable→enable that raced this run) set
+        // backfill_respawn; consume it with swap so it can't linger and trigger a
+        // spurious respawn later. Read it BEFORE releasing `backfilling`, matching
+        // the discipline the old `canceled` read used. A plain user cancel never
+        // sets this flag, so cancel now stops the run instead of restarting it.
+        let respawn = semantic.backfill_respawn.swap(false, Ordering::SeqCst);
         semantic.backfilling.store(false, Ordering::SeqCst);
         match result {
             Ok(()) => emit_embed(&app_for_thread, &EmbedEvent::Finished),
             Err(message) => emit_embed(&app_for_thread, &EmbedEvent::Error { message }),
         }
-        // A canceled run may have raced a disable→enable: the re-enable's
-        // spawn_backfill_if_enabled lost the `backfilling` CAS (this run still held
-        // it) and gave up, leaving the re-enabled texts unembedded while status
-        // says "ready". Now that we've released `backfilling`, retry once — but
-        // ONLY after a canceled run (an uncanceled complete run must not respawn,
-        // or it would loop forever) and only if the feature is still enabled and
-        // the embedder still up. spawn_backfill_if_enabled re-checks both, and the
-        // fresh spawn resets backfill_cancel, preserving a further
-        // enable→cancel-again chain.
-        if canceled {
+        // Honor a lost-CAS spawn request now that `backfilling` is free: the
+        // re-enable's spawn_backfill_if_enabled gave up while this run held the CAS,
+        // leaving the re-enabled texts unembedded while status says "ready".
+        // spawn_backfill_if_enabled re-checks enabled + ready, and the fresh spawn
+        // resets both backfill_respawn and backfill_cancel, preserving a further
+        // enable→cancel chain. An uncanceled run with no pending request simply
+        // won't respawn, so this can't loop forever.
+        if respawn {
             spawn_backfill_if_enabled(&app_for_thread);
         }
     });

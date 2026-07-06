@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Plus, FileText, Check, Star, Sparkles, X } from "lucide-react";
 import { useApp } from "../stores/useApp";
-import { useTray } from "../stores/useTray";
+import { useTray, uidFor } from "../stores/useTray";
 import { useSemantic } from "../stores/useSemantic";
 import { toast } from "../stores/useToast";
 import { deckDisplayName, formatModified, formatBytes, prefersReducedMotion } from "../lib/utils";
@@ -18,7 +18,7 @@ export default function Inspector() {
   // Inspect the first selected slide (in visible order).
   const hit = results.find((r) => selectedIds.has(r.slide.id));
   const inTray = useTray((s) =>
-    hit ? s.items.some((i) => i.uid === `${hit.slide.deck_id}:${hit.slide.slide_index}`) : false,
+    hit ? s.items.some((i) => i.uid === uidFor(hit.deck, hit.slide)) : false,
   );
 
   return (
@@ -121,21 +121,38 @@ export default function Inspector() {
  *  Persists the full set through the store, which reloads the sidebar counts. */
 function TagEditor({ slideId }: { slideId: number }) {
   const allTags = useApp((s) => s.tags);
-  const [names, setNames] = useState<string[]>([]);
+  // `null` until the slide's existing tags have loaded. Persisting is a
+  // full-set replace on the backend, so we must NOT mutate from an empty [] we
+  // haven't confirmed — that would wipe the slide's real tags. The input stays
+  // disabled and add/remove no-op until the fetch resolves (or rejects → []).
+  const [names, setNames] = useState<string[] | null>(null);
   const [draft, setDraft] = useState("");
   const listId = `taglist-${slideId}`;
+  // Set once a local persist has happened; a late-resolving fetch must not
+  // clobber the just-written set with stale DB state.
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
-    void api.getSlideTags(slideId).then((tags) => {
-      if (alive) setNames(tags.map((t) => t.name));
-    });
+    dirtyRef.current = false;
+    setNames(null);
+    api
+      .getSlideTags(slideId)
+      .then((tags) => {
+        if (alive && !dirtyRef.current) setNames(tags.map((t) => t.name));
+      })
+      .catch(() => {
+        // Don't strand the input disabled forever; treat a failed load as
+        // "no tags known yet" so the user can still add.
+        if (alive && !dirtyRef.current) setNames([]);
+      });
     return () => {
       alive = false;
     };
   }, [slideId]);
 
   const persist = (next: string[]) => {
+    dirtyRef.current = true;
     setNames(next);
     void useApp.getState().setSlideTags(slideId, next);
   };
@@ -143,25 +160,29 @@ function TagEditor({ slideId }: { slideId: number }) {
   const addDraft = () => {
     const name = draft.trim();
     setDraft("");
-    if (!name) return;
+    if (!name || names == null) return;
     if (!names.some((n) => n.toLowerCase() === name.toLowerCase())) {
       persist([...names, name]);
     }
   };
 
-  const remove = (name: string) => persist(names.filter((n) => n !== name));
+  const remove = (name: string) => {
+    if (names == null) return;
+    persist(names.filter((n) => n !== name));
+  };
 
   // Suggest existing tags not already applied to this slide.
+  const applied = names ?? [];
   const suggestions = allTags
     .map((t) => t.name)
-    .filter((n) => !names.some((applied) => applied.toLowerCase() === n.toLowerCase()));
+    .filter((n) => !applied.some((a) => a.toLowerCase() === n.toLowerCase()));
 
   return (
     <div className="mt-3">
       <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-subtle/70">
         Tags
       </div>
-      {names.length > 0 && (
+      {names && names.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {names.map((n) => (
             <span
@@ -187,13 +208,14 @@ function TagEditor({ slideId }: { slideId: number }) {
           if (e.key === "Enter") {
             e.preventDefault();
             addDraft();
-          } else if (e.key === "Backspace" && draft === "" && names.length > 0) {
+          } else if (e.key === "Backspace" && draft === "" && names && names.length > 0) {
             remove(names[names.length - 1]);
           }
         }}
         list={listId}
-        placeholder="Add a tag…"
-        className="h-7 w-full rounded-[5px] border border-hairline/10 bg-canvas px-2 text-body text-ink outline-none focus:border-accent"
+        disabled={names == null}
+        placeholder={names == null ? "Loading tags…" : "Add a tag…"}
+        className="h-7 w-full rounded-[5px] border border-hairline/10 bg-canvas px-2 text-body text-ink outline-none focus:border-accent disabled:opacity-50"
       />
       <datalist id={listId}>
         {suggestions.map((n) => (
