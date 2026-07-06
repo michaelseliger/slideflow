@@ -1,149 +1,298 @@
-# Slideflow — Design & Product Overview
+# Slideflow — Design Handover
 
 > **Every slide you ever made, one keystroke away.**
 
-**Slideflow** is a desktop app that turns the scattered pile of `.pptx` files on
-your machine into a single, instantly searchable library of slides — and lets
-you drag any of them into a tray to compose a brand-new deck, where every slide
-keeps the *exact* look, layout, master, and theme it had in its source file.
+Slideflow is a local-first desktop app (Tauri 2 + React, macOS-first) that indexes
+every `.pptx` in folders you choose, makes each individual slide searchable and
+previewable, and composes new decks from picked slides — preserving each slide's
+original layout, master, and theme. This document is the design source of truth:
+every screen, overlay, state, and token, with screenshots.
 
-- **Name:** Slideflow
-- **Type:** Local-first desktop app for slide search & deck composition
-- **Platforms:** macOS · Windows · Linux
-- **License:** Open source (MIT)
-- **Source:** <https://github.com/michaelseliger/slideflow>
+**Working on the design:** run `pnpm dev` in `apps/desktop/` and open
+`http://localhost:1420` — the full UI runs in a plain browser against a mock
+library (~35 slides, 6 decks) with working search, tray, export simulation,
+fonts panel, and the complete AI-consent/download flow. No native build needed.
+Screenshots below were captured in exactly this mode. See
+[Mock-mode limits](#mock-mode-limits) for the few things that behave differently.
 
----
-
-## What it's about
-
-If you present for a living, your best slides already exist — they're just
-trapped inside dozens of old decks, in folders you'll never remember to open.
-The one chart, the one architecture diagram, the one pricing table you nailed
-six months ago is somewhere on disk, and finding it means opening file after
-file.
-
-Slideflow indexes every slide across the folders you choose and makes each
-*individual slide* a first-class, searchable, previewable object. You search
-the way you think ("pricing", "roadmap", "that Zürich map"), you see live
-previews, you pick the ones you want, and you export a new deck — with the
-original formatting fully intact.
-
-The hard part isn't search; it's **fidelity on recombination**. Most tools that
-merge slides flatten them, dropping the source layouts, masters, and themes so
-your reassembled deck looks broken. Slideflow's engine copies each slide's
-*complete relationship closure* — layout → master → theme → media → charts —
-plus the presentation-level styling parts, deduplicating identical parts by
-content hash. That's the whole point: composed decks look exactly like their
-sources, every time.
+- **App icon:** three stacked slides (beige `#C9C7BD` → gray `#8B897E` → blue
+  `#3056D6`) on a warm off-white squircle — shared with the website's favicon.
+  Source of truth: `apps/desktop/src-tauri/icons/icon.png`.
 
 ---
 
-## Features
+## Design language
 
-### Search & browse
-- **Full-text search across every slide** — title, deck name, body text, and
-  speaker notes, powered by SQLite FTS5.
-- **Smart matching** — prefix matching (`road` → `roadmap`), diacritic-
-  insensitive (`zurich` finds `Zürich`), with `<mark>`-highlighted snippets.
-- **Relevance ranking** — bm25, weighted title > deck > body > notes.
-- **Live SVG previews** rendered straight from the slide XML — theme colors,
-  placeholder inheritance, embedded images — no external renderer needed.
-- **Peek modal, inspector, and grid/group-by-deck views** with adjustable
-  thumbnail density.
-- **Favorites**, keyed by file path so they survive re-indexing.
+Tokens live in `apps/desktop/tailwind.config.js` + CSS variables in
+`src/index.css`. Dark mode is a `.dark` class on `<html>` (System/Light/Dark in
+Settings → Appearance; System tracks `prefers-color-scheme` live).
 
-### Compose & export
-- **Drag-to-tray composition** — pull slides from anywhere into a persistent
-  tray, reorder them, and export a new `.pptx`.
-- **Fidelity-preserving export** — each slide brings its full style chain;
-  masters/themes/media shared across picks are deduplicated by content hash.
-- **Undo/redo** on the tray; the tray is persisted and restored on relaunch.
-- Moved or changed source decks get a warning badge instead of silently
-  vanishing.
+| Token | Light | Dark |
+|---|---|---|
+| canvas | `#F6F6F7` | `#141414` |
+| surface | `#FFFFFF` | `#1E1E1E` |
+| elevated | `#FFFFFF` | `#262628` |
+| ink | `#1C1C1E` | `#ECECEE` |
+| subtle | `#6E6E73` | `#98989E` |
+| accent | `#0A84FF` | `#0A84FF` (`accent.soft` = 10 %) |
 
-### Library management
-- **Incremental indexing** — unchanged files (mtime + size) are skipped,
-  deleted files fall out, and a filesystem watcher picks up changes live.
-- **Background scanning** with a determinate progress bar and live counter.
-- **Statistics view** — index runs, searches, and export activity.
-
-### Feel
-- Native window chrome, dark mode, a **command palette** (`⌘K`), and a
-  keyboard-first layout: `⌘F` search · `space` peek · `return` add to tray ·
-  `⌘E` export · `⌘R` re-index · `⌘Z`/`⌘⇧Z` undo/redo.
+- Semantic colors: amber = warnings (moved/off-size), green = success, red =
+  danger, purple = near-duplicate.
+- **Vibrancy** (`material`): translucent tint + `backdrop-filter: saturate(180%)
+  blur(20px)` — sidebar, tray, header. In the browser this is a CSS
+  approximation; the native app gets real vibrancy.
+- **Type:** system font stack. Sizes: caption 11/14 · body 13/18 · title 15/20 ·
+  heading 17/22. `.tabnum` for tabular numerals in counts.
+- **Radii:** controls 6 · cards 8 · sheets/modals 12 · pills full.
+- **Selection is always an accent ring**, never a color wash. Hairlines are
+  0.5 px inset box-shadows.
+- Motion: framer-motion springs, all `prefers-reduced-motion`-aware.
 
 ---
 
-## Privacy
+## Main window anatomy
 
-**Slideflow is local-first and offline by design. Your slides never leave your
-machine.**
+```
+┌──────────┬────────────────────────────────────┬───────────┐
+│          │  Header: toolbar (52px) + strip    │           │
+│ Sidebar  ├────────────────────────────────────┤ Inspector │
+│ 224px    │  Main content                      │ 300px     │
+│ (60 col- │  (grid / stats / duplicates /      │ (toggle)  │
+│ lapsed)  │   empty / zero-results)            │           │
+├──────────┴────────────────────────────────────┴───────────┤
+│  Tray — full-width filmstrip, 132px (34px collapsed)      │
+└───────────────────────────────────────────────────────────┘
+```
 
-- **No cloud, no accounts, no telemetry.** There is no server, no sign-in, and
-  nothing is uploaded. All parsing, search, preview rendering, and deck
-  composition run natively on your computer.
-- **No third-party runtimes handling your files.** No LibreOffice, no bundled
-  Python, no paid conversion APIs — every `.pptx` is read and written by pure
-  Rust code in this repository.
-- **Everything stays on disk, under your control.** The search index lives in a
-  local SQLite database (`~/Library/Application Support/com.slideflow.app/library.db`
-  on macOS), slide previews are cached as SVGs in the app cache dir, and
-  preferences live in the app's local store. Deleting the database fully resets
-  the index; the thumbnail cache is safe to delete and re-renders on demand.
-- **Least-privilege by default.** The desktop shell ships a tight capability set
-  and a strict Content-Security-Policy (`default-src 'self'`) — the webview
-  can't phone home even if it wanted to.
+![Main grid, light](docs/screenshots/01-grid-light.png)
+![Main grid, dark](docs/screenshots/02-grid-dark.png)
 
-You point Slideflow at folders you already own, and that's the entire trust
-boundary.
+- **Sidebar** (`Sidebar.tsx`, vibrancy): 52 px drag region for traffic lights;
+  Library rows (All Slides / Favorites / Duplicates / Statistics); folder roots
+  with live counts; Saved Searches; Decks (favorited decks get a filled amber
+  star); Tags with counts. Bottom: scan progress + AI-indexing bars, pinned
+  "Add folder…" and "About". Right-click menus on roots/decks/saved/tags.
+- **Header** (`Header.tsx`, draggable titlebar): search field with clear + `?`
+  syntax help; bookmark (save search — only when a query is present);
+  retrieval-mode segmented control (only when the AI model is ready);
+  palette/sidebar/inspector toggles. Below, a 36 px strip: result count, filter
+  chips (query/deck/folder/date — each removable), density − / +, Sort menu,
+  flat vs. group-by-deck toggle.
+- **Inspector** (`Inspector.tsx`, opaque surface): preview, title, match
+  snippet, metadata list, tags editor (chips, autocomplete, Enter to create),
+  speaker notes, AI "Similar slides" (model-gated), actions (Add to Tray /
+  favorite / Reveal in Finder).
+- **Tray** (`Tray.tsx`, vibrancy): tray switcher dropdown, collapse chevron,
+  warning pills (**moved / off-size / duplicates**), Clear, **Export…**;
+  horizontal drag-to-reorder filmstrip with index badges and hover-remove.
+
+![Sidebar during a scan](docs/screenshots/15-sidebar-scan.png)
+
+---
+
+## Screens
+
+### Slide grid (default)
+Virtualized grid, 3–10 columns (density stepper or ⌘+/⌘−). Cards show the SVG
+preview (rendered from the real slide XML), title, deck, and on hover: peek,
+favorite, add-to-tray. Selection = accent ring; ⌘-click toggles, ⇧-click
+ranges, double-click adds to tray. An **"Approximate" badge** appears on tiles
+whose preview skipped constructs the renderer can't do faithfully.
+
+![Grouped by deck](docs/screenshots/03-grid-grouped.png)
+
+Grouped mode (`2`, flat is `1`): collapsible per-deck headers.
+
+### Search
+Live as-you-type, FTS5-backed. Syntax: `title:` `deck:` `notes:` `body:`
+prefixes, `"exact phrase"`, `OR`, `-term`/`NOT`, `after:`/`before:` dates; AND
+by default; prefix matching; diacritic-insensitive. Matches highlight in
+snippets; active criteria become removable chips in the header strip.
+
+![Search results](docs/screenshots/04-search-results.png)
+![Search syntax help](docs/screenshots/05-search-help.png)
+![Save search popover](docs/screenshots/06-save-search-popover.png)
+![Zero results](docs/screenshots/07-zero-results.png)
+
+Zero-results offers one-click removal of the most restrictive filter, plus
+re-index. With the AI model ready, the header shows a segmented **retrieval
+mode** control — lexical (Aa) / semantic (✦) / hybrid:
+
+![Retrieval mode toggle](docs/screenshots/30-retrieval-toggle.png)
+
+### Inspector & Peek
+
+![Inspector](docs/screenshots/08-inspector.png)
+![Peek modal](docs/screenshots/09-peek-modal.png)
+![Similar slides (AI)](docs/screenshots/31-similar-slides.png)
+
+Peek (Space) is the Quick-Look analog: large preview + notes, ← → to walk
+results, Space/Esc closes.
+
+### Tray & composition
+
+![Tray populated with warnings](docs/screenshots/13-tray-populated.png)
+![Tray switcher](docs/screenshots/14-tray-switcher.png)
+![Tray, dark](docs/screenshots/39-tray-dark.png)
+
+Multiple **named trays** (create/rename/delete in the switcher; persisted, with
+v1→v2 migration). Undo/redo (⌘Z/⌘⇧Z). Warning pills: **moved** (source file
+gone/relocated), **off-size** (aspect ratio differs from the tray majority),
+**duplicates** (identical content hash). Tray items are keyed by *deck path +
+slide index*, so they survive re-indexing.
+
+### Export
+
+![Export — PowerPoint](docs/screenshots/16-export-pptx.png)
+![Export — PDF](docs/screenshots/17-export-pdf.png)
+![Export — PNG](docs/screenshots/18-export-png.png)
+![Export success](docs/screenshots/19-export-success.png)
+![Export, dark](docs/screenshots/36-export-dark.png)
+
+Three formats:
+- **PowerPoint** — fidelity-preserving compose (full layout/master/theme
+  closure per slide, deduplicated by content hash). Options: include speaker
+  notes; for mixed-aspect trays a **fit mode**: *Ensure fit* (letterbox) vs
+  *Maximize* (crop).
+- **PDF** — real per-slide progress, selectable text.
+- **PNG** — one image per slide, width presets 960–2560.
+Last-used preset is remembered. Success state gets confetti. Single slides can
+also be saved as standalone `.pptx` from the card context menu, or **⌥-dragged
+out** of the app as a real `.pptx` file (native only).
+
+### Duplicates
+
+![Duplicates view](docs/screenshots/32-duplicates.png)
+![Duplicates, dark](docs/screenshots/37-duplicates-dark.png)
+
+Exact groups (content hash, always available) and near-duplicate clusters
+(embedding cosine, model-gated, purple accent). Newest copy is badged.
+
+### Statistics
+
+![Statistics](docs/screenshots/33-stats.png)
+![Statistics, dark](docs/screenshots/38-stats-dark.png)
+
+Tiles + last index run, AI-index coverage, problems (skipped files), recent
+searches, recent exports, largest decks, approximate-preview count.
+
+### Settings
+
+![Appearance](docs/screenshots/20-settings-appearance.png)
+![Library](docs/screenshots/21-settings-library.png)
+![Fonts](docs/screenshots/22-settings-fonts.png)
+![Updates](docs/screenshots/23-settings-updates.png)
+![AI — off](docs/screenshots/24-settings-ai.png)
+![AI — consent](docs/screenshots/25-ai-consent.png)
+![AI — downloading](docs/screenshots/26-ai-downloading.png)
+![AI — ready](docs/screenshots/27-settings-ai-ready.png)
+![Settings, dark](docs/screenshots/35-settings-dark.png)
+
+- **Appearance:** System / Light / Dark.
+- **Library:** roots (add/remove, per-root exclude patterns editor), clear &
+  rebuild index (confirm-gated).
+- **Fonts:** every family the library references, with status dot —
+  *available* / *downloadable* (curated set, consent per download) / *missing*
+  / *embedded*. Add `.ttf/.otf`, remove, reveal folder. Fonts are stored
+  app-local, never installed system-wide, and feed both previews and PNG/PDF
+  rasterization.
+- **Updates:** auto-update toggle (boot + daily check), manual check, phase UI
+  (checking → downloading % → installing → ready-to-restart / error).
+- **AI (semantic search):** opt-in toggle → explicit consent dialog (≈490 MB
+  multilingual-e5-small download from Hugging Face, sha256-pinned) →
+  progress → ready (model id, "X of Y slides indexed", re-run indexing,
+  delete model). Everything stays on-device. Cross-lingual: German queries
+  find English slides and vice versa.
+
+### Other overlays
+
+![Command palette](docs/screenshots/10-command-palette.png)
+![Context menu](docs/screenshots/11-context-menu.png)
+![Sort menu](docs/screenshots/12-sort-menu.png)
+![Confirm dialog](docs/screenshots/28-confirm-dialog.png)
+![About](docs/screenshots/29-about.png)
+![Peek, dark](docs/screenshots/34-peek-dark.png)
+
+| Overlay | Trigger | Notes |
+|---|---|---|
+| Command palette | ⌘K | ~14 actions + "Jump to: `<deck>`" per deck |
+| Peek modal | Space | arrows navigate within results |
+| Export sheet | ⌘E / tray button | format tabs → progress → success/error |
+| Settings sheet | ⌘, | five sections, see above |
+| About sheet | sidebar / palette | version, update status, links |
+| Confirm dialog | destructive actions | z-above sheets; cancel can revert a toggle |
+| Context menus | right-click cards & sidebar rows | portal, auto-flipping |
+| Tray switcher | tray header dropdown | opens upward |
+| Sort menu | header strip | Name / Added / Modified / Most exported; inert during search |
+| Save-search / syntax-help popovers | header | anchored to search field |
+| Toasts | bottom-center | success/info/error + optional action (e.g. Undo) |
+
+All overlays share one primitive (`components/OverlaySheet.tsx` +
+`lib/useDismiss.ts`): backdrop + spring card, Escape/outside-click dismissal
+that never leaks into the global shortcut layer, reduced-motion aware.
+
+### Empty states
+- **First-run onboarding** (`EmptyState.tsx`): no folders yet — hero + "Add
+  folder…" CTA. (Not reachable in mock mode — mock data always populates the
+  library — so no screenshot; design changes here must be verified in the
+  native app.)
+- **Zero results** (screenshot above): query/filters matched nothing.
 
 ---
 
-## Open source & cross-platform
+## Keyboard model
 
-Slideflow is **open source under the MIT license** — read it, fork it, build it,
-ship it.
+Global (work while typing): ⌘F search · ⌘K palette · ⌘I inspector · ⌘,
+settings · ⌘T collapse tray · ⌘E export · ⌘R re-index · ⌘Z/⌘⇧Z undo/redo ·
+⌘+/⌘− density · ⌘A select all · ⌘⌫ remove selection from tray · ⌘⌃S sidebar.
+Text-editing keys (⌘Z/⌘⇧Z/⌘⌫) are *not* hijacked while a text field is focused.
 
-It runs on **macOS, Windows, and Linux**. The release pipeline builds installable
-bundles for every platform:
+Grid (not while typing): arrows move selection · Space peek · Enter add to
+tray · `1` flat / `2` grouped · Esc clears query, then closes inspector.
 
-- **macOS** — `.dmg` (Apple Silicon + Intel)
-- **Windows** — `.msi` / NSIS `.exe`
-- **Linux** — `.deb` / `.AppImage` / `.rpm`
+Cards: click select · ⌘-click toggle · ⇧-click range · double-click add to
+tray · right-click menu · drag to tray · **⌥-drag out** = export as `.pptx`
+(native only).
 
-> Repository: **<https://github.com/michaelseliger/slideflow>**
+---
+
+## Feature inventory (checklist)
+
+Search: FTS5 full-text (title/deck/body/notes, bm25-weighted) · advanced syntax
+(fields, phrases, OR/NOT, date ranges) · prefix + diacritic-insensitive ·
+semantic & hybrid retrieval (opt-in model) · saved searches · zero-result
+recovery.
+Organize: favorites (slides + decks, path-keyed) · tags (per-slide, sidebar
+filter) · duplicates (exact + near) · statistics.
+Compose: multi-select → named trays · undo/redo · reorder · warnings
+(moved/off-size/duplicate) · export PPTX (fidelity-preserving, notes, fit
+modes) / PDF / PNG · single-slide save & ⌥-drag-out.
+Previews: self-contained SVG per slide (theme colors, placeholder inheritance,
+images, embedded fonts via @font-face) · approximate-badge honesty · peek.
+Library: incremental scanning (mtime+size skip) · live progress · per-root
+excludes · moved-deck badges · app-local font management · on-device AI with
+explicit consent · auto-updater.
 
 ---
 
-## How cool it is to work with
+## Mock-mode limits
 
-Slideflow is a genuinely nice codebase to hack on — deliberately structured so
-the engine and the app never get in each other's way:
-
-- **A pure-Rust engine you can test anywhere.** `crates/slideflow-core` — the
-  PPTX parser, the FTS5 search index, the SVG renderer, and the style-preserving
-  composer — has **no GUI and no GTK/WebKit dependency**. `cargo test -p
-  slideflow-core` runs on plain Linux/macOS/Windows, so CI is fast and the
-  interesting logic is unit-testable without a desktop.
-- **A thin, honest app layer.** `apps/desktop` is a Tauri 2 + React 18 +
-  TypeScript + Vite + Tailwind shell whose Rust host is just a typed IPC bridge
-  to the engine. Every call goes through one wrapper module — no scattered
-  `invoke`s to chase.
-- **Instant browser dev mode.** Run `pnpm dev` and the whole UI — search, peek,
-  tray, export, dark mode — is clickable in a plain browser against an in-memory
-  mock library of ~40 slides. No native build required to iterate on the front
-  end.
-- **A reproducible test corpus.** `examples/pptx/` holds a curated set of decks
-  (regenerable from a fixed-seed script) so parsing, search, and export fidelity
-  are verified against real, deterministic input — and export correctness can be
-  pixel-diffed against sources.
-- **CI across all three OSes** on every push, plus a one-tag release pipeline.
-
-Clean separation, fast tests, a mockable UI, and a single source of truth for
-the frontend↔backend contract — it's the kind of project where a change is easy
-to reason about and easy to verify.
+Everything above works in the browser except: native file dialogs (canned
+paths), Reveal in Finder (no-op), ⌥-drag-out (hidden), real updater (mock
+"up to date"; set `localStorage["slideflow:mockUpdate"]="1"` to see the
+update-available flow), macOS menu bar, real vibrancy, and the first-run empty
+state (mock library always has content).
 
 ---
+
+## Architecture in one paragraph (for context)
+
+`crates/slideflow-core` is a pure-Rust engine (OPC/zip layer → PPTX parser →
+SQLite+FTS5 index → SVG renderer → fidelity-preserving composer → PDF/PNG
+export via resvg/krilla → optional candle embeddings); it has no GUI
+dependencies and is fully testable headless. `apps/desktop` is a thin Tauri 2 +
+React shell; every IPC call goes through `src/lib/api.ts` (typed wrappers with
+browser-mode mocks in `src/lib/mock.ts`), state lives in zustand stores, and
+`src/lib/types.ts` mirrors the Rust `model.rs` field-for-field in snake_case.
 
 *Slideflow — search your slides, compose new decks with original fidelity.*
