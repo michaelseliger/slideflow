@@ -4,6 +4,26 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-07
+
+### Added
+
+- **Theme toggle in the header.** Switch between light and dark without opening Settings; Settings → Appearance keeps the full light/dark/system control.
+- **Reduce motion.** A new Appearance preference disables UI animations (also respected by slide peek and tile transitions).
+- The approximate-preview badge can now be hidden via Settings → Appearance.
+- Command palette: *Add selection to tray*, *New tray*, and *Show statistics* commands.
+
+### Improved
+
+- **App-wide UI redesign.** Every surface was rebuilt to the new Slideflow design system — same features, cleaner and more consistent look:
+  - Header, sidebar, and grid: tidier toolbar (density → group → sort, hidden where it doesn't apply), Decks above Saved searches, tighter grid spacing with compact deck headers.
+  - Inspector: clearer title/metadata hierarchy, dashed *Add tag* pill, richer notes, and side-by-side Favourite/Reveal actions.
+  - Statistics: value-first overview tiles and an activity grid with a recent-searches chip cloud.
+  - Duplicates: plainer group headers with similarity pills and a clearer *Newest* badge.
+  - Overlays: context menus with icons and keyboard hints, a leaner command palette, redesigned peek (preview on top, inline notes, in-frame navigation), a restructured export sheet with a filename preview, and a refreshed About dialog.
+  - Settings: rebuilt as a two-pane layout with sections for Appearance, Library, Fonts, AI search (with an explicit on-device note), and Updates (ready-to-install banner, last-checked/check-now footer).
+  - Zero-results view now offers guidance and a one-click *Re-index folders*.
+
 ## [0.4.0] — 2026-07-06
 
 ### Added
