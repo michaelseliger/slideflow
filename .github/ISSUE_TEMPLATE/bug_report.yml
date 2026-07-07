@@ -1,0 +1,110 @@
+name: Bug report
+description: Something in Slideflow is broken or behaves unexpectedly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much as you can — a clear repro is the single biggest thing that gets a bug fixed fast.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: |
+        When I ... , Slideflow ... . I expected it to ... .
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps that trigger the bug. Number them.
+      placeholder: |
+        1. Add folder '...' to the library
+        2. Search for '...'
+        3. Drag slide N into the tray
+        4. Export the deck
+        5. See error / wrong output
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the app does this affect?
+      options:
+        - Indexing / library scan
+        - Search
+        - Slide preview / rendering
+        - Composing / tray / export
+        - UI / interaction (drag-drop, keyboard, layout)
+        - Updater / packaging / install
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: deck
+    attributes:
+      label: Affected deck(s)
+      description: >
+        If the bug involves a specific `.pptx`, details about it help a lot: how it was authored (PowerPoint, Keynote export, Google Slides…), roughly how many slides, whether it has charts / SmartArt / embedded media / unusual fonts. **Please don't attach confidential decks** — a minimal reproducer or a description is enough.
+      placeholder: |
+        - Authored in: PowerPoint for Mac
+        - ~40 slides, several with background photos and one chart
+        - The background photo disappears on export
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Slideflow version
+      description: Shown in the About window / app menu. e.g. 0.4.0
+      placeholder: "0.4.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "e.g. macOS 15.5, Windows 11 23H2"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: >
+        Any error text, console output, or screenshots. Screenshots of wrong rendering/export are especially useful. This will be rendered as code, so no need for backticks.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I'm on the latest released version (or noted my version above).
+          required: true

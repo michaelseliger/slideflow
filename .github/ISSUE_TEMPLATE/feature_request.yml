@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest a new capability or an improvement to an existing one.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! The clearest requests describe the *problem* first and leave room for how it's solved.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that Slideflow makes hard or impossible today?
+      placeholder: |
+        When I compose a deck from many sources, I can't ... , so I have to ... .
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Slideflow to do? Describe it from a user's point of view.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the app would this touch?
+      options:
+        - Indexing / library scan
+        - Search
+        - Slide preview / rendering
+        - Composing / tray / export
+        - UI / interaction
+        - New capability (spans multiple areas)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've tried or thought about.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, examples from other tools, links — anything that helps.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't already requested.
+          required: true
