@@ -114,6 +114,33 @@ Slideflow fixes that:
 **Handy shortcuts:** `⌘F` search · `space` peek · `return` add to tray ·
 `⌘E` export · `⌘R` re-index · `⌘Z` / `⌘⇧Z` undo/redo · `⌘K` command palette.
 
+## Command line
+
+Slideflow ships a companion `slideflow` command for driving your library from the
+terminal — index folders, search (full advanced syntax, `--json` output),
+compose decks, render slides, and print stats, all without opening the app.
+
+**Install it from the app:** open **Settings → Advanced → Command line tool** and
+pick *Install system-wide* (links `/usr/local/bin/slideflow`; may ask for your
+password) or *Install for me only* (links `~/.local/bin/slideflow` and adds it to
+your shell `PATH`). The command links to the CLI **bundled inside the app**, so it
+updates along with Slideflow. Open a new terminal, then:
+
+```bash
+slideflow index ~/Documents/Decks                    # scan a folder into a library db
+slideflow search "pricing" --json                    # advanced-syntax search, JSON out
+slideflow compose out.pptx deck.pptx:3 talk.pptx:1   # compose, preserving each slide's format
+slideflow render deck.pptx 2 slide.svg               # one slide → self-contained SVG
+slideflow stats                                      # library totals & recent activity
+slideflow --help                                     # full command + flag reference
+```
+
+By default the CLI uses the **desktop app's library**, so `search`/`stats` query
+exactly what the app indexed and `index` adds to it — you don't need to know
+where the app is installed. Pass `--db <path>` to point at a separate database
+instead. Building from source? `cargo install --path crates/slideflow-cli`
+installs the same binary.
+
 ## Privacy
 
 **Slideflow is local-first and offline by design. Your slides never leave your

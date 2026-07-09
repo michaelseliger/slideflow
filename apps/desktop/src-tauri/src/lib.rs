@@ -167,6 +167,7 @@ pub fn run() {
             commands::reveal_in_finder,
             commands::open_file,
             commands::open_url,
+            commands::install_cli,
             fonts::list_library_fonts,
             fonts::fonts_dir,
             fonts::add_user_fonts,

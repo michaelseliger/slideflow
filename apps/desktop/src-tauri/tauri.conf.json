@@ -4,9 +4,9 @@
   "version": "0.5.0",
   "identifier": "com.slideflow.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "node scripts/embed-cli.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "node scripts/embed-cli.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -38,6 +38,7 @@
     "active": true,
     "targets": ["app", "dmg"],
     "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/slideflow-cli"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

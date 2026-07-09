@@ -333,6 +333,17 @@ export interface AddFontsResult {
   fonts: FontFamily[];
 }
 
+/** Result of `install_cli` (`src-tauri/src/commands.rs`): where the `slideflow`
+ *  command was linked, the scope used, and a ready-to-toast summary. */
+export interface InstallCliResult {
+  /** Absolute path of the created `slideflow` symlink. */
+  path: string;
+  scope: "system" | "user";
+  /** True when a shell rc file was modified, so a new terminal is needed. */
+  restart_shell: boolean;
+  note: string;
+}
+
 /** Font-download lifecycle events streamed on `font:download`. Mirrors the
  *  `FontDownloadEvent` enum in `src-tauri/src/fonts.rs`
  *  (serde `#[serde(tag = "kind", rename_all = "snake_case")]`). */

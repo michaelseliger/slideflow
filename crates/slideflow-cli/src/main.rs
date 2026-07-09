@@ -29,10 +29,15 @@ use slideflow_core::render::{render_slide, RenderOptions};
 #[derive(Debug, Parser)]
 #[command(name = "slideflow", version, about, long_about = None)]
 struct Cli {
-    /// Path to the library SQLite database. Created on `index`; must already
-    /// exist for `search`/`stats`. Ignored by `compose`/`render`.
-    #[arg(long, global = true, default_value = "slideflow.db", value_name = "PATH")]
-    db: PathBuf,
+    /// Path to the library SQLite database.
+    ///
+    /// Defaults to the Slideflow desktop app's library, so `search`/`stats`
+    /// query exactly what the app indexed and `index` adds to it — no need to
+    /// know where the app is installed. Pass this to use a separate database.
+    /// (Created on `index`; must already exist for `search`/`stats`; ignored by
+    /// `compose`/`render`.)
+    #[arg(long, global = true, value_name = "PATH")]
+    db: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -148,15 +153,68 @@ fn main() -> ExitCode {
 /// Dispatch a parsed command. Every arm returns `Result<(), String>`; the string
 /// is the human-readable error shown on stderr before exiting non-zero.
 fn run(cli: &Cli) -> Result<(), String> {
+    // `--db` when given, else the desktop app's library (so the CLI is a true
+    // companion to the app instead of a separate CWD-local database).
+    let db = cli.db.clone().unwrap_or_else(default_db_path);
     match &cli.command {
-        Command::Index { folder } => cmd_index(&cli.db, folder),
-        Command::Search { query, limit, json } => cmd_search(&cli.db, query, *limit, *json),
+        Command::Index { folder } => cmd_index(&db, folder),
+        Command::Search { query, limit, json } => cmd_search(&db, query, *limit, *json),
         Command::Compose { out, picks, title, include_notes, fit_mode } => {
             cmd_compose(out, picks, title.clone(), *include_notes, *fit_mode)
         }
         Command::Render { deck, index, out } => cmd_render(deck, *index, out),
-        Command::Stats { json } => cmd_stats(&cli.db, *json),
+        Command::Stats { json } => cmd_stats(&db, *json),
     }
+}
+
+/// The desktop app's bundle identifier, used to locate its data dir. Kept in
+/// sync with `apps/desktop/src-tauri/tauri.conf.json` (`identifier`).
+const APP_IDENTIFIER: &str = "com.slideflow.app";
+
+/// Path to the desktop app's library database — the same `library.db` the
+/// Slideflow app reads and writes. This is what `--db` defaults to, so the CLI
+/// operates on the app's library with no flag and no knowledge of where the app
+/// is installed. Mirrors Tauri's `app_data_dir()` resolution for our identifier.
+///
+/// Falls back to `slideflow.db` in the current directory when the platform data
+/// directory can't be resolved (e.g. `$HOME` unset).
+fn default_db_path() -> PathBuf {
+    app_data_dir()
+        .map(|d| d.join("library.db"))
+        .unwrap_or_else(|| PathBuf::from("slideflow.db"))
+}
+
+/// Platform data directory for the app, matching Tauri's `app_data_dir()`:
+/// macOS `~/Library/Application Support/<id>`, Linux `$XDG_DATA_HOME`|
+/// `~/.local/share/<id>`, Windows `%APPDATA%\<id>`.
+#[cfg(target_os = "macos")]
+fn app_data_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(
+        PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(APP_IDENTIFIER),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn app_data_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join(APP_IDENTIFIER));
+    }
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(".local/share").join(APP_IDENTIFIER))
+}
+
+#[cfg(windows)]
+fn app_data_dir() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA").filter(|v| !v.is_empty())?;
+    Some(PathBuf::from(appdata).join(APP_IDENTIFIER))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn app_data_dir() -> Option<PathBuf> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +224,14 @@ fn run(cli: &Cli) -> Result<(), String> {
 fn cmd_index(db: &Path, folder: &Path) -> Result<(), String> {
     if !folder.exists() {
         return Err(format!("folder does not exist: {}", folder.display()));
+    }
+    // The default db lives in the app's data dir, which may not exist yet if the
+    // desktop app has never been launched — create it so the db can be created.
+    if let Some(parent) = db.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
     }
     let mut lib = Library::open(db)
         .map_err(|e| format!("opening library at {}: {e}", db.display()))?;
@@ -432,5 +498,32 @@ fn human_bytes(bytes: i64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_db_is_app_library_or_cwd_fallback() {
+        let p = default_db_path();
+        assert!(
+            p.ends_with("library.db") || p == std::path::Path::new("slideflow.db"),
+            "unexpected default db path: {}",
+            p.display()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_db_lives_under_app_support() {
+        // $HOME is always set under `cargo test`, so this resolves to
+        // ~/Library/Application Support/com.slideflow.app/library.db.
+        let p = default_db_path();
+        let s = p.to_string_lossy();
+        assert!(s.contains("Library/Application Support"), "path was {s}");
+        assert!(s.contains(APP_IDENTIFIER), "path was {s}");
+        assert!(s.ends_with("library.db"), "path was {s}");
     }
 }

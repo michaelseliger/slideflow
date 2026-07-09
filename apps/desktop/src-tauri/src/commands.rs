@@ -1086,6 +1086,301 @@ pub async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(e)
 }
 
+// ---------------------------------------------------------------------------
+// CLI companion install (Settings → Advanced → "Install command line tool")
+// ---------------------------------------------------------------------------
+
+/// Result of [`install_cli`]: where the `slideflow` command was linked, the
+/// scope used, and a ready-to-toast summary. Mirrors the TS `InstallCliResult`.
+#[derive(Debug, Serialize)]
+pub struct InstallCliResult {
+    /// Absolute path of the created `slideflow` symlink.
+    pub path: String,
+    /// Which scope was installed: "system" or "user".
+    pub scope: String,
+    /// True when a shell rc file was modified, so the user must open a new
+    /// terminal (or `source` it) before `slideflow` resolves.
+    pub restart_shell: bool,
+    /// One-line, ready-to-toast summary of what happened.
+    pub note: String,
+}
+
+/// Install the bundled `slideflow` CLI onto the user's PATH by symlinking it.
+///
+/// `scope`:
+///   * `"system"` → `/usr/local/bin/slideflow` (on the default macOS PATH via
+///     `/etc/paths`). Links directly when that dir is writable, otherwise (macOS)
+///     escalates once through the native admin prompt.
+///   * `"user"` → `~/.local/bin/slideflow`, also adding that dir to the shell
+///     PATH (zsh/bash rc), since macOS doesn't include it by default.
+///
+/// The link points at the CLI embedded in the app bundle (an `externalBin`
+/// sidecar staged next to the main executable), so it tracks the installed app
+/// and updates along with it.
+#[tauri::command]
+pub async fn install_cli(scope: String) -> Result<InstallCliResult, String> {
+    // Filesystem work (and, on macOS, possibly an osascript admin prompt) —
+    // keep it off the async IPC worker.
+    tauri::async_runtime::spawn_blocking(move || install_cli_impl(&scope))
+        .await
+        .map_err(e)?
+}
+
+#[cfg(unix)]
+fn install_cli_impl(scope: &str) -> Result<InstallCliResult, String> {
+    let target = bundled_cli_path()?;
+    match scope {
+        "system" => install_system(&target),
+        "user" => install_user(&target, &home_dir()?),
+        other => Err(format!("unknown install scope {other:?}")),
+    }
+}
+
+#[cfg(not(unix))]
+fn install_cli_impl(_scope: &str) -> Result<InstallCliResult, String> {
+    Err("Installing the command-line tool isn't supported on this platform yet.".into())
+}
+
+/// Absolute path of the CLI binary embedded in the app bundle. Tauri stages an
+/// `externalBin` next to the main executable with the target-triple suffix
+/// stripped, so it sits beside us as `slideflow-cli`.
+#[cfg(unix)]
+fn bundled_cli_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(e)?;
+    // App Translocation: a quarantined app launched from Downloads is mounted
+    // read-only at a random /private/var/folders/…/AppTranslocation/… path. A
+    // symlink into that would dangle once the app is moved, so refuse.
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        return Err(
+            "Move Slideflow to your Applications folder and reopen it, then try again.".into(),
+        );
+    }
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "could not resolve the app directory".to_string())?;
+    let cli = dir.join("slideflow-cli");
+    if cli.exists() {
+        Ok(cli)
+    } else {
+        Err("The command-line tool is only available in the installed Slideflow app, not in `tauri dev`.".into())
+    }
+}
+
+#[cfg(unix)]
+const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
+
+/// Distinguishes "can't write without elevated privileges" (→ escalate) from a
+/// genuine error we should surface verbatim.
+#[cfg(unix)]
+enum LinkErr {
+    NeedsPrivilege,
+    Other(String),
+}
+
+/// Point `link` at `target`, replacing any existing file/symlink. Reports
+/// permission problems as [`LinkErr::NeedsPrivilege`] so the caller can decide
+/// whether to escalate.
+#[cfg(unix)]
+fn try_replace_symlink(target: &Path, link: &Path) -> Result<(), LinkErr> {
+    use std::io::ErrorKind;
+    if let Some(parent) = link.parent() {
+        if !parent.exists() {
+            match fs::create_dir_all(parent) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    return Err(LinkErr::NeedsPrivilege)
+                }
+                Err(err) => {
+                    return Err(LinkErr::Other(format!(
+                        "creating {}: {err}",
+                        parent.display()
+                    )))
+                }
+            }
+        }
+    }
+    match fs::remove_file(link) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            return Err(LinkErr::NeedsPrivilege)
+        }
+        Err(err) => {
+            return Err(LinkErr::Other(format!(
+                "removing existing {}: {err}",
+                link.display()
+            )))
+        }
+    }
+    match std::os::unix::fs::symlink(target, link) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => Err(LinkErr::NeedsPrivilege),
+        Err(err) => Err(LinkErr::Other(format!("linking {}: {err}", link.display()))),
+    }
+}
+
+#[cfg(unix)]
+fn install_system(target: &Path) -> Result<InstallCliResult, String> {
+    let link = Path::new(SYSTEM_BIN_DIR).join("slideflow");
+    match try_replace_symlink(target, &link) {
+        Ok(()) => Ok(system_result(&link)),
+        Err(LinkErr::Other(msg)) => Err(msg),
+        Err(LinkErr::NeedsPrivilege) => {
+            #[cfg(target_os = "macos")]
+            {
+                symlink_with_admin(target, &link)?;
+                Ok(system_result(&link))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(format!(
+                    "{SYSTEM_BIN_DIR} isn't writable. Use the \u{201c}just for me\u{201d} option, or create the link with sudo."
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn system_result(link: &Path) -> InstallCliResult {
+    InstallCliResult {
+        path: link.display().to_string(),
+        scope: "system".into(),
+        restart_shell: false,
+        note: format!(
+            "Installed the \u{201c}slideflow\u{201d} command at {}. Open a new terminal to use it.",
+            link.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn install_user(target: &Path, home: &Path) -> Result<InstallCliResult, String> {
+    let dir = home.join(".local").join("bin");
+    let link = dir.join("slideflow");
+    match try_replace_symlink(target, &link) {
+        Ok(()) => {}
+        Err(LinkErr::NeedsPrivilege) => {
+            return Err(format!(
+                "could not write to {} (permission denied)",
+                dir.display()
+            ))
+        }
+        Err(LinkErr::Other(msg)) => return Err(msg),
+    }
+    // ~/.local/bin is not on the default macOS PATH — add it to the shell rc.
+    let touched = ensure_local_bin_on_path(home)?;
+    let note = if touched.is_empty() {
+        format!(
+            "Installed the \u{201c}slideflow\u{201d} command at {}.",
+            link.display()
+        )
+    } else {
+        format!(
+            "Installed the \u{201c}slideflow\u{201d} command at {}, and added ~/.local/bin to your PATH in {}. Open a new terminal to use it.",
+            link.display(),
+            touched.join(", ")
+        )
+    };
+    Ok(InstallCliResult {
+        path: link.display().to_string(),
+        scope: "user".into(),
+        restart_shell: !touched.is_empty(),
+        note,
+    })
+}
+
+/// Ensure `~/.local/bin` is on PATH for the user's login shell by appending a
+/// guarded export line to its rc file. Idempotent: skips when the file already
+/// references `.local/bin`. Returns the rc file name if it was modified.
+#[cfg(unix)]
+fn ensure_local_bin_on_path(home: &Path) -> Result<Vec<String>, String> {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let rc_name = if shell.contains("bash") {
+        ".bash_profile"
+    } else {
+        ".zshrc"
+    };
+    let rc = home.join(rc_name);
+    let existing = fs::read_to_string(&rc).unwrap_or_default();
+    if existing.contains(".local/bin") {
+        return Ok(Vec::new());
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(
+        "\n# Added by Slideflow \u{2014} put the slideflow CLI on your PATH\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+    );
+    fs::write(&rc, updated).map_err(|err| format!("updating {}: {err}", rc.display()))?;
+    Ok(vec![rc_name.to_string()])
+}
+
+#[cfg(unix)]
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "could not determine your home directory".to_string())
+}
+
+/// Create the `/usr/local/bin/slideflow` symlink with a one-time macOS admin
+/// prompt (used when the directory isn't user-writable).
+#[cfg(target_os = "macos")]
+fn symlink_with_admin(target: &Path, link: &Path) -> Result<(), String> {
+    let dir = link.parent().unwrap_or_else(|| Path::new(SYSTEM_BIN_DIR));
+    // POSIX shell command, each path single-quoted for the shell.
+    let shell_cmd = format!(
+        "mkdir -p {} && ln -sf {} {}",
+        sh_single_quote(&dir.to_string_lossy()),
+        sh_single_quote(&target.to_string_lossy()),
+        sh_single_quote(&link.to_string_lossy()),
+    );
+    // Embed that as an AppleScript string literal (escape \ and ").
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        applescript_escape(&shell_cmd)
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|err| format!("could not run osascript: {err}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // AppleScript error -128 == the user clicked Cancel on the auth dialog.
+    if stderr.contains("-128") || stderr.contains("User canceled") {
+        Err("Installation cancelled.".into())
+    } else {
+        Err(format!("admin install failed: {}", stderr.trim()))
+    }
+}
+
+/// Wrap `s` in single quotes for a POSIX shell, escaping embedded single quotes.
+#[cfg(target_os = "macos")]
+fn sh_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Escape a string for use inside an AppleScript double-quoted literal.
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,6 +1395,47 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_install_symlinks_and_updates_path_idempotently() {
+        let home = scratch_dir("cli-user-install");
+        // A stand-in for the bundled CLI binary.
+        let target = home.join("slideflow-cli");
+        fs::write(&target, b"#!/bin/sh\n").unwrap();
+
+        let res = install_user(&target, &home).unwrap();
+        assert_eq!(res.scope, "user");
+        let link = home.join(".local/bin/slideflow");
+        assert!(link.is_symlink(), "expected a symlink at {}", link.display());
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+
+        // The rc file now references ~/.local/bin exactly once...
+        let rc_name = if std::env::var("SHELL").unwrap_or_default().contains("bash") {
+            ".bash_profile"
+        } else {
+            ".zshrc"
+        };
+        let rc_first = fs::read_to_string(home.join(rc_name)).unwrap();
+        assert_eq!(rc_first.matches(".local/bin").count(), 1);
+
+        // ...and re-running is a no-op for the rc (idempotent) while still succeeding.
+        let res2 = install_user(&target, &home).unwrap();
+        assert!(!res2.restart_shell, "second run must not re-touch the rc file");
+        assert_eq!(fs::read_to_string(home.join(rc_name)).unwrap(), rc_first);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shell_and_applescript_quoting() {
+        // Spaces and single quotes in a path survive shell single-quoting.
+        assert_eq!(sh_single_quote("/Apps/My App/x"), "'/Apps/My App/x'");
+        assert_eq!(sh_single_quote("a'b"), r"'a'\''b'");
+        // AppleScript literal escaping of backslash and double-quote.
+        assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
     }
 
     #[test]

@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Loader2,
   SlidersHorizontal,
+  Terminal,
 } from "lucide-react";
 import { useApp, type ThemeMode } from "../stores/useApp";
 import { useUpdater } from "../stores/useUpdater";
@@ -27,7 +28,7 @@ import OverlaySheet from "./OverlaySheet";
 const AUTO_UPDATE_KEY = "slideflow.autoUpdate.v1";
 const LAST_CHECK_KEY = "slideflow.updateLastChecked.v1";
 
-type SectionKey = "appearance" | "library" | "fonts" | "updates" | "ai";
+type SectionKey = "appearance" | "library" | "fonts" | "updates" | "ai" | "advanced";
 
 const NAV: { key: SectionKey; label: string; icon: ReactNode }[] = [
   { key: "appearance", label: "Appearance", icon: <SunMoon size={15} /> },
@@ -35,6 +36,7 @@ const NAV: { key: SectionKey; label: string; icon: ReactNode }[] = [
   { key: "fonts", label: "Fonts", icon: <Type size={15} /> },
   { key: "updates", label: "Updates", icon: <Download size={15} /> },
   { key: "ai", label: "Semantic search", icon: <Sparkles size={15} /> },
+  { key: "advanced", label: "Advanced", icon: <Terminal size={15} /> },
 ];
 
 /** Preferences sheet: a two-pane master/detail (nav + section). Opened by ⌘, or
@@ -94,6 +96,7 @@ export default function SettingsSheet() {
           {section === "fonts" && <FontsSection />}
           {section === "updates" && <UpdatesSection />}
           {section === "ai" && <SemanticSection />}
+          {section === "advanced" && <AdvancedSection />}
         </div>
       </div>
     </OverlaySheet>
@@ -346,6 +349,71 @@ function LibrarySection() {
           Clear &amp; rebuild index
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Advanced: install the bundled `slideflow` CLI onto the user's PATH. */
+function AdvancedSection() {
+  const [installing, setInstalling] = useState<null | "system" | "user">(null);
+  const codeChip = "rounded bg-ink/8 px-1 py-0.5 font-mono text-[11px] text-ink";
+
+  const install = async (scope: "system" | "user") => {
+    setInstalling(scope);
+    try {
+      const res = await api.installCli(scope);
+      toast.success(res.note);
+    } catch (err) {
+      toast.error("Couldn't install the command line tool: " + String(err));
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  return (
+    <div>
+      <SectionHeading>Advanced</SectionHeading>
+
+      <GroupLabel>Command line tool</GroupLabel>
+      <p className="text-body leading-relaxed text-subtle">
+        Install the <code className={codeChip}>slideflow</code> command to index, search, and
+        compose decks straight from your terminal. It links to the CLI bundled inside this app, so
+        it stays in sync as Slideflow updates.
+      </p>
+
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={() => void install("system")}
+          disabled={installing != null}
+          className={cx(outlineBtn, "disabled:opacity-40")}
+        >
+          {installing === "system" ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <Terminal size={13} />
+          )}
+          Install system-wide
+        </button>
+        <button
+          onClick={() => void install("user")}
+          disabled={installing != null}
+          className={cx(outlineBtn, "disabled:opacity-40")}
+        >
+          {installing === "user" ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <FolderPlus size={13} />
+          )}
+          Install for me only
+        </button>
+      </div>
+
+      <p className="mt-2.5 text-caption text-subtle">
+        System-wide links <code className={codeChip}>/usr/local/bin/slideflow</code> (may ask for
+        your password). Just-for-me links <code className={codeChip}>~/.local/bin/slideflow</code>{" "}
+        and adds it to your shell PATH. Then run <code className={codeChip}>slideflow --help</code>{" "}
+        in a new terminal.
+      </p>
     </div>
   );
 }

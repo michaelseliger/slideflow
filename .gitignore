@@ -2,6 +2,10 @@
 target/
 build/
 
+# CLI sidecar staged into the app bundle by apps/desktop/scripts/embed-cli.mjs
+# (built at bundle time; never committed).
+apps/desktop/src-tauri/binaries/
+
 # Node
 node_modules/
 dist/

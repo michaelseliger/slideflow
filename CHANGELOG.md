@@ -4,6 +4,11 @@ All notable user-facing changes to Slideflow. Versions follow [semver](https://s
 
 ## [Unreleased]
 
+### Added
+
+- **Install the `slideflow` CLI from the app.** Settings → Advanced → *Command line tool* installs the bundled `slideflow` command onto your `PATH` — system-wide (`/usr/local/bin`, may ask for your password) or per-user (`~/.local/bin`, added to your shell `PATH`). The CLI now ships **inside the app bundle** and updates along with it; previously the `slideflow` companion (index/search/compose/render/stats) was only available when building from source. See the new *Command line* section in the README.
+- **The `slideflow` CLI now defaults to the desktop app's library.** `slideflow search`/`stats` query exactly what the app indexed (and `index` adds to it) with no `--db` flag — no need to know where the app stores its data. Pass `--db <path>` for a separate database.
+
 ## [0.5.0] — 2026-07-07
 
 ### Added

@@ -56,18 +56,26 @@ jobs:
           # (.app.tar.gz + .sig) is only produced for *requested* bundle
           # targets, and dmg alone does not count — without it, latest.json
           # silently ships without the darwin keys.
+          # `cli_target` is the triple the bundled `slideflow` CLI sidecar is
+          # built for (embed-cli.mjs reads it as SLIDEFLOW_CLI_TARGET). It must
+          # match the `--target` the app bundles for, so the macOS cross-builds
+          # set it explicitly; Linux/Windows build for the host, so it's empty.
           - platform: macos-latest
             arch: aarch64
             args: '--target aarch64-apple-darwin --bundles app,dmg'
+            cli_target: aarch64-apple-darwin
           - platform: macos-latest
             arch: x86_64
             args: '--target x86_64-apple-darwin --bundles app,dmg'
+            cli_target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             arch: x86_64
             args: '--bundles deb,appimage,rpm'
+            cli_target: ''
           - platform: windows-latest
             arch: x86_64
             args: '--bundles msi,nsis'
+            cli_target: ''
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -124,6 +132,10 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Triple the bundled `slideflow` CLI sidecar is built for; read by
+          # apps/desktop/scripts/embed-cli.mjs (run via beforeBuildCommand).
+          # Empty on Linux/Windows → host triple.
+          SLIDEFLOW_CLI_TARGET: ${{ matrix.cli_target }}
           # Updater package signing (minisign, all platforms). Required now
           # that tauri.conf.json sets createUpdaterArtifacts — builds FAIL
           # without it. Unrelated to Apple code signing below.

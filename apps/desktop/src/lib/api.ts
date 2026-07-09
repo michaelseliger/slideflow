@@ -16,6 +16,7 @@ import type {
   FontDownloadEvent,
   FontFamily,
   AddFontsResult,
+  InstallCliResult,
   ModelDownloadEvent,
   RootRecord,
   SavedSearch,
@@ -478,6 +479,22 @@ export async function getAppVersion(): Promise<string> {
   if (!isTauri()) return "dev";
   const { getVersion } = await import("@tauri-apps/api/app");
   return getVersion();
+}
+
+/**
+ * Install the bundled `slideflow` CLI onto the user's PATH by symlinking it.
+ *   - "system": /usr/local/bin/slideflow (may prompt for a password on macOS)
+ *   - "user":   ~/.local/bin/slideflow, adding that dir to the shell PATH
+ * Rejects with a human-readable message on failure (surfaced via a toast).
+ */
+export function installCli(scope: "system" | "user"): Promise<InstallCliResult> {
+  if (isTauri()) return tauriInvoke("install_cli", { scope });
+  return Promise.resolve({
+    path: scope === "system" ? "/usr/local/bin/slideflow" : "~/.local/bin/slideflow",
+    scope,
+    restart_shell: scope === "user",
+    note: "[mock] Installing the command-line tool is only available in the desktop app.",
+  });
 }
 
 // ---------------------------------------------------------------------------
