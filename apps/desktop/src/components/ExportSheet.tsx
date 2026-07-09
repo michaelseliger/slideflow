@@ -326,17 +326,22 @@ export default function ExportSheet() {
                     </p>
                   )}
 
-                  <label className="mt-4 block">
-                    <span className="mb-1 block text-caption font-medium text-subtle">
-                      Deck title
-                    </span>
-                    <input
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && void runExport()}
-                      className="selectable w-full rounded-[7px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
-                    />
-                  </label>
+                  {/* Deck title — names the single .pptx/.pdf artifact. PNG
+                      export writes one file per slide (named from its source
+                      deck), so a deck title has no meaning there. */}
+                  {format !== "png" && (
+                    <label className="mt-4 block">
+                      <span className="mb-1 block text-caption font-medium text-subtle">
+                        Deck title
+                      </span>
+                      <input
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && void runExport()}
+                        className="selectable w-full rounded-[7px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
+                      />
+                    </label>
+                  )}
 
                   {/* Mixed-aspect fit choice — only affects PowerPoint composition
                       (PDF/PNG render each slide at its own size). */}
@@ -356,12 +361,12 @@ export default function ExportSheet() {
                     </OptionRow>
                   )}
 
-                  {/* PDF page size — informational (Slideflow fits each page to its
-                      slide; no reflow). */}
+                  {/* Page size is fixed to each slide's dimensions — plain info,
+                      not a control, since there's nothing to choose. */}
                   {format === "pdf" && (
-                    <OptionRow title="Page size">
-                      <span className="text-body text-subtle">Fit to slide</span>
-                    </OptionRow>
+                    <p className="mt-4 text-caption text-subtle">
+                      Each page is sized to its slide — no reflow or letterboxing.
+                    </p>
                   )}
 
                   {/* PNG width preset. */}

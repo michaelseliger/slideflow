@@ -19,7 +19,7 @@ import { useUpdater } from "../stores/useUpdater";
 import { useSemantic } from "../stores/useSemantic";
 import { useFonts } from "../stores/useFonts";
 import type { FontFamily } from "../lib/types";
-import { cx } from "../lib/utils";
+import { cx, isWindows } from "../lib/utils";
 import * as api from "../lib/api";
 import { toast } from "../stores/useToast";
 import RootExcludesEditor from "./RootExcludesEditor";
@@ -357,6 +357,9 @@ function LibrarySection() {
 function AdvancedSection() {
   const [installing, setInstalling] = useState<null | "system" | "user">(null);
   const codeChip = "rounded bg-ink/8 px-1 py-0.5 font-mono text-[11px] text-ink";
+  // The `install_cli` backend is a stub on non-unix platforms, so the buttons
+  // can't work on Windows yet — keep them visible but disabled, with a note.
+  const unsupported = isWindows();
 
   const install = async (scope: "system" | "user") => {
     setInstalling(scope);
@@ -384,7 +387,7 @@ function AdvancedSection() {
       <div className="mt-4 flex gap-2">
         <button
           onClick={() => void install("system")}
-          disabled={installing != null}
+          disabled={installing != null || unsupported}
           className={cx(outlineBtn, "disabled:opacity-40")}
         >
           {installing === "system" ? (
@@ -396,7 +399,7 @@ function AdvancedSection() {
         </button>
         <button
           onClick={() => void install("user")}
-          disabled={installing != null}
+          disabled={installing != null || unsupported}
           className={cx(outlineBtn, "disabled:opacity-40")}
         >
           {installing === "user" ? (
@@ -408,12 +411,19 @@ function AdvancedSection() {
         </button>
       </div>
 
-      <p className="mt-2.5 text-caption text-subtle">
-        System-wide links <code className={codeChip}>/usr/local/bin/slideflow</code> (may ask for
-        your password). Just-for-me links <code className={codeChip}>~/.local/bin/slideflow</code>{" "}
-        and adds it to your shell PATH. Then run <code className={codeChip}>slideflow --help</code>{" "}
-        in a new terminal.
-      </p>
+      {unsupported ? (
+        <p className="mt-2.5 text-caption text-subtle">
+          The command line tool isn&rsquo;t available on Windows yet — it currently installs only on
+          macOS and Linux. Until then, run the CLI directly from the app bundle.
+        </p>
+      ) : (
+        <p className="mt-2.5 text-caption text-subtle">
+          System-wide links <code className={codeChip}>/usr/local/bin/slideflow</code> (may ask for
+          your password). Just-for-me links <code className={codeChip}>~/.local/bin/slideflow</code>{" "}
+          and adds it to your shell PATH. Then run <code className={codeChip}>slideflow --help</code>{" "}
+          in a new terminal.
+        </p>
+      )}
     </div>
   );
 }

@@ -140,7 +140,6 @@ interface AppState {
 
   // --- search / browse ---
   query: string;
-  filters: SearchFilters;
   results: SearchHit[];
   searching: boolean;
   grouping: Grouping;
@@ -195,7 +194,6 @@ interface AppState {
   reloadLibrary: () => Promise<void>;
 
   setQuery: (q: string) => void;
-  setFilters: (patch: Partial<SearchFilters>) => void;
   setGrouping: (g: Grouping) => void;
   setSortMode: (m: SortMode) => void;
   setSearchMode: (m: SearchMode) => void;
@@ -298,7 +296,6 @@ export const useApp = create<AppState>((set, get) => ({
   nav: { type: "all" },
 
   query: "",
-  filters: {},
   results: [],
   searching: false,
   grouping: "flat",
@@ -371,11 +368,6 @@ export const useApp = create<AppState>((set, get) => ({
     }, 150);
   },
 
-  setFilters: (patch) => {
-    set({ filters: { ...get().filters, ...patch } });
-    void get().refresh();
-  },
-
   setGrouping: (g) => set({ grouping: g }),
 
   setSortMode: (m) => {
@@ -411,10 +403,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   setNav: async (nav) => {
     if (nav.type === "saved") {
-      // Restore the saved query + filters into the header so the user sees and
-      // can edit them; fall back to a clean slate if the id has vanished.
+      // Restore the saved query into the header so the user sees and can edit
+      // it; fall back to a clean slate if the id has vanished. All filtering
+      // lives in the query string (deck:/after:/before:/…), so the query alone
+      // reconstitutes the search.
       const saved = get().savedSearches.find((s) => s.id === nav.id);
-      set(saved ? { nav, query: saved.query, filters: saved.filters } : { nav, query: "" });
+      set(saved ? { nav, query: saved.query } : { nav, query: "" });
     } else {
       set({ nav, query: "" });
     }
@@ -423,7 +417,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   refresh: async () => {
     const token = ++searchToken;
-    const { query, filters, nav, decks } = get();
+    const { query, nav, decks } = get();
 
     // The stats and duplicates views fetch their own data; keep the grid empty
     // behind them.
@@ -446,7 +440,7 @@ export const useApp = create<AppState>((set, get) => ({
       // Effective filters: fold the active nav source into path_prefix, and
       // carry the browse sort so the backend LIMIT window is chosen by the
       // active key (ignored by full-text search, which is bm25-ranked).
-      const eff: SearchFilters = { ...filters, sort: get().sortMode };
+      const eff: SearchFilters = { sort: get().sortMode };
       // Ranked text searches carry the retrieval mode — but only while the
       // model is actually ready, so a plain install never even asks for
       // semantic ranking (the backend would silently degrade anyway).
@@ -516,9 +510,11 @@ export const useApp = create<AppState>((set, get) => ({
   saveCurrentSearch: async (name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const { query, filters } = get();
+    const { query } = get();
     try {
-      const saved = await api.saveSearch(trimmed, query, filters);
+      // Filtering lives entirely in the query string, so saved searches carry
+      // no structured filters — the query alone reconstitutes the search.
+      const saved = await api.saveSearch(trimmed, query, {});
       // The backend appends at the end; mirror that ordering locally.
       set({ savedSearches: [...get().savedSearches, saved] });
       toast.success("Search saved");

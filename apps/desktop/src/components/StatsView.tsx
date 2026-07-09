@@ -166,20 +166,22 @@ export default function StatsView() {
           <Section icon={<AlertTriangle size={14} />} title="Problems">
             <ul>
               {overview.last_scan_issues.map((issue, i) => (
-                <li
-                  key={`${issue.path}-${i}`}
-                  className="flex items-center gap-3 rounded-[6px] px-2 py-1.5 hover:bg-ink/5"
-                  title={issue.path}
-                >
-                  <span className="min-w-0 flex-1 truncate text-body text-ink">
-                    {basename(issue.path)}
-                  </span>
-                  <span
-                    className="min-w-0 max-w-[55%] shrink-0 truncate text-caption text-subtle"
-                    title={issue.reason}
+                <li key={`${issue.path}-${i}`}>
+                  <button
+                    className="flex w-full items-center gap-3 rounded-[6px] px-2 py-1.5 text-left hover:bg-ink/5"
+                    title={issue.path}
+                    onClick={() => void api.revealInFinder(issue.path)}
                   >
-                    {issue.reason}
-                  </span>
+                    <span className="min-w-0 flex-1 truncate text-body text-ink">
+                      {basename(issue.path)}
+                    </span>
+                    <span
+                      className="min-w-0 max-w-[55%] shrink-0 truncate text-caption text-subtle"
+                      title={issue.reason}
+                    >
+                      {issue.reason}
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>

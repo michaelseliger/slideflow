@@ -29,7 +29,6 @@ export default function Header() {
   const query = useApp((s) => s.query);
   const setQuery = useApp((s) => s.setQuery);
   const searching = useApp((s) => s.searching);
-  const filters = useApp((s) => s.filters);
   const results = useApp((s) => s.results);
   const grouping = useApp((s) => s.grouping);
   const setGrouping = useApp((s) => s.setGrouping);
@@ -182,44 +181,12 @@ export default function Header() {
             : navLabel(nav, roots, decks, savedSearches, tags, results.length)}
         </span>
 
-        {/* Active filter chips */}
+        {/* Active query chip */}
         <div className="flex flex-1 items-center gap-1.5 overflow-hidden">
           {query.trim() && (
             <Chip
               label={`“${truncate(query)}”`}
               onRemove={() => setQuery("")}
-            />
-          )}
-          {filters.deck_query && (
-            <Chip
-              label={`Deck: ${filters.deck_query}`}
-              onRemove={() =>
-                useApp.getState().setFilters({ deck_query: null })
-              }
-            />
-          )}
-          {filters.path_prefix && (
-            <Chip
-              label={`Folder: ${basename(filters.path_prefix)}`}
-              onRemove={() =>
-                useApp.getState().setFilters({ path_prefix: null })
-              }
-            />
-          )}
-          {filters.modified_from && (
-            <Chip
-              label={`After ${fmt(filters.modified_from)}`}
-              onRemove={() =>
-                useApp.getState().setFilters({ modified_from: null })
-              }
-            />
-          )}
-          {filters.modified_to && (
-            <Chip
-              label={`Before ${fmt(filters.modified_to)}`}
-              onRemove={() =>
-                useApp.getState().setFilters({ modified_to: null })
-              }
             />
           )}
         </div>
@@ -271,12 +238,6 @@ export default function Header() {
 
 function truncate(s: string, n = 24) {
   return s.length > n ? s.slice(0, n) + "…" : s;
-}
-function fmt(unix: number) {
-  return new Date(unix * 1000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
 }
 function navLabel(
   nav: ReturnType<typeof useApp.getState>["nav"],

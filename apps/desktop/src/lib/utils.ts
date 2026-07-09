@@ -87,6 +87,13 @@ export function isMac(): boolean {
   return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 }
 
+/** Detect Windows — used to gate features not yet supported there (e.g. the
+ *  CLI installer, whose backend is a stub on non-unix platforms). */
+export function isWindows(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Win/.test(navigator.platform || navigator.userAgent);
+}
+
 /** The platform command-key modifier for an event (meta on mac, ctrl else). */
 export function cmdKey(e: KeyboardEvent | React.KeyboardEvent): boolean {
   return isMac() ? e.metaKey : e.ctrlKey;

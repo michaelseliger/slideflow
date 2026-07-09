@@ -9,7 +9,7 @@ const WEBSITE_URL = "https://slideflow.app";
 const COFFEE_URL = "https://www.buymeacoffee.com/michaelseliger";
 const REPO_URL = "https://github.com/michaelseliger/slideflow";
 const RELEASES_URL = "https://github.com/michaelseliger/slideflow/releases";
-const ISSUES_URL = "https://github.com/michaelseliger/slideflow/issues/new";
+const ISSUES_URL = "https://github.com/michaelseliger/slideflow/issues/new/choose";
 
 /** Inline update status under the version line. States mirror `useUpdater`;
  *  release notes deliberately link to the GitHub release page (the notes baked
