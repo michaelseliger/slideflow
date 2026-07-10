@@ -489,12 +489,11 @@ export async function getAppVersion(): Promise<string> {
  */
 export function installCli(scope: "system" | "user"): Promise<InstallCliResult> {
   if (isTauri()) return tauriInvoke("install_cli", { scope });
-  return Promise.resolve({
-    path: scope === "system" ? "/usr/local/bin/slideflow" : "~/.local/bin/slideflow",
-    scope,
-    restart_shell: scope === "user",
-    note: "[mock] Installing the command-line tool is only available in the desktop app.",
-  });
+  // Desktop-only: there's no bundled CLI to symlink in a plain browser. Reject
+  // (mirroring the documented failure contract) so the caller's existing error
+  // path surfaces it — resolving with a "note" made the caller show a green
+  // success toast carrying a failure message.
+  return Promise.reject("Only available in the desktop app.");
 }
 
 // ---------------------------------------------------------------------------

@@ -127,7 +127,7 @@ your shell `PATH`). The command links to the CLI **bundled inside the app**, so 
 updates along with Slideflow. Open a new terminal, then:
 
 ```bash
-slideflow index ~/Documents/Decks                    # scan a folder into a library db
+slideflow index ~/Documents/Decks                    # scan a folder into your library
 slideflow search "pricing" --json                    # advanced-syntax search, JSON out
 slideflow compose out.pptx deck.pptx:3 talk.pptx:1   # compose, preserving each slide's format
 slideflow render deck.pptx 2 slide.svg               # one slide → self-contained SVG

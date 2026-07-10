@@ -126,6 +126,33 @@ export function applyTheme(mode: ThemeMode): boolean {
   return dark;
 }
 
+/** unix seconds → `YYYY-MM-DD` at UTC — the calendar day the query parser keys
+ *  its `after:` / `before:` bounds on (see `index/query.rs`). */
+function unixToYmd(unix: number): string {
+  return new Date(unix * 1000).toISOString().slice(0, 10);
+}
+
+/** Reconstitute a saved search's query string. New saves keep all scoping in the
+ *  query itself (`deck:` / `after:` / `before:` / …) and persist an empty
+ *  `filters` — so `saved.filters` is LEGACY, READ-ONLY: nothing writes it
+ *  (`saveCurrentSearch` sends `{}`), but rows created by dev/pre-release builds
+ *  may still carry one. Fold its expressible scopes back into the query as their
+ *  query tokens so the scope still applies (refresh() no longer forwards
+ *  structured filters). Fields with no query-token equivalent — `path_prefix`,
+ *  `favorites_only`, `tag_id`, `limit`, `sort`, `search_mode` — are intentionally
+ *  dropped. */
+function restoreSavedQuery(saved: SavedSearch): string {
+  const f = saved.filters ?? {};
+  const tokens: string[] = [];
+  // `deck:"…"` scopes to the deck_title FTS column. Strip embedded quotes so the
+  // value can't unbalance the query lexer's quote pairing.
+  const deck = (f.deck_query ?? "").replace(/"/g, "").trim();
+  if (deck !== "") tokens.push(`deck:"${deck}"`);
+  if (f.modified_from != null) tokens.push(`after:${unixToYmd(f.modified_from)}`);
+  if (f.modified_to != null) tokens.push(`before:${unixToYmd(f.modified_to)}`);
+  return [...tokens, saved.query].join(" ").trim();
+}
+
 interface AppState {
   // --- library data ---
   roots: RootRecord[];
@@ -404,11 +431,11 @@ export const useApp = create<AppState>((set, get) => ({
   setNav: async (nav) => {
     if (nav.type === "saved") {
       // Restore the saved query into the header so the user sees and can edit
-      // it; fall back to a clean slate if the id has vanished. All filtering
-      // lives in the query string (deck:/after:/before:/…), so the query alone
-      // reconstitutes the search.
+      // it; fall back to a clean slate if the id has vanished. New saves keep all
+      // scoping in the query string, but legacy rows may carry a `filters` object
+      // whose expressible scopes we fold back in (see `restoreSavedQuery`).
       const saved = get().savedSearches.find((s) => s.id === nav.id);
-      set(saved ? { nav, query: saved.query } : { nav, query: "" });
+      set(saved ? { nav, query: restoreSavedQuery(saved) } : { nav, query: "" });
     } else {
       set({ nav, query: "" });
     }

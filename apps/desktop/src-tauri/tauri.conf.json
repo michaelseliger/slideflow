@@ -4,7 +4,7 @@
   "version": "0.5.0",
   "identifier": "com.slideflow.app",
   "build": {
-    "beforeDevCommand": "node scripts/embed-cli.mjs && pnpm dev",
+    "beforeDevCommand": "node scripts/embed-cli.mjs --dev && pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "node scripts/embed-cli.mjs && pnpm build",
     "frontendDist": "../dist"

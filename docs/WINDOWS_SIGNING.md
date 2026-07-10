@@ -115,9 +115,17 @@ secret**, add all six:
 | `AZURE_CODE_SIGNING_ACCOUNT_NAME` | Signing account name | step 1 |
 | `AZURE_CERT_PROFILE_NAME` | Certificate profile name | step 1 |
 
-Add **all six before the next `v*` tag push**. With any of them missing, the
-`Set up Windows signing` step is skipped and the Windows build falls back to
-**unsigned** (it still succeeds — just no signature).
+The six secrets are **all-or-nothing** — add either all of them or none:
+
+- **All six set** → the Windows installers are signed.
+- **None set** → signing is skipped and the Windows build falls back to
+  **unsigned** (it still succeeds — just no signature). This is the default.
+- **Some but not all set** → the release job **fails fast** with an error naming
+  the missing secrets. A partial configuration is a mistake (it would otherwise
+  feed empty values into the signing command and break every signing call), so
+  it's surfaced loudly rather than silently producing an unsigned build.
+
+Add **all six before the next `v*` tag push**.
 
 ## 5. Verify a release
 
@@ -135,13 +143,24 @@ artifact means it signed.
 
 ## How the CI wiring works (for maintainers)
 
-- The six `AZURE_*` secrets are exposed as **job-level env** in
-  `release.yml` so the `if:` guard can detect their presence.
-- The **`Set up Windows signing`** step runs only on `windows-latest` and only
-  when `AZURE_CLIENT_ID` is non-empty. It `cargo install`s
-  [`trusted-signing-cli`](https://crates.io/crates/trusted-signing-cli) and
-  writes `apps/desktop/sign.windows.conf.json` containing a single
-  `bundle.windows.signCommand`.
+- The six `AZURE_*` secrets are exposed as **job-level env** in `release.yml` so
+  the validation step can read them.
+- A **`Validate Windows signing secrets`** step runs on every `windows-latest`
+  build and enforces the all-or-nothing rule above: all six present → it sets
+  `sign=true`; none present → `sign=false` (unsigned build); a partial set → it
+  exits non-zero and fails the job, naming the missing secrets. The two signing
+  steps that follow are gated on `sign == 'true'`.
+- The **`Set up Windows signing`** step `cargo install`s a **version-pinned**
+  [`trusted-signing-cli`](https://crates.io/crates/trusted-signing-cli)
+  (currently `--version 0.11.0`) and writes `apps/desktop/sign.windows.conf.json`
+  containing a single `bundle.windows.signCommand`. The pin keeps an upstream
+  release from silently changing signing behaviour between two of our releases;
+  bump it deliberately.
+- To avoid recompiling the signer from source (a few minutes) on every release,
+  the installed binary is cached with `actions/cache`, keyed on the pinned
+  version (`trusted-signing-cli-Windows-0.11.0`); a cache hit skips the
+  `cargo install`. Bumping the version changes the key, so the new version
+  compiles once and is then cached.
 - That overlay is merged into the build via `--config` appended to the
   tauri-action `args`. Keeping `signCommand` out of the committed
   `tauri.conf.json` means local `pnpm tauri build` and unsigned CI both keep
@@ -151,8 +170,8 @@ artifact means it signed.
 
 > **Tool naming note:** the crate is mid-rename to `artifact-signing-cli` to
 > match Azure's rebrand. If a future Tauri release expects that binary, change
-> both the `cargo install` name in the workflow and the first token of
-> `signCommand` accordingly.
+> the `cargo install` name (plus its `--version` pin and the cache key/path) in
+> the workflow and the first token of `signCommand` accordingly.
 
 ## Notes
 

@@ -24,9 +24,10 @@
 #     docs/RELEASE_SIGNING.md for how to create the Developer ID cert and add
 #     the secrets. The APPLE_* vars are inert on the Linux/Windows runners.
 #   * Windows — Authenticode signing via Azure Artifact Signing (formerly
-#     "Trusted Signing") IS wired up below. It reads six AZURE_* repo secrets;
-#     until they exist the Windows build falls back to UNSIGNED (SmartScreen
-#     "unknown publisher" warning). There is no Windows equivalent of Apple
+#     "Trusted Signing") IS wired up below. It reads six AZURE_* repo secrets,
+#     all-or-nothing: set all six to sign; set none and the Windows build falls
+#     back to UNSIGNED (SmartScreen "unknown publisher" warning); a PARTIAL set
+#     fails the job loudly. There is no Windows equivalent of Apple
 #     notarization — a valid signature stops the "unknown publisher" wording,
 #     but SmartScreen still warns until the download builds reputation. See
 #     docs/WINDOWS_SIGNING.md for how to create the Azure resources and add the
@@ -58,7 +59,8 @@ jobs:
     # reads the three AZURE credentials from the environment; the endpoint /
     # account / profile become the signCommand injected below. All inert unless
     # the secrets are set, and unused on the macOS/Linux jobs. Job-level so the
-    # "Set up Windows signing" step's `if:` can gate on env.AZURE_CLIENT_ID.
+    # "Validate Windows signing secrets" step can read them all to enforce the
+    # all-or-nothing gate the later signing steps key off.
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -74,26 +76,21 @@ jobs:
           # (.app.tar.gz + .sig) is only produced for *requested* bundle
           # targets, and dmg alone does not count — without it, latest.json
           # silently ships without the darwin keys.
-          # `cli_target` is the triple the bundled `slideflow` CLI sidecar is
-          # built for (embed-cli.mjs reads it as SLIDEFLOW_CLI_TARGET). It must
-          # match the `--target` the app bundles for, so the macOS cross-builds
-          # set it explicitly; Linux/Windows build for the host, so it's empty.
+          # The bundled `slideflow` CLI sidecar's triple needs no wiring here:
+          # embed-cli.mjs reads TAURI_ENV_TARGET_TRIPLE, which the tauri CLI
+          # sets for its hook commands from the `--target` in `args`.
           - platform: macos-latest
             arch: aarch64
             args: '--target aarch64-apple-darwin --bundles app,dmg'
-            cli_target: aarch64-apple-darwin
           - platform: macos-latest
             arch: x86_64
             args: '--target x86_64-apple-darwin --bundles app,dmg'
-            cli_target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             arch: x86_64
             args: '--bundles deb,appimage,rpm'
-            cli_target: ''
           - platform: windows-latest
             arch: x86_64
             args: '--bundles msi,nsis'
-            cli_target: ''
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -146,17 +143,74 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
-      # Windows only, and only when the Azure secrets are present. Installs the
-      # signer and writes a tiny config overlay that sets bundle.windows.signCommand.
-      # tauri-action merges it via `--config` (appended to args below). Leaving
-      # tauri.conf.json itself free of signCommand keeps local/unsigned builds
-      # working — without this overlay the Windows build is simply unsigned.
-      - name: Set up Windows signing (Azure Artifact Signing)
-        id: winsign
-        if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+      # Windows only. Azure Artifact Signing needs all six AZURE_* secrets;
+      # treat them as all-or-nothing so a half-configured repo fails loudly
+      # instead of silently shipping an unsigned build (a partial set would
+      # otherwise interpolate empty flags into signCommand and break every
+      # signing call):
+      #   * all six set -> sign        (sign=true)
+      #   * none set     -> unsigned build, as documented (sign=false)
+      #   * some set     -> hard error naming the missing secrets
+      # Also resolves the cargo bin dir for the signer cache below (explicit
+      # path — actions/cache doesn't reliably expand ~ across runners).
+      - name: Validate Windows signing secrets
+        id: winsign-check
+        if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          cargo install trusted-signing-cli --locked
+          $required = @(
+            'AZURE_CLIENT_ID',
+            'AZURE_CLIENT_SECRET',
+            'AZURE_TENANT_ID',
+            'AZURE_ENDPOINT',
+            'AZURE_CODE_SIGNING_ACCOUNT_NAME',
+            'AZURE_CERT_PROFILE_NAME'
+          )
+          # @(...) forces array context so .Count is reliable even when the
+          # filter matches nothing (bare Where-Object yields $null otherwise).
+          $missing = @($required | Where-Object { [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_)) })
+          $present = @($required | Where-Object { -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -eq 0) {
+            Write-Host "All six AZURE_* secrets present -> Windows build will be signed."
+            "sign=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } elseif ($present.Count -eq 0) {
+            Write-Host "No AZURE_* secrets set -> Windows build will be UNSIGNED."
+            "sign=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            $msg = "Partial Azure signing config: set [{0}] but missing [{1}]. Set ALL six AZURE_* secrets to sign, or NONE to build unsigned." -f ($present -join ', '), ($missing -join ', ')
+            Write-Error $msg
+            exit 1
+          }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          "cargo_bin=$(Join-Path $cargoHome 'bin')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Cache the compiled signer so we don't rebuild it from source (several
+      # minutes; Swatinem/rust-cache above does not cover ~/.cargo/bin) on every
+      # release. Keyed on the pinned version so a bump busts the cache.
+      - name: Cache trusted-signing-cli
+        id: winsign-cache
+        if: matrix.platform == 'windows-latest' && steps.winsign-check.outputs.sign == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.winsign-check.outputs.cargo_bin }}\trusted-signing-cli.exe
+          key: trusted-signing-cli-${{ runner.os }}-0.11.0
+
+      # Install the signer (skipped on a cache hit) and write a tiny config
+      # overlay that sets bundle.windows.signCommand. tauri-action merges it via
+      # `--config` (appended to args below). Leaving tauri.conf.json itself free
+      # of signCommand keeps local/unsigned builds working — without this
+      # overlay the Windows build is simply unsigned.
+      - name: Set up Windows signing (Azure Artifact Signing)
+        id: winsign
+        if: matrix.platform == 'windows-latest' && steps.winsign-check.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          if ('${{ steps.winsign-cache.outputs.cache-hit }}' -ne 'true') {
+            # Version pinned so an upstream release can't silently change signing
+            # behaviour between two of our releases. Bump deliberately, and keep
+            # the winsign-cache key in sync.
+            cargo install trusted-signing-cli --locked --version 0.11.0
+          }
           # Resolve endpoint/account/profile now; keep %1 literal — Tauri
           # substitutes it with each artifact path at bundle time. Forward
           # slashes only: Tauri runs signCommand as a raw process, not a shell.
@@ -170,10 +224,6 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Triple the bundled `slideflow` CLI sidecar is built for; read by
-          # apps/desktop/scripts/embed-cli.mjs (run via beforeBuildCommand).
-          # Empty on Linux/Windows → host triple.
-          SLIDEFLOW_CLI_TARGET: ${{ matrix.cli_target }}
           # Updater package signing (minisign, all platforms). Required now
           # that tauri.conf.json sets createUpdaterArtifacts — builds FAIL
           # without it. Unrelated to Apple code signing below.

@@ -10,7 +10,18 @@ import { useApp } from "../stores/useApp";
 import { useSemantic } from "../stores/useSemantic";
 import { cx, deckDisplayName, formatBytes, formatModified, basename } from "../lib/utils";
 import * as api from "../lib/api";
+import { toast } from "../stores/useToast";
 import { dropKindLabel } from "./ApproxBadge";
+
+/** Reveal a path in Finder, surfacing a toast if it fails. Both call sites here
+ *  point at files that may be gone — Problems rows (skipped because the file was
+ *  moved/deleted) and past exports the user may have moved — so `reveal_in_finder`
+ *  can reject; a void-discarded rejection would leave the row looking dead. */
+function reveal(path: string) {
+  void api.revealInFinder(path).catch((err) =>
+    toast.error(`Couldn't reveal the file: ${String(err)}`),
+  );
+}
 
 /** Statistics view: library counts, index timing, and recent activity
  *  (searches, exports). Swaps in for the grid via the sidebar. */
@@ -142,7 +153,7 @@ export default function StatsView() {
                   <button
                     key={`${ex.exported_unix}-${i}`}
                     title={ex.output_path}
-                    onClick={() => void api.revealInFinder(ex.output_path)}
+                    onClick={() => reveal(ex.output_path)}
                     className="flex items-center gap-2 text-left"
                   >
                     <span className="min-w-0 flex-1 truncate text-body text-ink">
@@ -170,7 +181,7 @@ export default function StatsView() {
                   <button
                     className="flex w-full items-center gap-3 rounded-[6px] px-2 py-1.5 text-left hover:bg-ink/5"
                     title={issue.path}
-                    onClick={() => void api.revealInFinder(issue.path)}
+                    onClick={() => reveal(issue.path)}
                   >
                     <span className="min-w-0 flex-1 truncate text-body text-ink">
                       {basename(issue.path)}

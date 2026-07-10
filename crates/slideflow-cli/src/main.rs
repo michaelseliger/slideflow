@@ -31,13 +31,14 @@ use slideflow_core::render::{render_slide, RenderOptions};
 struct Cli {
     /// Path to the library SQLite database.
     ///
-    /// Defaults to the Slideflow desktop app's library, so `search`/`stats`
-    /// query exactly what the app indexed and `index` adds to it — no need to
-    /// know where the app is installed. Pass this to use a separate database.
-    /// (Created on `index`; must already exist for `search`/`stats`; ignored by
-    /// `compose`/`render`.)
-    #[arg(long, global = true, value_name = "PATH")]
-    db: Option<PathBuf>,
+    /// Defaults to the Slideflow desktop app's own library — the live `library.db`
+    /// the app itself reads and writes (its resolved path is shown as the default
+    /// below) — so `search`/`stats` query exactly what the app indexed and `index`
+    /// adds to it, with no need to know where the app is installed. Pass this to use
+    /// a separate database. (Created on `index`; must already exist for
+    /// `search`/`stats`; ignored by `compose`/`render`.)
+    #[arg(long, global = true, value_name = "PATH", default_value_os_t = default_db_path())]
+    db: PathBuf,
 
     #[command(subcommand)]
     command: Command,
@@ -153,9 +154,10 @@ fn main() -> ExitCode {
 /// Dispatch a parsed command. Every arm returns `Result<(), String>`; the string
 /// is the human-readable error shown on stderr before exiting non-zero.
 fn run(cli: &Cli) -> Result<(), String> {
-    // `--db` when given, else the desktop app's library (so the CLI is a true
-    // companion to the app instead of a separate CWD-local database).
-    let db = cli.db.clone().unwrap_or_else(default_db_path);
+    // `--db`, or its default: the desktop app's live library (resolved by clap via
+    // `default_db_path`), so the CLI is a companion to the app rather than a
+    // separate CWD-local database.
+    let db = cli.db.clone();
     match &cli.command {
         Command::Index { folder } => cmd_index(&db, folder),
         Command::Search { query, limit, json } => cmd_search(&db, query, *limit, *json),
@@ -296,7 +298,9 @@ fn cmd_search(db: &Path, query: &str, limit: usize, json: bool) -> Result<(), St
     }
 
     if hits.is_empty() {
-        println!("No matches for {query:?}.");
+        // Name the library so an empty result reads as "nothing matched here",
+        // not "wrong database" — matches `stats`/`index`, which also echo the path.
+        println!("No matches for {query:?} in {}.", db.display());
         return Ok(());
     }
 

@@ -1146,6 +1146,13 @@ fn install_cli_impl(_scope: &str) -> Result<InstallCliResult, String> {
 /// stripped, so it sits beside us as `slideflow-cli`.
 #[cfg(unix)]
 fn bundled_cli_path() -> Result<PathBuf, String> {
+    // `beforeDevCommand` now stages the sidecar next to the debug exe, so the
+    // old "file is missing" heuristic no longer catches `tauri dev`. Refuse
+    // explicitly: a symlink into target/debug dangles after `cargo clean`.
+    // `tauri::is_dev()` is true exactly for non-bundled builds.
+    if tauri::is_dev() {
+        return Err("The command-line tool is only available in the installed Slideflow app, not in `tauri dev`.".into());
+    }
     let exe = std::env::current_exe().map_err(e)?;
     // App Translocation: a quarantined app launched from Downloads is mounted
     // read-only at a random /private/var/folders/…/AppTranslocation/… path. A
@@ -1155,6 +1162,15 @@ fn bundled_cli_path() -> Result<PathBuf, String> {
             "Move Slideflow to your Applications folder and reopen it, then try again.".into(),
         );
     }
+    // Linux AppImage: `current_exe()` resolves inside the transient
+    // `/tmp/.mount_*` squashfs mount, so an installed symlink dangles once the
+    // app quits. The AppImage runtime advertises itself via `$APPIMAGE`
+    // (mirrors updates.rs). No macOS effect — the var is never set there.
+    if std::env::var_os("APPIMAGE").is_some() {
+        return Err(
+            "The command-line tool can't be installed from an AppImage. Install the .deb or .rpm build of Slideflow, then try again.".into(),
+        );
+    }
     let dir = exe
         .parent()
         .ok_or_else(|| "could not resolve the app directory".to_string())?;
@@ -1162,7 +1178,7 @@ fn bundled_cli_path() -> Result<PathBuf, String> {
     if cli.exists() {
         Ok(cli)
     } else {
-        Err("The command-line tool is only available in the installed Slideflow app, not in `tauri dev`.".into())
+        Err("The command-line tool couldn't be found next to the Slideflow app.".into())
     }
 }
 
@@ -1177,12 +1193,59 @@ enum LinkErr {
     Other(String),
 }
 
-/// Point `link` at `target`, replacing any existing file/symlink. Reports
+/// File name of the bundled CLI a Slideflow-owned symlink points at. Used to
+/// tell our own link apart from an unrelated `slideflow` at the same path.
+#[cfg(unix)]
+const CLI_LINK_TARGET_NAME: &str = "slideflow-cli";
+
+/// Whether we may replace whatever currently sits at `link`. We only ever
+/// touch a path that is missing, or a symlink Slideflow itself created (its
+/// target file name is `slideflow-cli`, which also covers a stale link from a
+/// previous install). Anything else — a real binary, a personal script, a
+/// prior `cargo install` — must be left alone.
+#[cfg(unix)]
+fn link_is_replaceable(link: &Path) -> Result<bool, String> {
+    use std::io::ErrorKind;
+    let meta = match fs::symlink_metadata(link) {
+        Ok(m) => m,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(err) => return Err(format!("inspecting {}: {err}", link.display())),
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+    match fs::read_link(link) {
+        Ok(dest) => Ok(dest
+            .file_name()
+            .is_some_and(|n| n == CLI_LINK_TARGET_NAME)),
+        Err(err) => Err(format!("reading link {}: {err}", link.display())),
+    }
+}
+
+/// Message shown when an unrelated `slideflow` occupies the install path. We
+/// won't delete it for the user — they have to remove it deliberately.
+#[cfg(unix)]
+fn unrelated_binary_error(link: &Path) -> String {
+    format!(
+        "A different \u{201c}slideflow\u{201d} already exists at {}. Remove it manually, then try again.",
+        link.display()
+    )
+}
+
+/// Point `link` at `target`, replacing an existing Slideflow-owned symlink (or
+/// creating a fresh one). Refuses to clobber an unrelated `slideflow`. Reports
 /// permission problems as [`LinkErr::NeedsPrivilege`] so the caller can decide
 /// whether to escalate.
 #[cfg(unix)]
 fn try_replace_symlink(target: &Path, link: &Path) -> Result<(), LinkErr> {
     use std::io::ErrorKind;
+    // Never delete an unrelated binary. This needs no elevated privileges, so
+    // it runs before any escalation path.
+    match link_is_replaceable(link) {
+        Ok(true) => {}
+        Ok(false) => return Err(LinkErr::Other(unrelated_binary_error(link))),
+        Err(msg) => return Err(LinkErr::Other(msg)),
+    }
     if let Some(parent) = link.parent() {
         if !parent.exists() {
             match fs::create_dir_all(parent) {
@@ -1228,6 +1291,14 @@ fn install_system(target: &Path) -> Result<InstallCliResult, String> {
         Err(LinkErr::NeedsPrivilege) => {
             #[cfg(target_os = "macos")]
             {
+                // The elevated `ln` runs as root and would clobber anything;
+                // re-run the ownership check (no root needed) so we never
+                // delete an unrelated `slideflow` with admin rights.
+                match link_is_replaceable(&link) {
+                    Ok(true) => {}
+                    Ok(false) => return Err(unrelated_binary_error(&link)),
+                    Err(msg) => return Err(msg),
+                }
                 symlink_with_admin(target, &link)?;
                 Ok(system_result(&link))
             }
@@ -1268,53 +1339,177 @@ fn install_user(target: &Path, home: &Path) -> Result<InstallCliResult, String> 
         }
         Err(LinkErr::Other(msg)) => return Err(msg),
     }
-    // ~/.local/bin is not on the default macOS PATH — add it to the shell rc.
-    let touched = ensure_local_bin_on_path(home)?;
-    let note = if touched.is_empty() {
-        format!(
-            "Installed the \u{201c}slideflow\u{201d} command at {}.",
-            link.display()
-        )
-    } else {
-        format!(
-            "Installed the \u{201c}slideflow\u{201d} command at {}, and added ~/.local/bin to your PATH in {}. Open a new terminal to use it.",
-            link.display(),
-            touched.join(", ")
-        )
+    // ~/.local/bin is not on the default macOS PATH — add it to the shell
+    // config appropriate for the user's shell.
+    let (note, restart_shell) = match ensure_local_bin_on_path(home)? {
+        PathSetup::Configured(file) => (
+            format!(
+                "Installed the \u{201c}slideflow\u{201d} command at {}, and added ~/.local/bin to your PATH in {}. Open a new terminal to use it.",
+                link.display(),
+                file
+            ),
+            true,
+        ),
+        PathSetup::AlreadyConfigured => (
+            format!(
+                "Installed the \u{201c}slideflow\u{201d} command at {}.",
+                link.display()
+            ),
+            false,
+        ),
+        PathSetup::ManualNeeded => (
+            format!(
+                "Installed the \u{201c}slideflow\u{201d} command at {}. Add ~/.local/bin to your PATH to use it.",
+                link.display()
+            ),
+            false,
+        ),
     };
     Ok(InstallCliResult {
         path: link.display().to_string(),
         scope: "user".into(),
-        restart_shell: !touched.is_empty(),
+        restart_shell,
         note,
     })
 }
 
-/// Ensure `~/.local/bin` is on PATH for the user's login shell by appending a
-/// guarded export line to its rc file. Idempotent: skips when the file already
-/// references `.local/bin`. Returns the rc file name if it was modified.
+/// Marker line prefixing the block we append, so a re-run recognises its own
+/// edit even if the user later reformats the `export`/`fish_add_path` line.
 #[cfg(unix)]
-fn ensure_local_bin_on_path(home: &Path) -> Result<Vec<String>, String> {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let rc_name = if shell.contains("bash") {
-        ".bash_profile"
-    } else {
-        ".zshrc"
+const SLIDEFLOW_MARKER: &str = "# Added by Slideflow";
+
+/// Which shell-config file (if any) to edit to put `~/.local/bin` on PATH.
+#[cfg(unix)]
+#[derive(Debug)]
+enum RcTarget {
+    /// A POSIX rc file to append an `export PATH=…` block to (zsh, bash).
+    Posix(PathBuf),
+    /// A fish `conf.d` snippet to create with `fish_add_path`.
+    Fish(PathBuf),
+    /// Shell not recognised — we won't touch any file.
+    Unknown,
+}
+
+/// Outcome of trying to put `~/.local/bin` on PATH.
+#[cfg(unix)]
+#[derive(Debug)]
+enum PathSetup {
+    /// A shell config was written/appended; carries its display path.
+    Configured(String),
+    /// A live (non-comment) reference was already present — nothing to do.
+    AlreadyConfigured,
+    /// The shell couldn't be determined; the user must add it themselves.
+    ManualNeeded,
+}
+
+/// Choose the shell-config file from the `$SHELL` basename. Pure (no IO), so it
+/// is unit-testable across shells without touching the environment.
+#[cfg(unix)]
+fn rc_target_for_shell(shell: &str, home: &Path, zdotdir: Option<&Path>) -> RcTarget {
+    // `$SHELL` is an absolute path like `/bin/zsh`; match on its file name.
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match name {
+        "zsh" => RcTarget::Posix(zdotdir.unwrap_or(home).join(".zshrc")),
+        // Login shells read `~/.bash_profile`; on Linux, non-login terminals
+        // read `~/.bashrc` instead. macOS Terminal opens login shells.
+        "bash" => {
+            let file = if cfg!(target_os = "macos") {
+                ".bash_profile"
+            } else {
+                ".bashrc"
+            };
+            RcTarget::Posix(home.join(file))
+        }
+        "fish" => RcTarget::Fish(home.join(".config/fish/conf.d/slideflow.fish")),
+        _ => RcTarget::Unknown,
+    }
+}
+
+/// The block appended to a POSIX rc file. Leading blank line separates it from
+/// whatever preceded it; the marker lets a re-run detect its own edit.
+#[cfg(unix)]
+fn posix_export_block() -> String {
+    format!("\n{SLIDEFLOW_MARKER} \u{2014} put the slideflow CLI on your PATH\nexport PATH=\"$HOME/.local/bin:$PATH\"\n")
+}
+
+/// The snippet written into fish's `conf.d`.
+#[cfg(unix)]
+fn fish_path_block() -> String {
+    format!("\n{SLIDEFLOW_MARKER} \u{2014} put the slideflow CLI on your PATH\nfish_add_path -g $HOME/.local/bin\n")
+}
+
+/// Whether `file` already puts `~/.local/bin` on PATH. True when it carries our
+/// marker, or any *live* (non-comment) line mentions `.local/bin`. A missing
+/// file is not configured; other read errors propagate. Reads raw bytes and
+/// decodes lossily so non-UTF-8 shell configs never derail the check.
+#[cfg(unix)]
+fn already_on_path(file: &Path) -> Result<bool, String> {
+    use std::io::ErrorKind;
+    let bytes = match fs::read(file) {
+        Ok(b) => b,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("reading {}: {err}", file.display())),
     };
-    let rc = home.join(rc_name);
-    let existing = fs::read_to_string(&rc).unwrap_or_default();
-    if existing.contains(".local/bin") {
-        return Ok(Vec::new());
+    let text = String::from_utf8_lossy(&bytes);
+    if text.contains(SLIDEFLOW_MARKER) {
+        return Ok(true);
     }
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
+    Ok(text.lines().any(|line| {
+        let t = line.trim_start();
+        !t.starts_with('#') && t.contains(".local/bin")
+    }))
+}
+
+/// Append `block` to `file`, creating it (and any missing parent dirs) first.
+/// Crucially, this only ever *appends* — existing content, UTF-8 or not, can
+/// never be lost.
+#[cfg(unix)]
+fn append_block(file: &Path, block: &str) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("creating {}: {err}", parent.display()))?;
     }
-    updated.push_str(
-        "\n# Added by Slideflow \u{2014} put the slideflow CLI on your PATH\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
-    );
-    fs::write(&rc, updated).map_err(|err| format!("updating {}: {err}", rc.display()))?;
-    Ok(vec![rc_name.to_string()])
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(file)
+        .map_err(|err| format!("opening {}: {err}", file.display()))?;
+    f.write_all(block.as_bytes())
+        .map_err(|err| format!("updating {}: {err}", file.display()))
+}
+
+/// Ensure `~/.local/bin` is on PATH, using the shell named by `shell` (a
+/// `$SHELL`-style path). Idempotent; never destroys existing config.
+#[cfg(unix)]
+fn ensure_local_bin_on_path_for(
+    shell: &str,
+    home: &Path,
+    zdotdir: Option<&Path>,
+) -> Result<PathSetup, String> {
+    let (file, block) = match rc_target_for_shell(shell, home, zdotdir) {
+        RcTarget::Posix(f) => (f, posix_export_block()),
+        RcTarget::Fish(f) => (f, fish_path_block()),
+        RcTarget::Unknown => return Ok(PathSetup::ManualNeeded),
+    };
+    if already_on_path(&file)? {
+        return Ok(PathSetup::AlreadyConfigured);
+    }
+    append_block(&file, &block)?;
+    Ok(PathSetup::Configured(file.display().to_string()))
+}
+
+/// Ensure `~/.local/bin` is on PATH for the current shell (`$SHELL`, honouring
+/// `$ZDOTDIR` for zsh). See [`ensure_local_bin_on_path_for`].
+#[cfg(unix)]
+fn ensure_local_bin_on_path(home: &Path) -> Result<PathSetup, String> {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let zdotdir = std::env::var_os("ZDOTDIR")
+        .filter(|z| !z.is_empty())
+        .map(PathBuf::from);
+    ensure_local_bin_on_path_for(&shell, home, zdotdir.as_deref())
 }
 
 #[cfg(unix)]
@@ -1399,7 +1594,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn user_install_symlinks_and_updates_path_idempotently() {
+    fn user_install_symlinks_and_is_idempotent() {
         let home = scratch_dir("cli-user-install");
         // A stand-in for the bundled CLI binary.
         let target = home.join("slideflow-cli");
@@ -1411,19 +1606,199 @@ mod tests {
         assert!(link.is_symlink(), "expected a symlink at {}", link.display());
         assert_eq!(fs::read_link(&link).unwrap(), target);
 
-        // The rc file now references ~/.local/bin exactly once...
-        let rc_name = if std::env::var("SHELL").unwrap_or_default().contains("bash") {
+        // Re-running relinks the Slideflow-owned symlink and never re-touches a
+        // shell config, so `restart_shell` is false the second time regardless
+        // of which shell the test runs under. (PATH-file idempotence is covered
+        // deterministically by `zsh_path_setup_appends_once_and_is_idempotent`.)
+        let res2 = install_user(&target, &home).unwrap();
+        assert!(!res2.restart_shell, "second run must not re-touch a shell config");
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// An unrelated `slideflow` at the install path must never be deleted.
+    #[cfg(unix)]
+    #[test]
+    fn user_install_refuses_to_clobber_unrelated_binary() {
+        let home = scratch_dir("cli-clobber");
+        let target = home.join("slideflow-cli");
+        fs::write(&target, b"#!/bin/sh\n").unwrap();
+
+        // Someone's own `slideflow` (a plain file, not our symlink) sits there.
+        let bin_dir = home.join(".local/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let existing = bin_dir.join("slideflow");
+        fs::write(&existing, b"my own script\n").unwrap();
+
+        let err = install_user(&target, &home).unwrap_err();
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+        // The user's file is untouched.
+        assert_eq!(fs::read(&existing).unwrap(), b"my own script\n");
+        assert!(!existing.is_symlink());
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A stale Slideflow-owned symlink (target file name `slideflow-cli`) is
+    /// replaceable, even when it dangles.
+    #[cfg(unix)]
+    #[test]
+    fn stale_slideflow_symlink_is_replaceable() {
+        let dir = scratch_dir("cli-stale-link");
+        let link = dir.join("slideflow");
+        // A dangling link to a nonexistent `…/slideflow-cli` (a previous install).
+        std::os::unix::fs::symlink(dir.join("gone/slideflow-cli"), &link).unwrap();
+        assert!(link_is_replaceable(&link).unwrap());
+
+        // A symlink to something else is NOT ours.
+        let other = dir.join("other");
+        std::os::unix::fs::symlink(dir.join("elsewhere/brew-slideflow"), &other).unwrap();
+        assert!(!link_is_replaceable(&other).unwrap());
+
+        // A plain file is not replaceable; a missing path is.
+        let plain = dir.join("plain");
+        fs::write(&plain, b"x").unwrap();
+        assert!(!link_is_replaceable(&plain).unwrap());
+        assert!(link_is_replaceable(&dir.join("missing")).unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rc_target_follows_the_shell_basename() {
+        let home = Path::new("/home/u");
+        // zsh honours $ZDOTDIR, else falls back to $HOME.
+        assert!(matches!(
+            rc_target_for_shell("/bin/zsh", home, None),
+            RcTarget::Posix(p) if p == home.join(".zshrc")
+        ));
+        let zdot = Path::new("/cfg/zsh");
+        assert!(matches!(
+            rc_target_for_shell("/usr/bin/zsh", home, Some(zdot)),
+            RcTarget::Posix(p) if p == zdot.join(".zshrc")
+        ));
+        // bash: platform-appropriate login rc.
+        let bash_rc = if cfg!(target_os = "macos") {
             ".bash_profile"
         } else {
-            ".zshrc"
+            ".bashrc"
         };
-        let rc_first = fs::read_to_string(home.join(rc_name)).unwrap();
-        assert_eq!(rc_first.matches(".local/bin").count(), 1);
+        assert!(matches!(
+            rc_target_for_shell("/bin/bash", home, None),
+            RcTarget::Posix(p) if p == home.join(bash_rc)
+        ));
+        // fish uses a conf.d snippet.
+        assert!(matches!(
+            rc_target_for_shell("/usr/local/bin/fish", home, None),
+            RcTarget::Fish(p) if p == home.join(".config/fish/conf.d/slideflow.fish")
+        ));
+        // Unknown or empty shells are left untouched.
+        assert!(matches!(rc_target_for_shell("/bin/tcsh", home, None), RcTarget::Unknown));
+        assert!(matches!(rc_target_for_shell("", home, None), RcTarget::Unknown));
+    }
 
-        // ...and re-running is a no-op for the rc (idempotent) while still succeeding.
-        let res2 = install_user(&target, &home).unwrap();
-        assert!(!res2.restart_shell, "second run must not re-touch the rc file");
-        assert_eq!(fs::read_to_string(home.join(rc_name)).unwrap(), rc_first);
+    #[cfg(unix)]
+    #[test]
+    fn zsh_path_setup_appends_once_and_is_idempotent() {
+        let home = scratch_dir("cli-zsh-path");
+        match ensure_local_bin_on_path_for("zsh", &home, None).unwrap() {
+            PathSetup::Configured(f) => assert!(f.ends_with(".zshrc"), "wrote {f}"),
+            other => panic!("expected Configured, got {other:?}"),
+        }
+        let rc = home.join(".zshrc");
+        let first = fs::read_to_string(&rc).unwrap();
+        assert!(first.contains(SLIDEFLOW_MARKER), "marker must be present");
+        assert_eq!(first.matches(".local/bin").count(), 1);
+
+        // Second run detects its own marker and does nothing.
+        assert!(matches!(
+            ensure_local_bin_on_path_for("zsh", &home, None).unwrap(),
+            PathSetup::AlreadyConfigured
+        ));
+        assert_eq!(fs::read_to_string(&rc).unwrap(), first, "rc must be unchanged");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fish_path_setup_writes_confd_snippet() {
+        let home = scratch_dir("cli-fish-path");
+        match ensure_local_bin_on_path_for("/usr/bin/fish", &home, None).unwrap() {
+            PathSetup::Configured(f) => assert!(f.ends_with("conf.d/slideflow.fish"), "wrote {f}"),
+            other => panic!("expected Configured, got {other:?}"),
+        }
+        let snippet = home.join(".config/fish/conf.d/slideflow.fish");
+        let body = fs::read_to_string(&snippet).unwrap();
+        assert!(body.contains("fish_add_path -g $HOME/.local/bin"));
+        // Re-running is a no-op.
+        assert!(matches!(
+            ensure_local_bin_on_path_for("fish", &home, None).unwrap(),
+            PathSetup::AlreadyConfigured
+        ));
+        assert_eq!(fs::read_to_string(&snippet).unwrap(), body);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_shell_touches_nothing() {
+        let home = scratch_dir("cli-unknown-shell");
+        assert!(matches!(
+            ensure_local_bin_on_path_for("/bin/tcsh", &home, None).unwrap(),
+            PathSetup::ManualNeeded
+        ));
+        // No files created anywhere under home.
+        assert!(fs::read_dir(&home).unwrap().next().is_none(), "nothing should be written");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Finding 5: a commented-out line must not read as configured.
+    #[cfg(unix)]
+    #[test]
+    fn commented_local_bin_is_not_treated_as_configured() {
+        let dir = scratch_dir("already-on-path");
+        let rc = dir.join(".zshrc");
+
+        fs::write(&rc, "# export PATH=\"$HOME/.local/bin:$PATH\"\n").unwrap();
+        assert!(!already_on_path(&rc).unwrap(), "a comment is not a live PATH edit");
+
+        fs::write(&rc, "  export PATH=\"$HOME/.local/bin:$PATH\"\n").unwrap();
+        assert!(already_on_path(&rc).unwrap(), "an indented real export line counts");
+
+        // Our marker counts even if the user later edits the export line.
+        fs::write(&rc, format!("{SLIDEFLOW_MARKER}\n# (line removed)\n")).unwrap();
+        assert!(already_on_path(&rc).unwrap(), "our marker counts");
+
+        assert!(!already_on_path(&dir.join("nope")).unwrap(), "a missing file is not configured");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding 1 (the destructive bug): a non-UTF-8 rc file must be appended to,
+    /// never rewritten — every original byte survives.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_rc_content_is_preserved_when_appending() {
+        let home = scratch_dir("cli-latin1-rc");
+        let rc = home.join(".zshrc");
+        // A Latin-1 comment (0xFC='ü', 0xDF='ß') that breaks read_to_string.
+        let original: &[u8] = b"# gr\xFC\xDFe\nalias ll='ls -l'\n";
+        fs::write(&rc, original).unwrap();
+
+        assert!(matches!(
+            ensure_local_bin_on_path_for("zsh", &home, None).unwrap(),
+            PathSetup::Configured(_)
+        ));
+
+        let after = fs::read(&rc).unwrap();
+        assert!(after.starts_with(original), "existing shell config must never be lost");
+        let appended = String::from_utf8_lossy(&after);
+        assert!(appended.contains(SLIDEFLOW_MARKER));
+        assert!(appended.contains("export PATH=\"$HOME/.local/bin:$PATH\""));
 
         let _ = fs::remove_dir_all(&home);
     }
