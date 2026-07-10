@@ -512,8 +512,7 @@ export async function onMenuOpen(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
-  const un = await listen<"about" | "settings">("menu:open", (e) => handler(e.payload));
-  return un;
+  return await listen<"about" | "settings">("menu:open", (e) => handler(e.payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -769,8 +768,7 @@ export async function onFontDownloadEvent(
 ): Promise<() => void> {
   if (isTauri()) {
     const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<FontDownloadEvent>("font:download", (e) => handler(e.payload));
-    return un;
+    return await listen<FontDownloadEvent>("font:download", (e) => handler(e.payload));
   }
   return mock.onFontDownloadEvent(handler);
 }
@@ -780,8 +778,7 @@ export async function onFontDownloadEvent(
 export async function onFontsChanged(handler: () => void): Promise<() => void> {
   if (isTauri()) {
     const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen("fonts:changed", () => handler());
-    return un;
+    return await listen("fonts:changed", () => handler());
   }
   return mock.onFontsChanged(handler);
 }
