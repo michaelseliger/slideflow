@@ -44,7 +44,7 @@ export default function OverlaySheet({
       {open && (
         <motion.div
           className={cx(
-            "fixed inset-0 flex items-center justify-center bg-black/40 p-8 backdrop-blur-sm",
+            "fixed inset-0 flex items-center justify-center bg-black/40 p-8 backdrop-blur-xs",
             zClassName,
           )}
           initial={{ opacity: 0 }}

@@ -109,7 +109,7 @@ export default function TraySwitcher() {
                     }
                   }}
                   onBlur={commitRename}
-                  className="my-0.5 ml-1 h-6 flex-1 rounded-[4px] border border-hairline/20 bg-canvas px-1.5 text-body text-ink outline-none focus:border-accent"
+                  className="my-0.5 ml-1 h-6 flex-1 rounded-[4px] border border-hairline/20 bg-canvas px-1.5 text-body text-ink outline-hidden focus:border-accent"
                 />
               ) : (
                 <>

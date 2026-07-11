@@ -25,7 +25,7 @@ export default function PeekModal() {
     <AnimatePresence>
       {hit && (
         <motion.div
-          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 p-10 backdrop-blur-sm"
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 p-10 backdrop-blur-xs"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

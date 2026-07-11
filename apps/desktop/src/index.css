@@ -1,6 +1,46 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Dark mode is a `.dark` class on <html> (flipped by the app), not the
+ * OS `prefers-color-scheme` default v4 ships with. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ------------------------------------------------------------------ *
+ * Design tokens — migrated from the v3 `tailwind.config.js` theme.
+ * Semantic colors are stored as raw "R G B" triplets on the `:root`
+ * vars below so the `.dark` class can flip them; the `@theme` maps them
+ * to Tailwind color utilities (opacity modifiers use color-mix in v4).
+ * ------------------------------------------------------------------ */
+@theme {
+  --color-accent: rgb(var(--accent-rgb));
+  --color-accent-soft: rgb(var(--accent-rgb) / 0.1);
+  --color-canvas: rgb(var(--canvas-rgb));
+  --color-surface: rgb(var(--surface-rgb));
+  --color-elevated: rgb(var(--elevated-rgb));
+  --color-hairline: rgb(var(--hairline-rgb));
+  --color-ink: rgb(var(--ink-rgb));
+  --color-subtle: rgb(var(--subtle-rgb));
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  --text-caption: 11px;
+  --text-caption--line-height: 14px;
+  --text-body: 13px;
+  --text-body--line-height: 18px;
+  --text-title: 15px;
+  --text-title--line-height: 20px;
+  --text-heading: 17px;
+  --text-heading--line-height: 22px;
+
+  --radius-card: 8px;
+  --radius-control: 6px;
+
+  --shadow-tile: 0 1px 2px rgb(0 0 0 / 0.06), 0 1px 3px rgb(0 0 0 / 0.08);
+  --shadow-tile-hover: 0 6px 16px rgb(0 0 0 / 0.14), 0 2px 6px rgb(0 0 0 / 0.1);
+  --shadow-peek: 0 24px 60px rgb(0 0 0 / 0.35);
+
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
 
 /* ------------------------------------------------------------------ *
  * Theme tokens. Light is the default; `.dark` on <html> flips them.
@@ -65,7 +105,7 @@ body,
 
 body {
   margin: 0;
-  font-family: theme("fontFamily.sans");
+  font-family: var(--font-sans);
   font-size: 13px;
   color: rgb(var(--ink-rgb));
   background: rgb(var(--canvas-rgb));

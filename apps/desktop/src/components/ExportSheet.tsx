@@ -338,7 +338,7 @@ export default function ExportSheet() {
                         value={title}
                         onChange={(e) => setTitle(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && void runExport()}
-                        className="selectable w-full rounded-[7px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-none focus:border-accent"
+                        className="selectable w-full rounded-[7px] border border-hairline/10 bg-canvas px-2.5 py-2 text-body text-ink outline-hidden focus:border-accent"
                       />
                     </label>
                   )}

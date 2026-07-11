@@ -225,7 +225,7 @@ export default function CommandPalette() {
     <AnimatePresence>
       {open && (
         <motion.div
-          className="fixed inset-0 z-[95] flex items-start justify-center bg-black/30 p-4 pt-[14vh] backdrop-blur-sm"
+          className="fixed inset-0 z-[95] flex items-start justify-center bg-black/30 p-4 pt-[14vh] backdrop-blur-xs"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -248,7 +248,7 @@ export default function CommandPalette() {
                 onChange={(e) => setQ(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder="Type a command or search…"
-                className="selectable h-11 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-subtle/70"
+                className="selectable h-11 flex-1 bg-transparent text-body text-ink outline-hidden placeholder:text-subtle/70"
               />
               <span className="tabnum shrink-0 rounded-[4px] border border-hairline/15 px-1.5 py-px text-[11px] text-subtle">
                 esc

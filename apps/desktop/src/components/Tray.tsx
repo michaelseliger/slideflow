@@ -21,7 +21,8 @@ export default function Tray() {
   const collapsed = useTray((s) => s.collapsed);
   const reorder = useTray((s) => s.reorder);
   const [dragOver, setDragOver] = useState(false);
-  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Reorder.Group renders a <ul> by default, so this ref points at one.
+  const scrollerRef = useRef<HTMLUListElement>(null);
   // dragenter/dragleave fire per child element and bubble to the section, so a
   // plain currentTarget===target check misses the real exit when the pointer
   // leaves the tray over a child (header/filmstrip/EmptyTray). Balance every

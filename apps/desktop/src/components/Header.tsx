@@ -70,7 +70,7 @@ export default function Header() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search every slide…"
-            className="selectable h-8 w-full rounded-[7px] border border-hairline/10 bg-surface/80 pl-8 pr-14 text-body text-ink shadow-sm outline-none placeholder:text-subtle/70 focus:border-accent focus:bg-surface"
+            className="selectable h-8 w-full rounded-[7px] border border-hairline/10 bg-surface/80 pl-8 pr-14 text-body text-ink shadow-xs outline-hidden placeholder:text-subtle/70 focus:border-accent focus:bg-surface"
           />
           {searching ? (
             <Loader2

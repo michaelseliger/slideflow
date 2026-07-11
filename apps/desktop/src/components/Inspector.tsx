@@ -236,7 +236,7 @@ function TagEditor({ slideId }: { slideId: number }) {
             list={listId}
             disabled={names == null}
             placeholder="Add a tag…"
-            className="h-[22px] w-28 rounded-full border border-accent bg-canvas px-2.5 text-caption text-ink outline-none disabled:opacity-50"
+            className="h-[22px] w-28 rounded-full border border-accent bg-canvas px-2.5 text-caption text-ink outline-hidden disabled:opacity-50"
           />
         ) : (
           <button

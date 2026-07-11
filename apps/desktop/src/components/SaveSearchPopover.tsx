@@ -39,7 +39,7 @@ export default function SaveSearchPopover({ onClose }: { onClose: () => void }) 
           if (e.key === "Enter") submit();
         }}
         placeholder="Name"
-        className="selectable mt-3 w-full rounded-[7px] border border-accent bg-canvas px-2.5 py-1.5 text-body text-ink outline-none focus:border-accent"
+        className="selectable mt-3 w-full rounded-[7px] border border-accent bg-canvas px-2.5 py-1.5 text-body text-ink outline-hidden focus:border-accent"
       />
       <div className="mt-2.5 flex justify-end gap-1.5">
         <button

@@ -160,7 +160,7 @@ export default function Sidebar() {
                     defaultValue={renaming.value}
                     spellCheck={false}
                     aria-label="Rename saved search"
-                    className="selectable w-full rounded-[6px] border border-accent bg-canvas px-2 py-1 text-body text-ink outline-none"
+                    className="selectable w-full rounded-[6px] border border-accent bg-canvas px-2 py-1 text-body text-ink outline-hidden"
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         void useApp
@@ -213,7 +213,7 @@ export default function Sidebar() {
                       }
                     }}
                     onBlur={commitTagRename}
-                    className="h-7 w-full rounded-[5px] border border-hairline/20 bg-canvas px-2 text-body text-ink outline-none focus:border-accent"
+                    className="h-7 w-full rounded-[5px] border border-hairline/20 bg-canvas px-2 text-body text-ink outline-hidden focus:border-accent"
                   />
                 </div>
               ) : (

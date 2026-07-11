@@ -37,7 +37,7 @@ export default function RootExcludesEditor({ root }: { root: RootRecord }) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder={"**/archive/**\n~$*"}
-        className="selectable w-full resize-y rounded-[6px] border border-hairline/10 bg-canvas px-2.5 py-2 font-mono text-caption text-ink outline-none placeholder:text-subtle/50 focus:border-accent"
+        className="selectable w-full resize-y rounded-[6px] border border-hairline/10 bg-canvas px-2.5 py-2 font-mono text-caption text-ink outline-hidden placeholder:text-subtle/50 focus:border-accent"
       />
       <div className="mt-1 flex items-start justify-between gap-3">
         <p className="text-caption text-subtle">
