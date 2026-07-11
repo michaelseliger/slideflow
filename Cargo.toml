@@ -35,7 +35,7 @@ rayon = "1"
 # Local semantic-search model runtime (CPU, pure Rust). Optional — compiled only
 # behind slideflow-core's `embeddings` feature (and the desktop host, which
 # depends on core with that feature). Never in the default engine build.
-candle-core = "0.9"
+candle-core = "0.11"
 candle-nn = "0.9"
 candle-transformers = "0.9"
 # Fast tokenizer loaded from tokenizer.json. Default features off (drops the
