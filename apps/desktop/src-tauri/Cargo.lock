@@ -4948,7 +4948,7 @@ dependencies = [
  "quick-xml 0.41.0",
  "rayon",
  "resvg",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.1",
  "rusqlite",
  "serde",
  "serde_json",
