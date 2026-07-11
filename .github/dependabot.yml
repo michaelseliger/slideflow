@@ -20,6 +20,17 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
+      # candle-core / candle-nn / candle-transformers MUST move in lockstep —
+      # a mismatched pair breaks the `embeddings` feature (VarBuilder type skew).
+      # Group them (majors included) so they always arrive as one reviewable PR.
+      # Listed before cargo-minor-patch so candle-* land here regardless of type.
+      candle:
+        patterns:
+          - "candle-*"
+        update-types:
+          - major
+          - minor
+          - patch
       cargo-minor-patch:
         update-types:
           - minor
@@ -41,6 +52,16 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
+      # Same lockstep rule as the root workspace: candle reaches src-tauri
+      # transitively via slideflow-core's embeddings feature, so keep the family
+      # batched here too if Dependabot ever proposes them for this lockfile.
+      candle:
+        patterns:
+          - "candle-*"
+        update-types:
+          - major
+          - minor
+          - patch
       tauri-minor-patch:
         update-types:
           - minor

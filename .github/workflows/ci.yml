@@ -88,6 +88,42 @@ jobs:
         working-directory: apps/desktop
         run: pnpm test:tray
 
+  # Tauri host (apps/desktop/src-tauri) is a SEPARATE Cargo workspace that the
+  # `core` job never compiles. Type-check it so Dependabot bumps to its own deps
+  # — and transitive bumps that reach it via slideflow-core's `embeddings`
+  # feature (candle et al.) — are actually gated. Without this a broken host
+  # only surfaces at release time (release.yml on a v* tag). BLOCKING on purpose.
+  src-tauri:
+    name: src-tauri (check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # GTK/WebKit + friends, mirroring release.yml's Linux Tauri build deps.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      # tauri-build reads `frontendDist` (../dist, gitignored). A `cargo check`
+      # doesn't embed assets, but the dir must exist — a placeholder keeps this
+      # job decoupled from the frontend build (the point is the Rust host).
+      - name: Placeholder frontend dist
+        run: mkdir -p apps/desktop/dist && echo '<!doctype html>' > apps/desktop/dist/index.html
+      # The desktop crate pulls slideflow-core with `features = ["embeddings"]`,
+      # so this compiles candle too — no extra feature flag needed.
+      - name: cargo check (src-tauri host)
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --all-targets
+
   # Lint. NON-BLOCKING (continue-on-error): slideflow-core currently trips a
   # handful of clippy lints (e.g. while_let_loop, enum_variant_names) that must
   # be fixed inside crates/ in a dedicated PR. Until then this job reports lint
