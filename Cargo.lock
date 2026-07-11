@@ -1159,12 +1159,6 @@ dependencies = [
 
 [[package]]
 name = "imagesize"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edcd27d72f2f071c64249075f42e205ff93c9a4c5f6c6da53e79ed9f9832c285"
-
-[[package]]
-name = "imagesize"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
@@ -1263,7 +1257,7 @@ dependencies = [
  "float-cmp",
  "gif",
  "image-webp",
- "imagesize 0.14.0",
+ "imagesize",
  "indexmap",
  "pdf-writer",
  "png",
@@ -2151,7 +2145,7 @@ dependencies = [
  "fontdb",
  "globset",
  "image",
- "imagesize 0.13.0",
+ "imagesize",
  "krilla",
  "krilla-svg",
  "lopdf",
@@ -2628,7 +2622,7 @@ dependencies = [
  "data-url",
  "flate2",
  "fontdb",
- "imagesize 0.14.0",
+ "imagesize",
  "kurbo",
  "log",
  "pico-args",
