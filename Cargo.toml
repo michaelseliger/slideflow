@@ -28,7 +28,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.11"
 base64 = "0.22"
-imagesize = "0.13"
+imagesize = "0.14"
 # Pure-Rust data-parallelism for brute-force cosine search and near-duplicate
 # clustering. No system libraries, so core still builds on Linux CI.
 rayon = "1"
