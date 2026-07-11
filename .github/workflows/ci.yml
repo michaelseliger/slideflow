@@ -61,7 +61,7 @@ jobs:
       - uses: actions/checkout@v4
       # pnpm must be set up BEFORE setup-node: setup-node's `cache: pnpm` step
       # shells out to `pnpm store path`, which fails if pnpm isn't installed yet.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
       # Node 22 (latest 22.x, ≥ 22.6) is required: the tray-model test step below

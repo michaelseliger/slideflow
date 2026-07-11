@@ -129,7 +129,7 @@ jobs:
             libayatana-appindicator3-dev
 
       # pnpm before setup-node so setup-node's pnpm cache can find pnpm.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
 
