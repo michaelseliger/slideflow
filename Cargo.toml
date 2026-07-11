@@ -15,7 +15,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
 roxmltree = "0.20"
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
-notify = "7"
+notify = "8"
 walkdir = "2"
 # Pure-Rust glob matching (aho-corasick/regex-automata/bstr) for per-root
 # exclude patterns — no system libs, so core still builds on Linux CI.
