@@ -63,8 +63,12 @@ krilla-svg = "0.8.1"
 # hb-subset port — keeps cmap/GPOS/variations, so subsets render in the
 # webview). write-fonts must stay in lockstep with skera: its `read` re-export
 # (read-fonts) provides the FontRef/IntSet/Tag types skera's API takes.
-skera = "0.3"
-write-fonts = "0.49"
+# As of write-fonts 0.50 that re-export is gated behind the `read` feature, so
+# it must be enabled explicitly (skera 0.4 pulls write-fonts 0.50 / read-fonts
+# 0.41 — keep this version matching what skera resolves, or the read-fonts types
+# won't unify across the two crates).
+skera = "0.4"
+write-fonts = { version = "0.50", features = ["read"] }
 
 [profile.release]
 lto = "thin"
