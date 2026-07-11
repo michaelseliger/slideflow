@@ -32,7 +32,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # `slideflow-cli` is a thin wrapper over the engine, so its debug tests add
@@ -58,7 +58,7 @@ jobs:
     name: frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # pnpm must be set up BEFORE setup-node: setup-node's `cache: pnpm` step
       # shells out to `pnpm store path`, which fails if pnpm isn't installed yet.
       - uses: pnpm/action-setup@v6
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
