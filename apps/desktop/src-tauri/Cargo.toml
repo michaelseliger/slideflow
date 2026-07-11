@@ -42,7 +42,7 @@ tokio = { version = "1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 # Pinned-hash verification of downloaded model files, and content-hash naming of
 # harvested embedded fonts.
-sha2 = "0.10"
+sha2 = "0.11"
 # Unpack the Aptos font zip (Microsoft ships the family as a .zip). Pure Rust,
 # deflate only — matches the engine's OPC zip settings.
 zip = { version = "2", default-features = false, features = ["deflate"] }
