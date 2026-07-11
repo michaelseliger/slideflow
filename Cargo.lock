@@ -288,15 +288,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-transformers"
-version = "0.9.2"
+name = "candle-nn"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b538ec4aa807c416a2ddd3621044888f188827862e2a6fcacba4738e89795d01"
+checksum = "eaa10b6ccc365b33210ce404fbf45e60d3e0bdac1004463cf1052e6ee1c1739a"
+dependencies = [
+ "candle-core 0.11.0",
+ "half",
+ "libc",
+ "num-traits",
+ "rayon",
+ "safetensors 0.8.0",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "candle-transformers"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bcbbf7ff00ff6fe2af22b93600195917fe90e90ff48424a140d1a926c44b1c1"
 dependencies = [
  "byteorder",
- "candle-core 0.9.2",
- "candle-nn",
- "fancy-regex 0.17.0",
+ "candle-core 0.11.0",
+ "candle-nn 0.11.0",
+ "fancy-regex 0.18.0",
  "num-traits",
  "rand",
  "rayon",
@@ -727,9 +743,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -1596,7 +1612,7 @@ version = "6.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
 dependencies = [
- "bitflags 2.13.0",
+ "bitflags",
  "libc",
  "once_cell",
  "onig_sys",
@@ -2187,7 +2203,7 @@ version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "candle-core 0.11.0",
- "candle-nn",
+ "candle-nn 0.9.2",
  "candle-transformers",
  "fontdb",
  "globset",
