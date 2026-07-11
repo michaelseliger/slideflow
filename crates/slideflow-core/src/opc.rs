@@ -13,7 +13,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use quick_xml::events::{BytesDecl, BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{Error, Result};
 
@@ -233,7 +233,7 @@ pub fn parse_rels(bytes: &[u8], part_for_errors: &str) -> Result<Vec<Relationshi
                 };
                 for attr in e.attributes().flatten() {
                     let val = attr
-                        .unescape_value()
+                        .normalized_value(XmlVersion::Implicit1_0)
                         .map_err(|e| Error::xml(part_for_errors, e))?
                         .into_owned();
                     match attr.key.as_ref() {
@@ -304,7 +304,7 @@ impl ContentTypes {
                     let mut a2 = None;
                     for attr in e.attributes().flatten() {
                         let val = attr
-                            .unescape_value()
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(|e| Error::xml("[Content_Types].xml", e))?
                             .into_owned();
                         match attr.key.as_ref() {

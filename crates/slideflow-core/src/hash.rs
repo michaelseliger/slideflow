@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
@@ -202,7 +202,7 @@ fn rewrite_element(
         }
         let key_str = std::str::from_utf8(key)
             .map_err(|_| Error::InvalidPackage(format!("non-utf8 attribute name in {slide_part}")))?;
-        let value = attr.unescape_value().map_err(|e| Error::xml(slide_part, e))?;
+        let value = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(slide_part, e))?;
 
         // Every attribute in the relationships namespace (prefix `r:`) is an
         // ST_RelationshipId: r:id/r:embed/r:link on media/OLE/chart refs *and*

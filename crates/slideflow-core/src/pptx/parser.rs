@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use quick_xml::events::Event;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 
 use crate::error::{Error, Result};
 use crate::opc::{local_name, rel_type, resolve_target, Package};
@@ -204,7 +204,7 @@ fn parse_presentation_xml(xml: &[u8], part: &str) -> Result<PresentationInfo> {
                             && attr.key.as_ref().starts_with(b"r:")
                         {
                             rids.push(
-                                attr.unescape_value()
+                                attr.normalized_value(XmlVersion::Implicit1_0)
                                     .map_err(|e| Error::xml(part, e))?
                                     .into_owned(),
                             );
@@ -214,7 +214,7 @@ fn parse_presentation_xml(xml: &[u8], part: &str) -> Result<PresentationInfo> {
                     let mut cx = None;
                     let mut cy = None;
                     for attr in e.attributes().flatten() {
-                        let val = attr.unescape_value().map_err(|e| Error::xml(part, e))?;
+                        let val = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                         match attr.key.as_ref() {
                             b"cx" => cx = val.parse::<i64>().ok(),
                             b"cy" => cy = val.parse::<i64>().ok(),
@@ -275,7 +275,7 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                 b"ph" if shape_depth > 0 => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"type" {
-                            let v = attr.unescape_value().map_err(|e| Error::xml(part, e))?;
+                            let v = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                             if v.as_ref() == "title" || v.as_ref() == "ctrTitle" {
                                 current_is_title = true;
                             }
@@ -291,7 +291,7 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                 b"ph" if shape_depth > 0 => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"type" {
-                            let v = attr.unescape_value().map_err(|e| Error::xml(part, e))?;
+                            let v = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                             if v.as_ref() == "title" || v.as_ref() == "ctrTitle" {
                                 current_is_title = true;
                             }
@@ -304,7 +304,22 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                 _ => {}
             },
             Event::Text(ref t) if in_a_t => {
-                let text = t.unescape().map_err(|e| Error::xml(part, e))?;
+                let text = t.decode().map_err(|e| Error::xml(part, e))?;
+                if !text.is_empty() {
+                    if pending_newline {
+                        current_text.push('\n');
+                        pending_newline = false;
+                    }
+                    current_text.push_str(&text);
+                }
+            }
+            // quick-xml ≥0.38 no longer inlines entity/character references in
+            // Text events; they arrive as separate GeneralRef events (`&amp;`,
+            // `&#38;`). Resolve them back so escaped characters survive indexing.
+            Event::GeneralRef(ref r) if in_a_t => {
+                let name = r.decode().map_err(|e| Error::xml(part, e))?;
+                let raw = format!("&{name};");
+                let text = quick_xml::escape::unescape(&raw).map_err(|e| Error::xml(part, e))?;
                 if !text.is_empty() {
                     if pending_newline {
                         current_text.push('\n');
@@ -343,6 +358,10 @@ fn parse_core_props(package: &Package) -> CoreProps {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut current: Option<&'static str> = None;
+    // Accumulate the element's text across segments: quick-xml ≥0.38 splits a
+    // value like `A &amp; B` into Text + GeneralRef + Text events, so a single
+    // Text event no longer holds the whole value.
+    let mut value = String::new();
     while let Ok(event) = reader.read_event_into(&mut buf) {
         match event {
             Event::Start(ref e) => {
@@ -352,11 +371,25 @@ fn parse_core_props(package: &Package) -> CoreProps {
                     b"modified" => Some("modified"),
                     _ => None,
                 };
+                value.clear();
             }
-            Event::Text(ref t) => {
-                if let (Some(field), Ok(text)) = (current, t.unescape()) {
-                    let text = text.into_owned();
-                    if !text.trim().is_empty() {
+            Event::Text(ref t) if current.is_some() => {
+                if let Ok(text) = t.decode() {
+                    value.push_str(&text);
+                }
+            }
+            Event::GeneralRef(ref r) if current.is_some() => {
+                if let Ok(name) = r.decode() {
+                    let raw = format!("&{name};");
+                    if let Ok(text) = quick_xml::escape::unescape(&raw) {
+                        value.push_str(&text);
+                    }
+                }
+            }
+            Event::End(_) => {
+                if let Some(field) = current.take() {
+                    if !value.trim().is_empty() {
+                        let text = value.clone();
                         match field {
                             "title" => core.title = Some(text),
                             "creator" => core.creator = Some(text),
@@ -366,7 +399,6 @@ fn parse_core_props(package: &Package) -> CoreProps {
                     }
                 }
             }
-            Event::End(_) => current = None,
             Event::Eof => break,
             _ => {}
         }
@@ -430,6 +462,23 @@ mod tests {
         for term in ["Quartal", "Umsatz", "Q1", "120 T€"] {
             assert!(table_text.contains(term), "missing {term} in {table_text:?}");
         }
+    }
+
+    #[test]
+    fn entity_references_in_text_are_decoded() {
+        // quick-xml ≥0.38 reports entity/character references as separate
+        // GeneralRef events rather than inline in the Text; both named
+        // (`&amp;`, `&lt;`) and numeric (`&#38;`) refs must still round-trip
+        // into the extracted (and thus indexed) text.
+        let xml = r#"<?xml version="1.0"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>R&amp;D &lt;draft&gt; 50&#37; off</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+        let content = extract_texts(xml.as_bytes(), "test").unwrap();
+        assert_eq!(content.title.as_deref(), Some("R&D <draft> 50% off"));
     }
 
     #[test]

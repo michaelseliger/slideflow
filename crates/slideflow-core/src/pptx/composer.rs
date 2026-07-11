@@ -39,7 +39,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{Error, Result};
 use crate::fixtures::xml_escape;
@@ -1091,7 +1091,7 @@ fn attr_value(xml: &str, element_local: &str, attr: &str) -> Option<String> {
             {
                 for a in e.attributes().flatten() {
                     if a.key.as_ref() == attr.as_bytes() {
-                        return a.unescape_value().ok().map(|v| v.into_owned());
+                        return a.normalized_value(XmlVersion::Implicit1_0).ok().map(|v| v.into_owned());
                     }
                 }
                 return None;
@@ -1120,7 +1120,7 @@ fn parse_notes_sz(pf: &PresentationFile) -> String {
                 let mut cx = None;
                 let mut cy = None;
                 for attr in e.attributes().flatten() {
-                    if let Ok(val) = attr.unescape_value() {
+                    if let Ok(val) = attr.normalized_value(XmlVersion::Implicit1_0) {
                         match attr.key.as_ref() {
                             b"cx" => cx = Some(val.into_owned()),
                             b"cy" => cy = Some(val.into_owned()),

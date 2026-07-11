@@ -63,7 +63,7 @@
 use std::io::Cursor;
 
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{Error, Result};
 use crate::model::FitMode;
@@ -300,7 +300,7 @@ fn rewrite_attrs(
         let attr = attr.ok()?; // malformed attr → bail, pass original through
         let key = attr.key.as_ref();
         let key_str = std::str::from_utf8(key).ok()?;
-        let val = attr.unescape_value().ok()?;
+        let val = attr.normalized_value(XmlVersion::Implicit1_0).ok()?;
 
         if attrs.iter().any(|a| a.as_bytes() == key) {
             if let Ok(v) = val.parse::<i64>() {
