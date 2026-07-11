@@ -2159,7 +2159,7 @@ dependencies = [
  "quick-xml",
  "rayon",
  "resvg",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.1",
  "rusqlite",
  "serde",
  "serde_json",

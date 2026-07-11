@@ -13,7 +13,7 @@ license = "MIT"
 [workspace.dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"
-roxmltree = "0.20"
+roxmltree = "0.21"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 notify = "8"
 walkdir = "2"
