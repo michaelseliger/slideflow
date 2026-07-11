@@ -36,7 +36,7 @@ rayon = "1"
 # behind slideflow-core's `embeddings` feature (and the desktop host, which
 # depends on core with that feature). Never in the default engine build.
 candle-core = "0.11"
-candle-nn = "0.9"
+candle-nn = "0.11"
 candle-transformers = "0.11"
 # Fast tokenizer loaded from tokenizer.json. Default features off (drops the
 # HTTP hub client + progress bars); `fancy-regex` is the pure-Rust regex backend
