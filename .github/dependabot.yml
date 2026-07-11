@@ -1,0 +1,87 @@
+# Dependabot configuration — https://docs.github.com/code-security/dependabot
+# Ecosystems: root Cargo workspace (core + cli), the separate src-tauri Cargo
+# workspace, the pnpm frontend, and GitHub Actions. Minor/patch bumps are
+# grouped into one PR per ecosystem to cut noise; majors stay separate for review.
+version: 2
+
+updates:
+  # --- Rust: root workspace (slideflow-core, slideflow-cli) ---
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- Rust: Tauri host (separate [workspace], excluded from root) ---
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+      - tauri
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      tauri-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- Frontend: pnpm workspace (apps/desktop) ---
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- CI: GitHub Actions used by ci.yml / release.yml ---
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
