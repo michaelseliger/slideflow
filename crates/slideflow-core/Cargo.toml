@@ -50,6 +50,6 @@ embeddings = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "de
 [dev-dependencies]
 tempfile = "3"
 # Parse exported PDFs in tests to assert page count / MediaBox / embedded fonts.
-lopdf = "0.34"
+lopdf = "0.44"
 # Decode exported PNGs in tests to assert pixel dimensions and non-uniformity.
 image = { workspace = true }

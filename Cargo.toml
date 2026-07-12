@@ -11,9 +11,9 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"
-roxmltree = "0.20"
+roxmltree = "0.21"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 notify = "8"
 walkdir = "2"
@@ -28,7 +28,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.11"
 base64 = "0.22"
-imagesize = "0.13"
+imagesize = "0.14"
 # Pure-Rust data-parallelism for brute-force cosine search and near-duplicate
 # clustering. No system libraries, so core still builds on Linux CI.
 rayon = "1"
@@ -41,7 +41,7 @@ candle-transformers = "0.11"
 # Fast tokenizer loaded from tokenizer.json. Default features off (drops the
 # HTTP hub client + progress bars); `fancy-regex` is the pure-Rust regex backend
 # (avoids the `onig` C dependency, keeping the build cross-platform).
-tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 # Pure-Rust decode/resize/re-encode for downscaling grid thumbnails. No system
 # libraries, so the core crate still builds on Linux CI without GUI deps.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff"] }

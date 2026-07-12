@@ -45,7 +45,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.11"
 # Unpack the Aptos font zip (Microsoft ships the family as a .zip). Pure Rust,
 # deflate only — matches the engine's OPC zip settings.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"
