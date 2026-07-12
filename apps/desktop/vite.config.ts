@@ -34,7 +34,10 @@ export default defineConfig(async () => ({
   // Produce assets that the Tauri webview can load from disk.
   build: {
     target: "safari15",
-    minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
+    // Vite 8 minifies with Oxc by default; `true` uses it. (Pinning "esbuild"
+    // here would force the deprecated path that needs esbuild installed
+    // separately.) Skip minification under TAURI_DEBUG for readable dev builds.
+    minify: !process.env.TAURI_DEBUG,
     sourcemap: !!process.env.TAURI_DEBUG,
   },
 }));
