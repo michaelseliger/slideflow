@@ -129,9 +129,12 @@ jobs:
             libayatana-appindicator3-dev
 
       # pnpm before setup-node so setup-node's pnpm cache can find pnpm.
+      # Pin to an exact patch (not floating `11`): pnpm 11.12.0's self-installer
+      # crashes on the runner, so `version: 11` resolving to latest-11.x is unsafe.
+      # 11.7.0 is the last known-good release; bump deliberately once fixed.
       - uses: pnpm/action-setup@v6
         with:
-          version: 11
+          version: 11.7.0
 
       - uses: actions/setup-node@v6
         with:

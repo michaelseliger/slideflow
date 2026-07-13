@@ -61,9 +61,13 @@ jobs:
       - uses: actions/checkout@v7
       # pnpm must be set up BEFORE setup-node: setup-node's `cache: pnpm` step
       # shells out to `pnpm store path`, which fails if pnpm isn't installed yet.
+      # Pin to an exact patch, not a floating `11`: pnpm 11.12.0's self-installer
+      # crashes ("Cannot use 'in' operator to search for 'integrity' in undefined")
+      # so `version: 11` resolving to latest-11.x broke this job. 11.7.0 is the
+      # last known-good release; bump deliberately once upstream is fixed.
       - uses: pnpm/action-setup@v6
         with:
-          version: 11
+          version: 11.7.0
       # Node 22 (latest 22.x, ≥ 22.6) is required: the tray-model test step below
       # runs TypeScript directly via `node --experimental-strip-types`.
       - uses: actions/setup-node@v6
