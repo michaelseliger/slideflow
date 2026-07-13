@@ -483,7 +483,7 @@ dependencies = [
  "rayon",
  "safetensors",
  "thiserror 2.0.18",
- "tokenizers",
+ "tokenizers 0.22.2",
  "yoke",
  "zerocopy",
  "zip 8.6.0",
@@ -880,6 +880,12 @@ name = "ctor-proc-macro"
 version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
+
+[[package]]
+name = "daachorse"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2"
 
 [[package]]
 name = "darling"
@@ -1391,9 +1397,9 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fancy-regex"
-version = "0.14.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2488,6 +2494,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2752,7 +2764,7 @@ dependencies = [
  "float-cmp",
  "gif",
  "image-webp",
- "imagesize",
+ "imagesize 0.14.0",
  "indexmap 2.14.0",
  "pdf-writer",
  "png 0.18.1",
@@ -4936,7 +4948,7 @@ dependencies = [
  "fontdb",
  "globset",
  "image",
- "imagesize",
+ "imagesize 0.15.0",
  "krilla",
  "krilla-svg",
  "notify",
@@ -4951,7 +4963,7 @@ dependencies = [
  "skera",
  "thiserror 2.0.18",
  "tiny-skia",
- "tokenizers",
+ "tokenizers 0.23.1",
  "usvg",
  "walkdir",
  "write-fonts 0.50.0",
@@ -5834,13 +5846,45 @@ dependencies = [
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
- "fancy-regex 0.14.0",
  "getrandom 0.3.4",
  "itertools",
  "log",
  "macro_rules_attribute",
  "monostate",
  "onig",
+ "paste",
+ "rand 0.9.4",
+ "rayon",
+ "rayon-cond",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "spm_precompiled",
+ "thiserror 2.0.18",
+ "unicode-normalization-alignments",
+ "unicode-segmentation",
+ "unicode_categories",
+]
+
+[[package]]
+name = "tokenizers"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
+dependencies = [
+ "ahash",
+ "compact_str",
+ "daachorse",
+ "dary_heap",
+ "derive_builder",
+ "esaxx-rs",
+ "fancy-regex 0.17.0",
+ "getrandom 0.3.4",
+ "itertools",
+ "log",
+ "macro_rules_attribute",
+ "monostate",
  "paste",
  "rand 0.9.4",
  "rayon",
@@ -6300,7 +6344,7 @@ dependencies = [
  "data-url",
  "flate2",
  "fontdb",
- "imagesize",
+ "imagesize 0.14.0",
  "kurbo",
  "log",
  "pico-args",
