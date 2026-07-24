@@ -2,12 +2,13 @@
 
 All notable user-facing changes to Slideflow. Versions follow [semver](https://semver.org); dates are ISO.
 
-## [Unreleased]
+## [1.0.0] — 2026-07-24
 
 ### Added
 
 - **Install the `slideflow` CLI from the app.** Settings → Advanced → *Command line tool* installs the bundled `slideflow` command onto your `PATH` — system-wide (`/usr/local/bin`, may ask for your password) or per-user (`~/.local/bin`, added to your shell `PATH`). The CLI now ships **inside the app bundle** and updates along with it; previously the `slideflow` companion (index/search/compose/render/stats) was only available when building from source. See the new *Command line* section in the README. PATH setup follows your shell (zsh, bash, and fish are recognised; anything else is left untouched with a hint), shell config files are only ever appended to, and an unrelated `slideflow` command already on your `PATH` is never overwritten. On Linux, installing the CLI needs the `.deb`/`.rpm` build — an AppImage's files don't outlive the app, so it refuses rather than leave a broken command.
 - **The `slideflow` CLI now defaults to the desktop app's library.** `slideflow search`/`stats` query exactly what the app indexed (and `index` adds to it) with no `--db` flag — no need to know where the app stores its data. Pass `--db <path>` for a separate database.
+- **Signed Windows installers.** The Windows `.msi` and `.exe` are now code-signed with Azure Trusted Signing, so Windows no longer reports an unknown publisher for an unsigned build. (SmartScreen still builds download reputation over time.) macOS builds remain Developer ID–signed and notarized.
 
 ## [0.5.0] — 2026-07-07
 
