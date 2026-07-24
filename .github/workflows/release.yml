@@ -226,7 +226,16 @@ jobs:
       - name: Build the app and (on tag) publish a draft release
         uses: tauri-apps/tauri-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tauri-action creates the draft release and uploads assets with this
+          # token. The Actions-issued GITHUB_TOKEN is denied on THIS repo's
+          # releases API ("Resource not accessible by integration") even though
+          # the job requests `permissions: contents: write` and the token log
+          # shows Contents: write — a GitHub-App-level restriction that a PAT
+          # sidesteps. So prefer a fine-grained PAT (RELEASE_TOKEN, scoped to
+          # this repo with Contents: read/write) and fall back to GITHUB_TOKEN
+          # only when it isn't set (forks / build-only workflow_dispatch runs,
+          # which don't create a release anyway). See docs/RELEASE_SIGNING.md.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           # Updater package signing (minisign, all platforms). Required now
           # that tauri.conf.json sets createUpdaterArtifacts — builds FAIL
           # without it. Unrelated to Apple code signing below.

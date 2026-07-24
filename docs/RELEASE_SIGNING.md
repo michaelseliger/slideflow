@@ -118,6 +118,41 @@ other users. Notarization (above) is the real fix.
 
 ---
 
+# GitHub release token (`RELEASE_TOKEN`)
+
+`tauri-action` creates the draft release and uploads every installer to it. On
+this repo the **Actions-issued `GITHUB_TOKEN` is denied on the releases API**
+(`Resource not accessible by integration`) even though the job requests
+`permissions: contents: write` *and* the job's token log shows `Contents:
+write` — a GitHub-App-level restriction on this account, not a scope problem
+(a personal access token creates releases here fine). So `release.yml` reads a
+fine-grained PAT from `RELEASE_TOKEN` and only falls back to `GITHUB_TOKEN` when
+it isn't set (forks / build-only `workflow_dispatch` runs, which don't publish).
+
+## One-time setup
+
+1. Create a **fine-grained PAT**:
+   <https://github.com/settings/tokens?type=beta> → **Generate new token**.
+   - **Resource owner:** the repo owner's account.
+   - **Repository access → Only select repositories → `slideflow`**.
+   - **Permissions → Repository permissions → Contents: Read and write**
+     (Metadata: Read is added automatically). Nothing else is required.
+   - Set an expiry and note it — the release build fails once the PAT expires.
+2. Add it as a repository secret:
+
+   ```bash
+   gh secret set RELEASE_TOKEN --repo michaelseliger/slideflow
+   # paste the PAT when prompted
+   ```
+
+   or **Settings → Secrets and variables → Actions → New repository secret**,
+   name `RELEASE_TOKEN`.
+
+Without `RELEASE_TOKEN` the build still compiles + signs, but fails at the final
+"create release" step with the 403 above.
+
+---
+
 # Updater signing & the release flow
 
 The in-app auto-updater (`src-tauri/src/updates.rs`) polls

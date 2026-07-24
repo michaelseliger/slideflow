@@ -71,10 +71,30 @@ In the [Azure Portal](https://portal.azure.com):
 
 1. **Create a Trusted/Artifact Signing account.** Search the marketplace for
    **"Trusted Signing"** (a.k.a. Artifact Signing) → Create. Pick a resource
-   group and a region — the region determines your **endpoint URL**, e.g.
-   `https://eus.codesigning.azure.net` (East US), `https://weu.codesigning.azure.net`
-   (West Europe). Give the account a **name** (this is your
+   group and a region, and give the account a **name** (this is your
    `AZURE_CODE_SIGNING_ACCOUNT_NAME`).
+
+   > ⚠️ **`AZURE_ENDPOINT` must match the account's Azure region exactly** — the
+   > service is region-scoped, and a request sent to the wrong region's endpoint
+   > fails with *no signature produced* (`failed to run trusted-signing-cli` /
+   > `SignTool Error: No signature found`), **not** an obvious auth error. The
+   > endpoint region is **not** the certificate's organization country, and
+   > **not** the GitHub runner's region (the `Runner Image Provisioner → Azure
+   > Region` line in the CI log is the runner VM — ignore it). Check the region
+   > on the signing account's **Overview** blade and use the matching endpoint:
+   >
+   > | Region | `AZURE_ENDPOINT` |
+   > |---|---|
+   > | Switzerland North | `https://swn.codesigning.azure.net` |
+   > | North Europe | `https://neu.codesigning.azure.net` |
+   > | West Europe | `https://weu.codesigning.azure.net` |
+   > | East US | `https://eus.codesigning.azure.net` |
+   > | West US 3 | `https://wus3.codesigning.azure.net` |
+   > | West Central US | `https://wcus.codesigning.azure.net` |
+   >
+   > Other regions follow the same `https://<short-code>.codesigning.azure.net`
+   > pattern (Japan East `jpe`, Korea Central `krc`, Poland Central `plc`,
+   > South Central US `scus`, …).
 2. **Verify your identity.** Under the account → **Identity validations**, create
    one for yourself (individual) or your organization and complete Microsoft's
    verification. This can take from minutes to a few days.
