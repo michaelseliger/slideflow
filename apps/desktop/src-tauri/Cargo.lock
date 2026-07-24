@@ -4972,7 +4972,7 @@ dependencies = [
 
 [[package]]
 name = "slideflow-desktop"
-version = "0.5.1"
+version = "1.0.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
