@@ -67,7 +67,7 @@ krilla-svg = "0.8.1"
 # it must be enabled explicitly (skera 0.4 pulls write-fonts 0.50 / read-fonts
 # 0.41 — keep this version matching what skera resolves, or the read-fonts types
 # won't unify across the two crates).
-skera = "0.4"
+skera = "0.5"
 write-fonts = { version = "0.50", features = ["read"] }
 
 [profile.release]
