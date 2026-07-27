@@ -4078,6 +4078,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-fonts"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f5b57a46adc0197129244fa0f3bb562694d50a66c62f9163b85f74d4d31585e"
+dependencies = [
+ "bytemuck",
+ "font-types 0.12.1",
+ "once_cell",
+]
+
+[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4966,7 +4977,7 @@ dependencies = [
  "tokenizers 0.23.1",
  "usvg",
  "walkdir",
- "write-fonts 0.50.0",
+ "write-fonts 0.51.0",
  "zip 8.6.0",
 ]
 
@@ -7264,10 +7275,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cae90d1d9f6d1d36ef116b0b1e651a6d7c12ba925439d4d06ff9adc94662a3d8"
 dependencies = [
  "font-types 0.12.1",
+ "log",
+ "read-fonts 0.41.0",
+]
+
+[[package]]
+name = "write-fonts"
+version = "0.51.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b082e0c3b0c5565b4f7bb1e0bbb4efbc8afc5a9441ade74fadc6502f9d406091"
+dependencies = [
+ "font-types 0.12.1",
  "indexmap 2.14.0",
  "kurbo",
  "log",
- "read-fonts 0.41.0",
+ "read-fonts 0.42.0",
 ]
 
 [[package]]
