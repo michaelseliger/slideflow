@@ -56,7 +56,7 @@ resvg = "0.47"
 # Must match the tiny-skia that resvg 0.47 / krilla depend on (0.12), else the
 # Pixmap/Transform types passed to resvg::render won't unify across versions.
 tiny-skia = "0.12"
-fontdb = "0.23"
+fontdb = "0.24"
 krilla = "0.8"
 krilla-svg = "0.8.1"
 # Per-slide font subsetting for preview @font-face embedding (fontations'
