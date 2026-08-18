@@ -64,11 +64,11 @@ krilla-svg = "0.8.1"
 # webview). write-fonts must stay in lockstep with skera: its `read` re-export
 # (read-fonts) provides the FontRef/IntSet/Tag types skera's API takes.
 # As of write-fonts 0.50 that re-export is gated behind the `read` feature, so
-# it must be enabled explicitly (skera 0.4 pulls write-fonts 0.50 / read-fonts
-# 0.41 — keep this version matching what skera resolves, or the read-fonts types
+# it must be enabled explicitly (skera 0.6 pulls write-fonts 0.52 / read-fonts
+# 0.43 — keep this version matching what skera resolves, or the read-fonts types
 # won't unify across the two crates).
-skera = "0.5"
-write-fonts = { version = "0.51", features = ["read"] }
+skera = "0.6"
+write-fonts = { version = "0.52", features = ["read"] }
 
 [profile.release]
 lto = "thin"
