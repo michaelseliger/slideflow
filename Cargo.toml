@@ -51,7 +51,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # krilla-svg drive the PDF path (typst's pipeline: one page per slide, subset
 # selectable text, shadows/filters rasterized). krilla-svg consumes the SAME
 # usvg::Tree we parse, so these versions MUST stay in lockstep with usvg/resvg.
-usvg = "0.47"
+usvg = "0.48"
 resvg = "0.47"
 # Must match the tiny-skia that resvg 0.47 / krilla depend on (0.12), else the
 # Pixmap/Transform types passed to resvg::render won't unify across versions.
