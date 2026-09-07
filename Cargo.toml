@@ -52,7 +52,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # selectable text, shadows/filters rasterized). krilla-svg consumes the SAME
 # usvg::Tree we parse, so these versions MUST stay in lockstep with usvg/resvg.
 usvg = "0.47"
-resvg = "0.47"
+resvg = "0.48"
 # Must match the tiny-skia that resvg 0.47 / krilla depend on (0.12), else the
 # Pixmap/Transform types passed to resvg::render won't unify across versions.
 tiny-skia = "0.12"
