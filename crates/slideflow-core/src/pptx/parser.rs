@@ -189,19 +189,19 @@ fn parse_presentation_xml(xml: &[u8], part: &str) -> Result<PresentationInfo> {
     let mut size = None;
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| Error::xml(part, e))? {
-            Event::Start(ref e) if local_name(e.name().as_ref()) == b"sldIdLst" => {
+            Event::Start(ref e) if local_name(e.name().as_ref()) == "sldIdLst" => {
                 in_sld_id_lst = true;
             }
-            Event::End(ref e) if local_name(e.name().as_ref()) == b"sldIdLst" => {
+            Event::End(ref e) if local_name(e.name().as_ref()) == "sldIdLst" => {
                 in_sld_id_lst = false;
             }
             Event::Start(ref e) | Event::Empty(ref e) => {
                 let qname = e.name();
                 let name = local_name(qname.as_ref());
-                if in_sld_id_lst && name == b"sldId" {
+                if in_sld_id_lst && name == "sldId" {
                     for attr in e.attributes().flatten() {
-                        if local_name(attr.key.as_ref()) == b"id"
-                            && attr.key.as_ref().starts_with(b"r:")
+                        if local_name(attr.key.as_ref()) == "id"
+                            && attr.key.as_ref().starts_with("r:")
                         {
                             rids.push(
                                 attr.normalized_value(XmlVersion::Implicit1_0)
@@ -210,14 +210,14 @@ fn parse_presentation_xml(xml: &[u8], part: &str) -> Result<PresentationInfo> {
                             );
                         }
                     }
-                } else if name == b"sldSz" {
+                } else if name == "sldSz" {
                     let mut cx = None;
                     let mut cy = None;
                     for attr in e.attributes().flatten() {
                         let val = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                         match attr.key.as_ref() {
-                            b"cx" => cx = val.parse::<i64>().ok(),
-                            b"cy" => cy = val.parse::<i64>().ok(),
+                            "cx" => cx = val.parse::<i64>().ok(),
+                            "cy" => cy = val.parse::<i64>().ok(),
                             _ => {}
                         }
                     }
@@ -256,7 +256,7 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
     loop {
         match reader.read_event_into(&mut buf).map_err(|e| Error::xml(part, e))? {
             Event::Start(ref e) => match local_name(e.name().as_ref()) {
-                b"sp" | b"graphicFrame" => {
+                "sp" | "graphicFrame" => {
                     shape_depth += 1;
                     if shape_depth == 1 {
                         current_text.clear();
@@ -264,17 +264,17 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                         pending_newline = false;
                     }
                 }
-                b"t" if shape_depth > 0 => in_a_t = true,
-                b"p" if shape_depth > 0 && !current_text.is_empty() => {
+                "t" if shape_depth > 0 => in_a_t = true,
+                "p" if shape_depth > 0 && !current_text.is_empty() => {
                     pending_newline = true;
                 }
                 // DOM serializers expand empty elements, and CT_Placeholder may
                 // legally carry an extLst child, so p:ph / a:br also arrive as
                 // Start events. Both actions are idempotent, so handling both
                 // forms is safe.
-                b"ph" if shape_depth > 0 => {
+                "ph" if shape_depth > 0 => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"type" {
+                        if attr.key.as_ref() == "type" {
                             let v = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                             if v.as_ref() == "title" || v.as_ref() == "ctrTitle" {
                                 current_is_title = true;
@@ -282,15 +282,15 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                         }
                     }
                 }
-                b"br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
+                "br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
                     pending_newline = true;
                 }
                 _ => {}
             },
             Event::Empty(ref e) => match local_name(e.name().as_ref()) {
-                b"ph" if shape_depth > 0 => {
+                "ph" if shape_depth > 0 => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"type" {
+                        if attr.key.as_ref() == "type" {
                             let v = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(part, e))?;
                             if v.as_ref() == "title" || v.as_ref() == "ctrTitle" {
                                 current_is_title = true;
@@ -298,26 +298,26 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                         }
                     }
                 }
-                b"br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
+                "br" if (in_a_t || shape_depth > 0) && !current_text.is_empty() => {
                     pending_newline = true;
                 }
                 _ => {}
             },
             Event::Text(ref t) if in_a_t => {
-                let text = t.decode().map_err(|e| Error::xml(part, e))?;
+                let text = t.as_ref();
                 if !text.is_empty() {
                     if pending_newline {
                         current_text.push('\n');
                         pending_newline = false;
                     }
-                    current_text.push_str(&text);
+                    current_text.push_str(text);
                 }
             }
             // quick-xml ≥0.38 no longer inlines entity/character references in
             // Text events; they arrive as separate GeneralRef events (`&amp;`,
             // `&#38;`). Resolve them back so escaped characters survive indexing.
             Event::GeneralRef(ref r) if in_a_t => {
-                let name = r.decode().map_err(|e| Error::xml(part, e))?;
+                let name = r.as_ref();
                 let raw = format!("&{name};");
                 let text = quick_xml::escape::unescape(&raw).map_err(|e| Error::xml(part, e))?;
                 if !text.is_empty() {
@@ -329,8 +329,8 @@ fn extract_texts(xml: &[u8], part: &str) -> Result<SlideContent> {
                 }
             }
             Event::End(ref e) => match local_name(e.name().as_ref()) {
-                b"t" => in_a_t = false,
-                b"sp" | b"graphicFrame" if shape_depth > 0 => {
+                "t" => in_a_t = false,
+                "sp" | "graphicFrame" if shape_depth > 0 => {
                     shape_depth -= 1;
                     if shape_depth == 0 && !current_text.trim().is_empty() {
                         let text = current_text.trim().to_string();
@@ -366,24 +366,20 @@ fn parse_core_props(package: &Package) -> CoreProps {
         match event {
             Event::Start(ref e) => {
                 current = match local_name(e.name().as_ref()) {
-                    b"title" => Some("title"),
-                    b"creator" => Some("creator"),
-                    b"modified" => Some("modified"),
+                    "title" => Some("title"),
+                    "creator" => Some("creator"),
+                    "modified" => Some("modified"),
                     _ => None,
                 };
                 value.clear();
             }
             Event::Text(ref t) if current.is_some() => {
-                if let Ok(text) = t.decode() {
-                    value.push_str(&text);
-                }
+                value.push_str(t.as_ref());
             }
             Event::GeneralRef(ref r) if current.is_some() => {
-                if let Ok(name) = r.decode() {
-                    let raw = format!("&{name};");
-                    if let Ok(text) = quick_xml::escape::unescape(&raw) {
-                        value.push_str(&text);
-                    }
+                let raw = format!("&{};", r.as_ref());
+                if let Ok(text) = quick_xml::escape::unescape(&raw) {
+                    value.push_str(&text);
                 }
             }
             Event::End(_) => {

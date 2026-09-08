@@ -116,8 +116,8 @@ pub fn slide_content_hash(pkg: &Package, slide_part: &str) -> Result<String> {
 
 /// Local names of elements/attributes that carry per-edit volatile GUIDs. Dropped
 /// wholesale (element subtree or attribute) so they never perturb the hash.
-fn is_volatile(local: &[u8]) -> bool {
-    matches!(local, b"creationId" | b"modId")
+fn is_volatile(local: &str) -> bool {
+    matches!(local, "creationId" | "modId")
 }
 
 /// Re-serialize a slide part's XML with the canonicalization rules applied.
@@ -190,9 +190,7 @@ fn rewrite_element(
     media_hashes: &mut BTreeSet<String>,
 ) -> Result<BytesStart<'static>> {
     let name = e.name();
-    let name_str = std::str::from_utf8(name.as_ref())
-        .map_err(|_| Error::InvalidPackage(format!("non-utf8 element name in {slide_part}")))?;
-    let mut new = BytesStart::new(name_str.to_owned());
+    let mut new = BytesStart::new(name.as_ref().to_owned());
 
     for attr in e.attributes() {
         let attr = attr.map_err(|e| Error::xml(slide_part, e))?;
@@ -200,8 +198,7 @@ fn rewrite_element(
         if is_volatile(local_name(key)) {
             continue;
         }
-        let key_str = std::str::from_utf8(key)
-            .map_err(|_| Error::InvalidPackage(format!("non-utf8 attribute name in {slide_part}")))?;
+        let key_str = key;
         let value = attr.normalized_value(XmlVersion::Implicit1_0).map_err(|e| Error::xml(slide_part, e))?;
 
         // Every attribute in the relationships namespace (prefix `r:`) is an
@@ -209,7 +206,7 @@ fn rewrite_element(
         // r:dm/r:lo/r:qs/r:cs on SmartArt `<dgm:relIds>`. Route them all through
         // classify_rel so diagram/OLE targets are both rid-normalized and folded
         // into the media digest.
-        if key.starts_with(b"r:") {
+        if key.starts_with("r:") {
             match classify_rel(&value, rels, pkg, slide_part) {
                 RelToken::Drop => continue,
                 RelToken::Token(token, media) => {

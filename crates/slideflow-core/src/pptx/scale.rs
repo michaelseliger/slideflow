@@ -166,42 +166,42 @@ enum Rule {
 }
 
 /// Element-scoped scaling rule. NEVER keyed on a bare attribute name.
-fn attr_rule(local: &[u8]) -> Rule {
+fn attr_rule(local: &str) -> Rule {
     match local {
-        b"off" | b"chOff" => Rule::Emu(&["x", "y"]),
-        b"ext" | b"chExt" => Rule::Emu(&["cx", "cy"]),
-        b"ln" | b"lnL" | b"lnR" | b"lnT" | b"lnB" | b"lnTlToBr" | b"lnBlToTr" => {
+        "off" | "chOff" => Rule::Emu(&["x", "y"]),
+        "ext" | "chExt" => Rule::Emu(&["cx", "cy"]),
+        "ln" | "lnL" | "lnR" | "lnT" | "lnB" | "lnTlToBr" | "lnBlToTr" => {
             Rule::Emu(&["w"])
         }
-        b"gridCol" => Rule::Emu(&["w"]),
-        b"tr" => Rule::Emu(&["h"]),
-        b"tcPr" => Rule::Emu(&["marL", "marR", "marT", "marB"]),
-        b"bodyPr" => Rule::Emu(&["lIns", "tIns", "rIns", "bIns"]),
-        b"pPr" | b"defPPr" => Rule::Emu(&["marL", "marR", "indent", "defTabSz"]),
-        b"tab" => Rule::Emu(&["pos"]),
-        b"outerShdw" | b"innerShdw" | b"prstShdw" => Rule::Emu(&["dist", "blurRad"]),
-        b"glow" | b"softEdge" => Rule::Emu(&["rad"]),
-        b"reflection" => Rule::Emu(&["blurRad", "dist"]),
-        b"tile" => Rule::Emu(&["tx", "ty"]),
-        b"rPr" | b"defRPr" | b"endParaRPr" => Rule::Pt(&["sz", "kern", "spc"]),
-        b"spcPts" | b"buSzPts" => Rule::Pt(&["val"]),
+        "gridCol" => Rule::Emu(&["w"]),
+        "tr" => Rule::Emu(&["h"]),
+        "tcPr" => Rule::Emu(&["marL", "marR", "marT", "marB"]),
+        "bodyPr" => Rule::Emu(&["lIns", "tIns", "rIns", "bIns"]),
+        "pPr" | "defPPr" => Rule::Emu(&["marL", "marR", "indent", "defTabSz"]),
+        "tab" => Rule::Emu(&["pos"]),
+        "outerShdw" | "innerShdw" | "prstShdw" => Rule::Emu(&["dist", "blurRad"]),
+        "glow" | "softEdge" => Rule::Emu(&["rad"]),
+        "reflection" => Rule::Emu(&["blurRad", "dist"]),
+        "tile" => Rule::Emu(&["tx", "ty"]),
+        "rPr" | "defRPr" | "endParaRPr" => Rule::Pt(&["sz", "kern", "spc"]),
+        "spcPts" | "buSzPts" => Rule::Pt(&["val"]),
         _ if is_lvl_ppr(local) => Rule::Emu(&["marL", "marR", "indent", "defTabSz"]),
         _ => Rule::None,
     }
 }
 
 /// `a:lvl1pPr` … `a:lvl9pPr`.
-fn is_lvl_ppr(local: &[u8]) -> bool {
+fn is_lvl_ppr(local: &str) -> bool {
     local.len() == 7
-        && local.starts_with(b"lvl")
-        && local.ends_with(b"pPr")
-        && matches!(local[3], b'1'..=b'9')
+        && local.starts_with("lvl")
+        && local.ends_with("pPr")
+        && matches!(local.as_bytes()[3], b'1'..=b'9')
 }
 
 /// Shape containers that are (potential) direct children of `p:spTree`. Entering
 /// one increments the group depth; only depth-1 shapes receive the translation.
-fn is_shape_container(local: &[u8]) -> bool {
-    matches!(local, b"sp" | b"grpSp" | b"pic" | b"cxnSp" | b"graphicFrame")
+fn is_shape_container(local: &str) -> bool {
+    matches!(local, "sp" | "grpSp" | "pic" | "cxnSp" | "graphicFrame")
 }
 
 /// Rewrite a slide/layout/master part's geometry for `sc`.
@@ -220,10 +220,10 @@ pub fn scale_part_xml(bytes: &[u8], sc: &SlideScale) -> Result<Vec<u8>> {
         let ev = reader.read_event_into(&mut buf).map_err(|e| Error::xml("scale", e))?;
         match ev {
             Event::Start(ref e) => {
-                let local = local_name(e.name().as_ref()).to_vec();
+                let local = local_name(e.name().as_ref()).to_owned();
                 let translate = in_sptree && shape_depth == 1;
                 write_scaled(&mut writer, e, sc, &local, translate, false)?;
-                if local == b"spTree" {
+                if local == "spTree" {
                     in_sptree = true;
                 }
                 if is_shape_container(&local) {
@@ -231,17 +231,17 @@ pub fn scale_part_xml(bytes: &[u8], sc: &SlideScale) -> Result<Vec<u8>> {
                 }
             }
             Event::Empty(ref e) => {
-                let local = local_name(e.name().as_ref()).to_vec();
+                let local = local_name(e.name().as_ref()).to_owned();
                 let translate = in_sptree && shape_depth == 1;
                 write_scaled(&mut writer, e, sc, &local, translate, true)?;
                 // Self-closing: no depth change.
             }
             Event::End(ref e) => {
-                let local = local_name(e.name().as_ref()).to_vec();
+                let local = local_name(e.name().as_ref()).to_owned();
                 if is_shape_container(&local) && shape_depth > 0 {
                     shape_depth -= 1;
                 }
-                if local == b"spTree" {
+                if local == "spTree" {
                     in_sptree = false;
                 }
                 writer.write_event(Event::End(e.clone())).map_err(|x| Error::xml("scale", x))?;
@@ -262,7 +262,7 @@ fn write_scaled(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     e: &BytesStart,
     sc: &SlideScale,
-    local: &[u8],
+    local: &str,
     translate: bool,
     empty: bool,
 ) -> Result<()> {
@@ -281,7 +281,7 @@ fn write_scaled(
 fn rewrite_attrs(
     e: &BytesStart,
     sc: &SlideScale,
-    local: &[u8],
+    local: &str,
     translate: bool,
 ) -> Option<BytesStart<'static>> {
     let rule = attr_rule(local);
@@ -292,26 +292,25 @@ fn rewrite_attrs(
     let is_pt = matches!(rule, Rule::Pt(_));
 
     let name = e.name();
-    let name_str = std::str::from_utf8(name.as_ref()).ok()?;
-    let mut new = BytesStart::new(name_str.to_owned());
+    let mut new = BytesStart::new(name.as_ref().to_owned());
     let mut changed = false;
 
     for attr in e.attributes() {
         let attr = attr.ok()?; // malformed attr → bail, pass original through
         let key = attr.key.as_ref();
-        let key_str = std::str::from_utf8(key).ok()?;
+        let key_str = key;
         let val = attr.normalized_value(XmlVersion::Implicit1_0).ok()?;
 
-        if attrs.iter().any(|a| a.as_bytes() == key) {
+        if attrs.contains(&key) {
             if let Ok(v) = val.parse::<i64>() {
                 let mut scaled = sc.scale(v);
-                if is_pt && key == b"sz" && scaled < 100 {
+                if is_pt && key == "sz" && scaled < 100 {
                     scaled = 100;
                 }
-                if translate && local == b"off" {
-                    if key == b"x" {
+                if translate && local == "off" {
+                    if key == "x" {
                         scaled += sc.dx;
-                    } else if key == b"y" {
+                    } else if key == "y" {
                         scaled += sc.dy;
                     }
                 }
