@@ -1004,20 +1004,20 @@ fn rewrite_master_layout_list(
     loop {
         let ev = reader.read_event_into(&mut buf).map_err(|e| Error::xml(part, e))?;
         match &ev {
-            Event::Start(e) if local_name(e.name().as_ref()) == b"sldLayoutIdLst" => {
+            Event::Start(e) if local_name(e.name().as_ref()) == "sldLayoutIdLst" => {
                 write_list(&mut writer)?;
                 wrote = true;
                 in_list = true;
             }
-            Event::Empty(e) if local_name(e.name().as_ref()) == b"sldLayoutIdLst" => {
+            Event::Empty(e) if local_name(e.name().as_ref()) == "sldLayoutIdLst" => {
                 // Self-closing source list: replace it in place.
                 write_list(&mut writer)?;
                 wrote = true;
             }
-            Event::End(e) if local_name(e.name().as_ref()) == b"sldLayoutIdLst" => {
+            Event::End(e) if local_name(e.name().as_ref()) == "sldLayoutIdLst" => {
                 in_list = false;
             }
-            Event::End(e) if local_name(e.name().as_ref()) == b"sldMaster" && !wrote => {
+            Event::End(e) if local_name(e.name().as_ref()) == "sldMaster" && !wrote => {
                 write_list(&mut writer)?;
                 wrote = true;
                 writer.write_event(Event::End(e.clone())).map_err(|e| Error::xml(part, e))?;
@@ -1087,10 +1087,10 @@ fn attr_value(xml: &str, element_local: &str, attr: &str) -> Option<String> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e))
-                if local_name(e.name().as_ref()) == element_local.as_bytes() =>
+                if local_name(e.name().as_ref()) == element_local =>
             {
                 for a in e.attributes().flatten() {
-                    if a.key.as_ref() == attr.as_bytes() {
+                    if a.key.as_ref() == attr {
                         return a.normalized_value(XmlVersion::Implicit1_0).ok().map(|v| v.into_owned());
                     }
                 }
@@ -1115,15 +1115,15 @@ fn parse_notes_sz(pf: &PresentationFile) -> String {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e))
-                if local_name(e.name().as_ref()) == b"notesSz" =>
+                if local_name(e.name().as_ref()) == "notesSz" =>
             {
                 let mut cx = None;
                 let mut cy = None;
                 for attr in e.attributes().flatten() {
                     if let Ok(val) = attr.normalized_value(XmlVersion::Implicit1_0) {
                         match attr.key.as_ref() {
-                            b"cx" => cx = Some(val.into_owned()),
-                            b"cy" => cy = Some(val.into_owned()),
+                            "cx" => cx = Some(val.into_owned()),
+                            "cy" => cy = Some(val.into_owned()),
                             _ => {}
                         }
                     }

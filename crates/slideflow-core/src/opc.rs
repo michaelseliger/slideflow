@@ -223,7 +223,7 @@ pub fn parse_rels(bytes: &[u8], part_for_errors: &str) -> Result<Vec<Relationshi
             .map_err(|e| Error::xml(part_for_errors, e))?
         {
             Event::Start(ref e) | Event::Empty(ref e)
-                if local_name(e.name().as_ref()) == b"Relationship" =>
+                if local_name(e.name().as_ref()) == "Relationship" =>
             {
                 let mut rel = Relationship {
                     id: String::new(),
@@ -237,10 +237,10 @@ pub fn parse_rels(bytes: &[u8], part_for_errors: &str) -> Result<Vec<Relationshi
                         .map_err(|e| Error::xml(part_for_errors, e))?
                         .into_owned();
                     match attr.key.as_ref() {
-                        b"Id" => rel.id = val,
-                        b"Type" => rel.rel_type = val,
-                        b"Target" => rel.target = val,
-                        b"TargetMode" => rel.external = val.eq_ignore_ascii_case("External"),
+                        "Id" => rel.id = val,
+                        "Type" => rel.rel_type = val,
+                        "Target" => rel.target = val,
+                        "TargetMode" => rel.external = val.eq_ignore_ascii_case("External"),
                         _ => {}
                     }
                 }
@@ -299,7 +299,7 @@ impl ContentTypes {
                 .map_err(|e| Error::xml("[Content_Types].xml", e))?
             {
                 Event::Start(ref e) | Event::Empty(ref e) => {
-                    let name = local_name(e.name().as_ref()).to_vec();
+                    let name = local_name(e.name().as_ref()).to_owned();
                     let mut a1 = None;
                     let mut a2 = None;
                     for attr in e.attributes().flatten() {
@@ -308,17 +308,17 @@ impl ContentTypes {
                             .map_err(|e| Error::xml("[Content_Types].xml", e))?
                             .into_owned();
                         match attr.key.as_ref() {
-                            b"Extension" | b"PartName" => a1 = Some(val),
-                            b"ContentType" => a2 = Some(val),
+                            "Extension" | "PartName" => a1 = Some(val),
+                            "ContentType" => a2 = Some(val),
                             _ => {}
                         }
                     }
                     if let (Some(key), Some(val)) = (a1, a2) {
-                        match name.as_slice() {
-                            b"Default" => {
+                        match name.as_str() {
+                            "Default" => {
                                 ct.defaults.insert(key.to_ascii_lowercase(), val);
                             }
-                            b"Override" => {
+                            "Override" => {
                                 ct.overrides.insert(key, val);
                             }
                             _ => {}
@@ -388,8 +388,8 @@ impl ContentTypes {
 }
 
 /// Strip an XML namespace prefix: `p:sp` → `sp`.
-pub fn local_name(qname: &[u8]) -> &[u8] {
-    match qname.iter().rposition(|&b| b == b':') {
+pub fn local_name(qname: &str) -> &str {
+    match qname.rfind(':') {
         Some(pos) => &qname[pos + 1..],
         None => qname,
     }
