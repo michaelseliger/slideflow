@@ -13,14 +13,14 @@
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
-    "@tanstack/react-virtual": "^3.14.11",
+    "@tanstack/react-virtual": "^3.14.13",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2.5.5",
     "@tauri-apps/plugin-shell": "^2.3.6",
     "canvas-confetti": "^1.9.3",
-    "framer-motion": "^13.2.0",
-    "lucide-react": "^1.44.0",
+    "framer-motion": "^13.4.0",
+    "lucide-react": "^1.47.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "zustand": "^5.0.15"
