@@ -831,9 +831,9 @@ dependencies = [
 
 [[package]]
 name = "font-types"
-version = "0.12.6"
+version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
+checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
 dependencies = [
  "bytemuck",
 ]
@@ -1876,12 +1876,13 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a5b7bed3d16ab428d8fa533640ab805ff50e7ad8a4d00649de1259e70023282"
+checksum = "4edc8db0d972de88e53a085b1f01fb3fbdae7bb0cb7a0ce2b2f8285a412fe3ef"
 dependencies = [
  "bytemuck",
- "font-types 0.12.6",
+ "foldhash",
+ "font-types 0.12.7",
  "once_cell",
  "yoke",
 ]
@@ -2163,7 +2164,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "skrifa 0.48.0",
  "thiserror 2.0.21",
- "write-fonts 0.54.0",
+ "write-fonts 0.54.1",
 ]
 
 [[package]]
@@ -2183,7 +2184,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5213b4825bac3587046330052d61bfac7bd3bd0d203c758d7c2ef726fcea034"
 dependencies = [
  "bytemuck",
- "read-fonts 0.45.0",
+ "read-fonts 0.45.1",
 ]
 
 [[package]]
@@ -2233,7 +2234,7 @@ dependencies = [
  "tokenizers 0.23.2",
  "usvg",
  "walkdir",
- "write-fonts 0.54.0",
+ "write-fonts 0.54.1",
  "zip",
 ]
 
@@ -2981,15 +2982,15 @@ dependencies = [
 
 [[package]]
 name = "write-fonts"
-version = "0.54.0"
+version = "0.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdc27185603bab37df6a9aad9c59d728feb8d6acf72f9c94a2e25d7f8f3bdaea"
+checksum = "55716cfa7e8bcdb90289e07dfac478ccb2e3ec0f9a604fe682c7a03a7984d705"
 dependencies = [
- "font-types 0.12.6",
+ "font-types 0.12.7",
  "indexmap",
  "kurbo",
  "log",
- "read-fonts 0.45.0",
+ "read-fonts 0.45.1",
 ]
 
 [[package]]
