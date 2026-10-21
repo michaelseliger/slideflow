@@ -771,7 +771,7 @@ fn unpack_font_zip(zip_bytes: &[u8], dest_dir: &Path, family: &str) -> Result<us
         if !file.is_file() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file.name().map_err(|e| format!("zip: {e}"))?.to_string();
         let lower = name.to_ascii_lowercase();
         if !(lower.ends_with(".ttf") || lower.ends_with(".otf")) {
             continue;

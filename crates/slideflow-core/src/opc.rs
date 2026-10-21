@@ -81,7 +81,7 @@ impl Package {
             if file.is_dir() {
                 continue;
             }
-            let name = file.name().trim_start_matches('/').to_string();
+            let name = file.name()?.trim_start_matches('/').to_string();
             let mut buf = Vec::with_capacity(file.size() as usize);
             file.read_to_end(&mut buf)
                 .map_err(|e| Error::InvalidPackage(format!("reading {name}: {e}")))?;
