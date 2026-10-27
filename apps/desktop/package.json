@@ -13,27 +13,27 @@
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
-    "@tanstack/react-virtual": "^3.14.20",
+    "@tanstack/react-virtual": "^3.14.22",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.8.3",
     "@tauri-apps/plugin-opener": "^2.7.2",
     "@tauri-apps/plugin-shell": "^2.4.1",
     "canvas-confetti": "^1.9.3",
-    "framer-motion": "^14.3.0",
-    "lucide-react": "^1.57.0",
+    "framer-motion": "^14.6.0",
+    "lucide-react": "^1.61.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "zustand": "^5.0.15"
+    "zustand": "^5.0.16"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2.12.3",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/canvas-confetti": "^1.9.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   }
 }
