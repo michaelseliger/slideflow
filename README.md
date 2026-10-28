@@ -43,8 +43,10 @@ Get the latest version for your platform:
   - **Linux** — `.deb` / `.AppImage` / `.rpm`
 
 > [!NOTE]
-> Builds are currently **unsigned**. On macOS you may need to right-click the
-> app and choose *Open* the first time to bypass Gatekeeper.
+> macOS builds are signed with a Developer ID and notarized by Apple, and
+> Windows builds are signed via Azure Artifact Signing. Windows SmartScreen may
+> still warn on a new release until it has built up download reputation — choose
+> *More info → Run anyway*.
 
 ## Why Slideflow
 
@@ -155,6 +157,19 @@ machine.**
 - **Least-privilege by default.** The app ships a tight capability set and a
   strict Content-Security-Policy — the interface can't phone home even if it
   wanted to.
+
+Your slides, the index, and your searches never leave your machine. The only
+outbound connections are:
+
+- **Update checks** — at launch and once a day, the app fetches `latest.json`
+  from GitHub Releases; when an update exists, it downloads the signed update
+  package from there too. On by default; turn off *Automatic updates* in
+  Settings. No content is sent — GitHub sees only standard request metadata
+  (IP address, user agent).
+- **Optional AI search** — a one-time model download (~490 MB, SHA-256-verified)
+  from Hugging Face, only after you opt in.
+- **Optional font downloads** — Google Fonts (via GitHub) and Microsoft Aptos,
+  only after you confirm the download dialog.
 
 You point Slideflow at folders you already own, and that's the entire trust
 boundary.
@@ -272,12 +287,16 @@ Two GitHub Actions workflows live in `.github/workflows/`:
 
 - **`ci.yml`** (every push / PR): builds + tests `slideflow-core` on Linux,
   macOS and Windows, type-checks and builds the frontend, and runs `clippy`
-  (currently non-blocking).
+  (blocking, `-D warnings`).
 - **`release.yml`** (push a `v*` tag, or run manually): builds installable
   bundles on every platform and, for a tag push, attaches them to a **draft**
   GitHub release — macOS `.dmg` (Apple Silicon + Intel), Linux
-  `.deb` / `.AppImage` / `.rpm`, and Windows `.msi` / `.exe`. Artifacts are
-  unsigned (no code signing / notarization configured yet).
+  `.deb` / `.AppImage` / `.rpm`, and Windows `.msi` / `.exe`. macOS bundles
+  are Developer ID–signed and notarized (`APPLE_*` secrets), Windows installers
+  are signed via Azure Artifact Signing (`AZURE_*` secrets); without those
+  secrets the build falls back to unsigned. See
+  [`docs/RELEASE_SIGNING.md`](docs/RELEASE_SIGNING.md) and
+  [`docs/WINDOWS_SIGNING.md`](docs/WINDOWS_SIGNING.md).
 
 To cut a release: `git tag v0.2.1 && git push origin v0.2.1`, then publish the
 drafted release once the bundles are attached.

@@ -103,8 +103,9 @@ If all three pass, users can double-click with no warning.
 
 ## Un-breaking an unsigned build by hand (stopgap)
 
-Until the secrets are in place, an already-downloaded unsigned DMG can be made
-to run locally:
+Release builds are signed and notarized. If a build ever comes out unsigned
+(e.g. from a fork, or with the `APPLE_*` secrets missing), an already-downloaded
+DMG can be made to run locally:
 
 ```bash
 # after copying Slideflow.app to /Applications:

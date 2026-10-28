@@ -29,7 +29,7 @@ pnpm tauri build   # production bundle → src-tauri/target/release/bundle/
 
 Engine examples double as manual harnesses: `cargo run --release -p slideflow-core --example <corpus_check|render_demo|compose_demo|seed_library> …`. Regenerate the corpus: `python3 scripts/generate_examples.py` (deterministic, needs python-pptx ≥ 1.0).
 
-**CI/release:** clippy (`-D warnings`, core + cli) is blocking; `cargo fmt --check` isn't gated. The optional `embeddings` feature (candle-backed E5) is a non-blocking `cargo check` only. Push a `v*` tag → `release.yml` builds unsigned bundles on all platforms into a draft release.
+**CI/release:** clippy (`-D warnings`, core + cli) is blocking; `cargo fmt --check` isn't gated. The optional `embeddings` feature (candle-backed E5) is a non-blocking `cargo check` only. Push a `v*` tag → `release.yml` builds bundles on all platforms into a draft release — macOS signed + notarized (`APPLE_*` secrets), Windows signed via Azure Artifact Signing (`AZURE_*`), unsigned fallback when secrets are missing.
 
 **Git hooks** (`.githooks/`, enable per clone: `git config core.hooksPath .githooks`; bypass: `--no-verify`). Pre-commit gates by what's staged: clippy `-D warnings` + `core`/`cli` tests for `crates/`/manifests; `tsc --noEmit` + `pnpm test:tray` for `apps/desktop/src/` (skips the slow vite build).
 

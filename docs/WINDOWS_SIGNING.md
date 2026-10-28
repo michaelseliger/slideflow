@@ -30,7 +30,7 @@ six repository secrets.
 macOS notarization gives you a clean install with **zero warnings** the moment
 Apple approves the build. Windows has no equivalent. What a signature buys you:
 
-- **Unsigned today:** SmartScreen says *"Windows protected your PC — unknown
+- **Unsigned (no `AZURE_*` secrets):** SmartScreen says *"Windows protected your PC — unknown
   publisher"* with only a hidden "Run anyway". Scary.
 - **Signed with Azure Artifact Signing (this doc):** the publisher name shows as
   **you/your org** and the UAC prompt is blue instead of yellow. But SmartScreen
