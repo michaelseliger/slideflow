@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Slideflow. Versions follow [semver](https://semver.org); dates are ISO.
 
+## [1.1.0] — 2026-10-28
+
+### Fixed
+
+- **Search results can no longer inject markup.** Text from a deck that looks like HTML is now shown literally in search snippets instead of being interpreted by the app; matched terms are still highlighted.
+- **Oversized or malicious decks can't exhaust memory.** A `.pptx` whose parts decompress to an implausible size (a "zip bomb", or a file lying about its sizes) is now rejected during the library scan instead of stalling or crashing the app. Real decks are unaffected (limits: 512 MiB per part, 2 GiB per file).
+
+### Improved
+
+- Broad dependency refresh across the app and engine — Tauri 2.12, `zip` 9, `quick-xml` 0.42, framer-motion 14 and many minor/patch updates. Same features and behaviour, current foundations.
+
 ## [1.0.0] — 2026-07-24
 
 ### Added
