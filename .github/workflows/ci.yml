@@ -8,9 +8,9 @@
 #     runners). The CLI is also release-built to catch profile-only breakage.
 #   * the React/TS frontend under apps/desktop (type-check + production build).
 #
-# `clippy` runs but is intentionally NON-BLOCKING (continue-on-error) — see the
-# comment on that job. `cargo fmt --check` is not gated at all: the crate does
-# not currently pass it, so adding it would make CI red on unrelated code.
+# `clippy` is BLOCKING (`-D warnings`) for the root workspace. `cargo fmt
+# --check` is not gated at all: the crate does not currently pass it, so adding
+# it would make CI red on unrelated code.
 name: CI
 
 on:
@@ -128,15 +128,13 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo check --all-targets
 
-  # Lint. NON-BLOCKING (continue-on-error): slideflow-core currently trips a
-  # handful of clippy lints (e.g. while_let_loop, enum_variant_names) that must
-  # be fixed inside crates/ in a dedicated PR. Until then this job reports lint
-  # status without failing the pipeline. Flip `continue-on-error` to false once
-  # the crate is clean.
+  # Lint. BLOCKING: any clippy warning in slideflow-core or slideflow-cli fails
+  # the pipeline (mirrors the pre-commit hook). Toolchain is floating stable, so
+  # a new Rust release can introduce lints that turn this red without a code
+  # change — fix them rather than relaxing the gate.
   clippy:
-    name: clippy (non-blocking)
+    name: clippy
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -144,4 +142,4 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
-        run: cargo clippy -p slideflow-core --all-targets -- -D warnings
+        run: cargo clippy -p slideflow-core -p slideflow-cli --all-targets -- -D warnings
