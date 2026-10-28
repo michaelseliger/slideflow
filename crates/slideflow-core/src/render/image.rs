@@ -1122,15 +1122,15 @@ impl EmfCtx {
                 }
             }
             PolyKind::Bezier | PolyKind::BezierTo => {
-                for g in rest.chunks_exact(3) {
+                for &[(x1, y1), (x2, y2), (x, y)] in rest.as_chunks::<3>().0 {
                     frag.push_str(&format!(
                         "C{} {} {} {} {} {} ",
-                        fnum(g[0].0),
-                        fnum(g[0].1),
-                        fnum(g[1].0),
-                        fnum(g[1].1),
-                        fnum(g[2].0),
-                        fnum(g[2].1),
+                        fnum(x1),
+                        fnum(y1),
+                        fnum(x2),
+                        fnum(y2),
+                        fnum(x),
+                        fnum(y),
                     ));
                 }
             }
