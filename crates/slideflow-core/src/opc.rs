@@ -61,6 +61,14 @@ pub struct Relationship {
     pub external: bool,
 }
 
+/// Largest single part we inflate. Packages come from untrusted folders, so a
+/// zip bomb (or a header lying about its size) must fail cleanly instead of
+/// exhausting memory or aborting on a huge preallocation.
+pub const MAX_PART_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Largest total inflated size of one package (and largest file we read).
+pub const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// An in-memory OPC package.
 #[derive(Debug, Clone, Default)]
 pub struct Package {
@@ -69,22 +77,54 @@ pub struct Package {
 
 impl Package {
     pub fn open(path: &Path) -> Result<Self> {
+        let len = std::fs::metadata(path).map_err(|e| Error::io(path, e))?.len();
+        if len > MAX_PACKAGE_BYTES {
+            return Err(Error::InvalidPackage(format!(
+                "file is {len} bytes, over the {MAX_PACKAGE_BYTES}-byte limit"
+            )));
+        }
         let bytes = std::fs::read(path).map_err(|e| Error::io(path, e))?;
         Self::from_bytes(&bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_limited(bytes, MAX_PART_BYTES, MAX_PACKAGE_BYTES)
+    }
+
+    /// [`Package::from_bytes`] with explicit inflate limits (per part, total).
+    /// Enforced on the bytes actually inflated, not just the declared sizes.
+    fn from_bytes_limited(bytes: &[u8], max_part: u64, max_total: u64) -> Result<Self> {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
         let mut parts = BTreeMap::new();
+        let mut total: u64 = 0;
         for i in 0..zip.len() {
-            let mut file = zip.by_index(i)?;
+            let file = zip.by_index(i)?;
             if file.is_dir() {
                 continue;
             }
             let name = file.name()?.trim_start_matches('/').to_string();
-            let mut buf = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut buf)
+            let too_big = |what: &str| {
+                Error::InvalidPackage(format!("{name}: {what} exceeds the inflate limit"))
+            };
+            let declared = file.size();
+            if declared > max_part {
+                return Err(too_big("part"));
+            }
+            if total + declared > max_total {
+                return Err(too_big("package"));
+            }
+            let mut buf = Vec::with_capacity(declared as usize);
+            file.take(max_part + 1)
+                .read_to_end(&mut buf)
                 .map_err(|e| Error::InvalidPackage(format!("reading {name}: {e}")))?;
+            let len = buf.len() as u64;
+            if len > max_part {
+                return Err(too_big("part"));
+            }
+            total += len;
+            if total > max_total {
+                return Err(too_big("package"));
+            }
             parts.insert(name, buf);
         }
         if !parts.contains_key("[Content_Types].xml") {
@@ -398,6 +438,42 @@ pub fn local_name(qname: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deflated zip with `[Content_Types].xml` plus `(name, zero bytes)` parts.
+    fn zip_with(parts: &[(&str, usize)]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("[Content_Types].xml", opts).unwrap();
+        w.write_all(b"<Types/>").unwrap();
+        for (name, len) in parts {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(&vec![0u8; *len]).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn inflate_within_limits_succeeds() {
+        let pkg = Package::from_bytes_limited(&zip_with(&[("a.bin", 900)]), 1000, 2000).unwrap();
+        assert_eq!(pkg.part("a.bin").map(<[u8]>::len), Some(900));
+    }
+
+    #[test]
+    fn oversized_part_is_rejected() {
+        // 100 KB of zeros deflates to a few hundred bytes — a miniature zip bomb.
+        let bytes = zip_with(&[("bomb.bin", 100_000)]);
+        assert!(bytes.len() < 1000);
+        let err = Package::from_bytes_limited(&bytes, 1000, 1_000_000).unwrap_err();
+        assert!(err.to_string().contains("bomb.bin"), "{err}");
+    }
+
+    #[test]
+    fn oversized_package_total_is_rejected() {
+        let bytes = zip_with(&[("a.bin", 600), ("b.bin", 600)]);
+        assert!(Package::from_bytes_limited(&bytes, 1000, 1000).is_err());
+        assert!(Package::from_bytes_limited(&bytes, 1000, 1300).is_ok());
+    }
 
     #[test]
     fn rels_part_names() {

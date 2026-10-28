@@ -915,7 +915,7 @@ impl Library {
 
         let sql = format!(
             "SELECT {SLIDE_COLS}, {DECK_COLS}, \
-             snippet(slides_fts, 1, '<mark>', '</mark>', '…', 12), {BM25} \
+             snippet(slides_fts, 1, '{MARK_OPEN}', '{MARK_CLOSE}', '…', 12), {BM25} \
              FROM slides_fts \
              JOIN slides s ON s.id = slides_fts.rowid \
              JOIN decks d ON d.id = s.deck_id{where_sql} \
@@ -932,7 +932,8 @@ impl Library {
             .query_map(params_from_iter(params), |row| {
                 let slide = row_to_slide(row, 0)?;
                 let deck = row_to_deck(row, SLIDE_COL_COUNT)?;
-                let snippet: String = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT)?;
+                let raw: String = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT)?;
+                let snippet = mark_snippet(&raw);
                 let rank: f64 = row.get(SLIDE_COL_COUNT + DECK_COL_COUNT + 1)?;
                 Ok(SearchHit { slide, deck, snippet, score: -rank })
             })?
@@ -2381,6 +2382,20 @@ fn filters_active(f: &SearchFilters) -> bool {
         || f.tag_id.is_some()
 }
 
+/// Private-use sentinels FTS5 `snippet()` wraps matches in. The body is
+/// untrusted deck text, so the snippet is HTML-escaped as a whole and only then
+/// are the sentinels turned into `<mark>` tags — the frontend renders it as HTML.
+const MARK_OPEN: char = '\u{E000}';
+const MARK_CLOSE: char = '\u{E001}';
+
+/// Turn a sentinel-marked FTS snippet into safe HTML: everything escaped except
+/// the `<mark>` wrapping.
+fn mark_snippet(raw: &str) -> String {
+    html_escape(raw)
+        .replace(MARK_OPEN, "<mark>")
+        .replace(MARK_CLOSE, "</mark>")
+}
+
 /// Fallback snippet for a hit with no FTS match (semantic-only): the first ~160
 /// chars of the body, HTML-escaped like the browse snippets.
 fn fallback_snippet(body: &str) -> String {
@@ -2869,6 +2884,35 @@ mod tests {
     use std::collections::HashSet;
     use std::fs::OpenOptions;
     use std::sync::Arc;
+
+    #[test]
+    fn fts_snippet_escapes_markup_from_deck_text() {
+        // Slide text is untrusted and the frontend renders snippets as HTML:
+        // only the match wrapping may come through as a tag.
+        let dir = tempfile::tempdir().unwrap();
+        DeckSpec::new("Evil")
+            .slide(SlideSpec::new("Hi").bullets(&["<img src=x onerror=alert(1)> payload & \"more\""]))
+            .write_to(&dir.path().join("evil.pptx"))
+            .unwrap();
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.add_root(dir.path()).unwrap();
+        scan_silent(&mut lib);
+
+        let hits = lib.search("payload", &SearchFilters::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        let s = &hits[0].snippet;
+        assert!(!s.contains("<img"), "raw markup leaked: {s}");
+        assert!(s.contains("&lt;img src=x onerror=alert(1)&gt;"), "snippet was {s}");
+        assert!(s.contains("<mark>payload</mark>"), "snippet was {s}");
+        assert!(s.contains("&amp; &quot;more&quot;"), "snippet was {s}");
+        assert!(!s.contains(MARK_OPEN) && !s.contains(MARK_CLOSE));
+    }
+
+    #[test]
+    fn mark_snippet_escapes_everything_but_marks() {
+        let raw = format!("a<b>{MARK_OPEN}x{MARK_CLOSE}</b>");
+        assert_eq!(mark_snippet(&raw), "a&lt;b&gt;<mark>x</mark>&lt;/b&gt;");
+    }
 
     fn embedding_rows(lib: &Library) -> i64 {
         lib.conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap()
