@@ -2,6 +2,12 @@
 
 All notable user-facing changes to Slideflow. Versions follow [semver](https://semver.org); dates are ISO.
 
+## [Unreleased]
+
+### Improved
+
+- **Semantic search no longer dead-ends on exact words.** When Semantic mode finds nothing but the words do appear in your slides (names, product codes), the empty state says how many slides contain them and offers *Switch to Hybrid*.
+
 ## [1.1.0] — 2026-10-28
 
 ### Fixed

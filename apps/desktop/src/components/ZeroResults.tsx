@@ -1,4 +1,4 @@
-import { Search, RefreshCw } from "lucide-react";
+import { Search, RefreshCw, Sparkles } from "lucide-react";
 import { useApp } from "../stores/useApp";
 import { basename } from "../lib/utils";
 
@@ -7,6 +7,7 @@ import { basename } from "../lib/utils";
 export default function ZeroResults() {
   const roots = useApp((s) => s.roots);
   const query = useApp((s) => s.query);
+  const keywordMatches = useApp((s) => s.keywordMatches);
 
   return (
     <div className="flex h-full flex-col items-center justify-center bg-canvas px-8 text-center text-subtle">
@@ -16,7 +17,13 @@ export default function ZeroResults() {
       </h2>
 
       <p className="mt-1.5 max-w-[340px] text-body text-subtle">
-        {roots.length > 0 ? (
+        {keywordMatches > 0 ? (
+          <>
+            Semantic search matches by meaning, so exact words like names can
+            miss. <span className="text-ink">{keywordMatches === 1 ? "1 slide contains" : `${keywordMatches} slides contain`}</span>{" "}
+            these words.
+          </>
+        ) : roots.length > 0 ? (
           <>
             Searched <span className="text-ink">{scopeName(roots)}</span>. Try a
             broader query, or re-index in case the files moved.
@@ -27,6 +34,15 @@ export default function ZeroResults() {
       </p>
 
       <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+        {keywordMatches > 0 && (
+          <button
+            onClick={() => useApp.getState().setSearchMode("hybrid")}
+            className="flex items-center gap-1.5 rounded-[6px] bg-accent px-3 py-1.5 text-caption font-medium text-white"
+          >
+            <Sparkles size={13} />
+            Switch to Hybrid
+          </button>
+        )}
         <button
           onClick={() => void useApp.getState().startScan()}
           className="flex items-center gap-1.5 rounded-[6px] border border-hairline/10 px-3 py-1.5 text-caption text-ink hover:bg-ink/5"

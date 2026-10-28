@@ -174,6 +174,9 @@ interface AppState {
   /** Retrieval mode for text queries; applied only while the semantic model is
    *  ready (otherwise searches stay lexical). Persisted. */
   searchMode: SearchMode;
+  /** Keyword hits for the current query when a Semantic search came back
+   *  empty — lets the zero-results view offer switching to Hybrid. */
+  keywordMatches: number;
   exportCounts: Record<string, number>;
 
   // --- selection ---
@@ -328,6 +331,7 @@ export const useApp = create<AppState>((set, get) => ({
   grouping: "flat",
   sortMode: loadSortMode(),
   searchMode: loadSearchMode(),
+  keywordMatches: 0,
   exportCounts: {},
 
   selectedIds: new Set(),
@@ -449,7 +453,7 @@ export const useApp = create<AppState>((set, get) => ({
     // The stats and duplicates views fetch their own data; keep the grid empty
     // behind them.
     if (nav.type === "stats" || nav.type === "duplicates") {
-      set({ results: [], selectedIds: new Set(), anchorIndex: null, searching: false });
+      set({ results: [], keywordMatches: 0, selectedIds: new Set(), anchorIndex: null, searching: false });
       return;
     }
 
@@ -501,6 +505,14 @@ export const useApp = create<AppState>((set, get) => ({
         hits = await api.search(query, eff);
       }
 
+      // Semantic mode drops anything below its similarity floor, so exact
+      // text (e.g. a name) can come back empty. Count keyword hits in the same
+      // scope so the zero-results view can offer Hybrid instead of dead-ending.
+      let keywordMatches = 0;
+      if (hits.length === 0 && eff.search_mode === "semantic") {
+        keywordMatches = (await api.search(query, { ...eff, search_mode: "lexical" })).length;
+      }
+
       if (token !== searchToken) return; // stale — a newer query superseded us.
       // Browse mode (empty query, non-deck nav) honors the user's sort; search
       // stays bm25-ranked and explicit deck-nav keeps slide order.
@@ -508,7 +520,7 @@ export const useApp = create<AppState>((set, get) => ({
         query.trim() === "" && nav.type !== "deck"
           ? sortHits(hits, get().sortMode, get().exportCounts)
           : hits;
-      set({ results: ordered, selectedIds: new Set(), anchorIndex: null });
+      set({ results: ordered, keywordMatches, selectedIds: new Set(), anchorIndex: null });
 
       // Remember settled searches for the stats view: only after the user
       // pauses typing for a moment, so keystroke prefixes don't pile up.
@@ -523,7 +535,7 @@ export const useApp = create<AppState>((set, get) => ({
     } catch (err) {
       if (token === searchToken) {
         toast.error(`Search failed: ${String(err)}`);
-        set({ results: [] });
+        set({ results: [], keywordMatches: 0 });
       }
     } finally {
       window.clearTimeout(slowTimer);
