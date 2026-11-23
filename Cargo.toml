@@ -14,7 +14,7 @@ license = "MIT"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"
 roxmltree = "0.21"
-rusqlite = { version = "0.42", features = ["bundled", "functions"] }
+rusqlite = { version = "0.43", features = ["bundled", "functions"] }
 notify = "8"
 walkdir = "2"
 # Pure-Rust glob matching (aho-corasick/regex-automata/bstr) for per-root
